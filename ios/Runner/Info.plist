@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleDisplayName</key>
+    <string>Raahi</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Raahi</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(FLUTTER_BUILD_NAME)</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleVersion</key>
+    <string>$(FLUTTER_BUILD_NUMBER)</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+    <key>UIMainStoryboardFile</key>
+    <string>Main</string>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    
+    <!-- Location Permissions -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>RideApp needs access to your location to show nearby drivers and track your ride.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>RideApp needs access to your location to track rides and find nearby drivers.</string>
+    <key>NSLocationAlwaysUsageDescription</key>
+    <string>RideApp needs access to your location in the background to continue tracking your ride.</string>
+    
+    <!-- Camera & Photo Library (required for driver onboarding documents) -->
+    <key>NSCameraUsageDescription</key>
+    <string>Raahi needs camera access to capture your driver licence and profile photo for verification.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Raahi needs photo library access to upload your driver licence and profile photo for verification.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Raahi needs permission to save photos to your library.</string>
+    
+    <!-- Background Modes -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>fetch</string>
+        <string>location</string>
+        <string>remote-notification</string>
+    </array>
+    
+    <!-- Google Maps -->
+    <key>io.flutter.embedded_views_preview</key>
+    <true/>
+    
+    <!-- App Transport Security: allow HTTP to backend (dev/LAN/production IP) -->
+    <!-- For production with custom domain, use HTTPS and restrict exceptions -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>139.59.34.68</key>
+            <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict>
+            <key>localhost</key>
+            <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict>
+            <key>127.0.0.1</key>
+            <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict>
+        </dict>
+    </dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+</dict>
+</plist>
+
+
+
+
+
+
