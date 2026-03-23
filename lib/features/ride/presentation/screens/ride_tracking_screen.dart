@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/models/driver.dart';
 import '../../../../core/models/location.dart';
 import '../../../../core/models/ride.dart';
@@ -14,10 +15,13 @@ import '../../../../core/services/sse_service.dart';
 import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/router/app_routes.dart';
-import '../../../home/presentation/widgets/custom_map_view.dart' show CustomMapView, RidePhase;
+import '../../../home/presentation/widgets/custom_map_view.dart'
+    show CustomMapView, RidePhase;
 import '../../../chat/presentation/screens/ride_chat_screen.dart';
 import '../../../chat/providers/chat_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/widgets/upi_app_icon.dart';
 import '../../providers/ride_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 
@@ -35,7 +39,8 @@ class RideTrackingScreen extends ConsumerStatefulWidget {
   ConsumerState<RideTrackingScreen> createState() => _RideTrackingScreenState();
 }
 
-class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
+class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
+    with WidgetsBindingObserver {
   Ride? _ride;
   Driver? _driver;
   LocationCoordinate? _driverLocation;
@@ -51,18 +56,21 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
   bool _autoChatHandled = false;
   bool _pendingPushChatOpen = false;
   StreamSubscription<Map<String, dynamic>>? _chatOpenSubscription;
-  
+
   // Driver distance/ETA tracking
   double _driverDistanceMeters = 0;
   int _driverEtaMinutes = 0;
   DateTime? _lastSharedEtaAt;
-  
+
   // Periodic driver location polling
   Timer? _locationPollTimer;
+  bool _completionHandled = false;
+  bool _ratingSheetOpen = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeChatProvider();
     _loadRideDetails();
     _subscribeToUpdates();
@@ -76,15 +84,16 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     final currentUserId = authState.user?.id ?? '';
     if (currentUserId.isEmpty) return;
     ref.read(chatProvider(widget.rideId).notifier).initialize(
-      currentUserId: currentUserId,
-      passengerId: currentUserId,
-      isDriver: false,
-    );
+          currentUserId: currentUserId,
+          passengerId: currentUserId,
+          isDriver: false,
+        );
     ref.read(chatProvider(widget.rideId).notifier).closeChat();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _locationPollTimer?.cancel();
     _sseSubscription?.cancel();
     _chatOpenSubscription?.cancel();
@@ -95,8 +104,18 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Ensure completion transition is not missed after background/resume.
+      unawaited(_syncRideStateFromBackend());
+    }
+  }
+
   void _subscribeToNotificationChatOpens() {
-    _chatOpenSubscription = pushNotificationService.chatOpenStream.listen((payload) {
+    _chatOpenSubscription =
+        pushNotificationService.chatOpenStream.listen((payload) {
       final targetRideId = payload['rideId']?.toString() ?? '';
       if (targetRideId.isEmpty || targetRideId != widget.rideId) return;
       if (!mounted || _chatSheetOpen) return;
@@ -111,7 +130,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
 
   /// Subscribe directly to Socket.io driver location events
   void _subscribeToSocketLocationUpdates() {
-    _unsubscribeSocketLocation = webSocketService.subscribe('driver_location_update', (message) {
+    _unsubscribeSocketLocation =
+        webSocketService.subscribe('driver_location_update', (message) {
       final data = message.data;
       if (data is Map) {
         final mapData = Map<String, dynamic>.from(data);
@@ -127,24 +147,24 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
   /// Poll for driver location every 5 seconds as backup
   void _startLocationPolling() {
     _locationPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (_ride != null && 
-          _ride!.status != RideStatus.completed && 
+      if (_ride != null &&
+          _ride!.status != RideStatus.completed &&
           _ride!.status != RideStatus.cancelled) {
         _pollDriverLocation();
       }
     });
   }
-  
+
   Future<void> _pollDriverLocation() async {
     try {
       final rideData = await apiClient.getRide(widget.rideId);
       final ride = Ride.fromJson(_extractRidePayload(rideData));
-      
+
       // Update driver location if available
       if (ride.driver?.currentLocation != null) {
         final newLoc = ride.driver!.currentLocation!;
-        if (_driverLocation == null || 
-            _driverLocation!.lat != newLoc.lat || 
+        if (_driverLocation == null ||
+            _driverLocation!.lat != newLoc.lat ||
             _driverLocation!.lng != newLoc.lng) {
           setState(() {
             _driverLocation = newLoc;
@@ -154,7 +174,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
           _updateRealtimeEtaFromDriverLocation(newLoc);
         }
       }
-      
+
       // Also update ride status if changed
       if (ride.status != _ride?.status) {
         setState(() {
@@ -162,8 +182,34 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
           _statusMessage = _getStatusMessage(ride.status);
         });
       }
+
+      if (ride.status == RideStatus.completed) {
+        _handleCompletionTransition();
+      } else if (ride.status == RideStatus.cancelled) {
+        _handleRideCancelled({'reason': 'Ride was cancelled'});
+      }
     } catch (e) {
       // Silently ignore polling errors
+    }
+  }
+
+  Future<void> _syncRideStateFromBackend() async {
+    if (!mounted) return;
+    try {
+      final rideData = await apiClient.getRide(widget.rideId);
+      final ride = Ride.fromJson(_extractRidePayload(rideData));
+      if (!mounted) return;
+      setState(() {
+        _ride = ride;
+        _statusMessage = _getStatusMessage(ride.status);
+      });
+      if (ride.status == RideStatus.completed) {
+        _handleCompletionTransition();
+      } else if (ride.status == RideStatus.cancelled) {
+        _handleRideCancelled({'reason': 'Ride was cancelled'});
+      }
+    } catch (_) {
+      // Best-effort sync only.
     }
   }
 
@@ -176,17 +222,18 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
       // pre-pickup phases must stay on DriverAssignedScreen.
       if (_isPrePickupPhase(ride.status)) {
         if (mounted) {
-          context.go('${AppRoutes.driverAssigned}?rideId=${widget.rideId}&openChat=${widget.autoOpenChat ? 'true' : 'false'}');
+          context.go(
+              '${AppRoutes.driverAssigned}?rideId=${widget.rideId}&openChat=${widget.autoOpenChat ? 'true' : 'false'}');
         }
         return;
       }
-      
+
       setState(() {
         _ride = ride;
         _driver = ride.driver;
         _isLoading = false;
         _statusMessage = _getStatusMessage(ride.status);
-        
+
         // Set initial driver location from ride.driver if available
         if (ride.driver?.currentLocation != null) {
           _driverLocation = ride.driver!.currentLocation;
@@ -272,9 +319,12 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
   void _handleChatMessage(Map<String, dynamic> data) {
     // Forward chat message to the chat provider if it exists
     try {
-      ref.read(chatProvider(widget.rideId).notifier).handleExternalChatMessage(data);
+      ref
+          .read(chatProvider(widget.rideId).notifier)
+          .handleExternalChatMessage(data);
     } catch (e) {
-      debugPrint('Chat provider not initialized, message will be loaded on chat open: $e');
+      debugPrint(
+          'Chat provider not initialized, message will be loaded on chat open: $e');
     }
   }
 
@@ -287,7 +337,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
       Driver? updatedDriver = _driver;
       if (data['driver'] != null && data['driver'] is Map<String, dynamic>) {
         try {
-          updatedDriver = Driver.fromJson(data['driver'] as Map<String, dynamic>);
+          updatedDriver =
+              Driver.fromJson(data['driver'] as Map<String, dynamic>);
         } catch (_) {}
       }
 
@@ -300,25 +351,31 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
         _updateRealtimeEtaFromDriverLocation(_driverLocation!);
       }
 
-      // If ride completed, show the rating bottom sheet
+      // If ride completed, enter completion flow once.
       if (status == RideStatus.completed) {
-        _showRatingBottomSheet();
+        _handleCompletionTransition();
       }
       _maybeAutoOpenChat();
     }
   }
 
+  void _handleCompletionTransition() {
+    if (!mounted || _completionHandled) return;
+    _completionHandled = true;
+    _showRatingBottomSheet();
+  }
+
   void _handleLocationUpdate(Map<String, dynamic> data) {
     // Use shared ETA from driver if provided (ensures consistency)
     final driverEta = _extractSharedEtaMinutes(data);
-    
+
     final location = data['driverLocation'] as Map<String, dynamic>?;
     if (location != null) {
       final lat = (location['latitude'] as num?)?.toDouble();
       final lng = (location['longitude'] as num?)?.toDouble();
-      final heading = (location['heading'] as num?)?.toDouble() ?? 
-                      (data['heading'] as num?)?.toDouble();
-      
+      final heading = (location['heading'] as num?)?.toDouble() ??
+          (data['heading'] as num?)?.toDouble();
+
       if (lat != null && lng != null) {
         final nextLoc = LocationCoordinate(lat: lat, lng: lng);
         setState(() {
@@ -332,18 +389,19 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
           }
         });
         // Only calculate locally if driver didn't provide ETA
-        if ((driverEta == null || driverEta <= 0) && _shouldUseLocalEtaFallback()) {
+        if ((driverEta == null || driverEta <= 0) &&
+            _shouldUseLocalEtaFallback()) {
           _updateRealtimeEtaFromDriverLocation(nextLoc);
         }
       }
     } else {
       // Try alternate data structure (direct lat/lng in data)
-      final lat = (data['lat'] as num?)?.toDouble() ?? 
-                  (data['latitude'] as num?)?.toDouble();
-      final lng = (data['lng'] as num?)?.toDouble() ?? 
-                  (data['longitude'] as num?)?.toDouble();
+      final lat = (data['lat'] as num?)?.toDouble() ??
+          (data['latitude'] as num?)?.toDouble();
+      final lng = (data['lng'] as num?)?.toDouble() ??
+          (data['longitude'] as num?)?.toDouble();
       final heading = (data['heading'] as num?)?.toDouble();
-      
+
       if (lat != null && lng != null) {
         final nextLoc = LocationCoordinate(lat: lat, lng: lng);
         setState(() {
@@ -357,7 +415,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
           }
         });
         // Only calculate locally if driver didn't provide ETA
-        if ((driverEta == null || driverEta <= 0) && _shouldUseLocalEtaFallback()) {
+        if ((driverEta == null || driverEta <= 0) &&
+            _shouldUseLocalEtaFallback()) {
           _updateRealtimeEtaFromDriverLocation(nextLoc);
         }
       }
@@ -369,7 +428,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     if (direct != null) return direct;
     final payload = data['payload'];
     if (payload is Map) {
-      final fromPayload = _parseEtaValue(payload['etaMinutes'] ?? payload['eta_minutes']);
+      final fromPayload =
+          _parseEtaValue(payload['etaMinutes'] ?? payload['eta_minutes']);
       if (fromPayload != null) return fromPayload;
     }
     return null;
@@ -384,7 +444,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
 
   bool _shouldUseLocalEtaFallback() {
     if (_lastSharedEtaAt == null) return true;
-    return DateTime.now().difference(_lastSharedEtaAt!) > const Duration(seconds: 12);
+    return DateTime.now().difference(_lastSharedEtaAt!) >
+        const Duration(seconds: 12);
   }
 
   void _updateRealtimeEtaFromDriverLocation(LocationCoordinate driverLoc) {
@@ -403,7 +464,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
       target.lng,
     );
     final avgKmph = inProgress ? 24.0 : 20.0;
-    final etaMinutes = ((distanceMeters / 1000) / avgKmph * 60).ceil().clamp(1, 180);
+    final etaMinutes =
+        ((distanceMeters / 1000) / avgKmph * 60).ceil().clamp(1, 180);
 
     if (!mounted) return;
     setState(() {
@@ -431,22 +493,25 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Ride Cancelled'),
-        content: Text(data['reason'] as String? ?? 'Your ride has been cancelled.'),
+        title: Text(ref.tr('ride_cancelled')),
+        content:
+            Text(data['reason'] as String? ?? 'Your ride has been cancelled.'),
         actions: [
           ElevatedButton(
             onPressed: () {
-              Navigator.pop(context);
-              context.go(AppRoutes.findTrip);
+              Navigator.pop(ctx);
+              // Navigate to services screen (ride booking), not findTrip or home
+              if (mounted) context.go(AppRoutes.services);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.primary,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
             ),
-            child: const Text('OK'),
+            child: Text(ref.tr('ok')),
           ),
         ],
       ),
@@ -455,6 +520,9 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
 
   /// Show a beautiful rating bottom sheet with interactive stars and feedback
   void _showRatingBottomSheet() {
+    if (!mounted || _ride == null || _ratingSheetOpen) return;
+    _ratingSheetOpen = true;
+
     // Hide bottom card to make it immersive
     setState(() => _showBottomCard = false);
 
@@ -474,7 +542,9 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
           // Clear ride state so banner disappears
           ref.read(activeRideProvider.notifier).clearActiveRide();
           ref.read(rideBookingProvider.notifier).reset();
-          nav.go(AppRoutes.findTrip);
+          _ratingSheetOpen = false;
+          // Navigate to services screen (ride booking) for easy rebooking
+          nav.go(AppRoutes.services);
         },
         onSkip: () {
           final nav = GoRouter.of(context);
@@ -482,10 +552,14 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
           // Clear ride state so banner disappears
           ref.read(activeRideProvider.notifier).clearActiveRide();
           ref.read(rideBookingProvider.notifier).reset();
-          nav.go(AppRoutes.findTrip);
+          _ratingSheetOpen = false;
+          // Navigate to services screen (ride booking) for easy rebooking
+          nav.go(AppRoutes.services);
         },
       ),
-    );
+    ).whenComplete(() {
+      _ratingSheetOpen = false;
+    });
   }
 
   Future<void> _submitRating(double rating, String? feedback) async {
@@ -499,8 +573,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Thanks for your feedback!'),
+          SnackBar(
+            content: Text(ref.tr('thanks_feedback')),
             backgroundColor: AppColors.success,
             behavior: SnackBarBehavior.floating,
           ),
@@ -510,8 +584,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
       debugPrint('Error submitting rating: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to submit rating'),
+          SnackBar(
+            content: Text(ref.tr('failed_submit_rating')),
             backgroundColor: AppColors.error,
             behavior: SnackBarBehavior.floating,
           ),
@@ -528,7 +602,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     final phone = _resolveDriverPhone();
     if (phone.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Driver phone number unavailable')),
+        SnackBar(content: Text(ref.tr('driver_phone_unavailable'))),
       );
       return;
     }
@@ -539,7 +613,9 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not launch dialer'), backgroundColor: AppColors.error),
+          SnackBar(
+              content: Text(ref.tr('could_not_launch_dialer')),
+              backgroundColor: AppColors.error),
         );
       }
     }
@@ -577,17 +653,17 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
     if (_chatSheetOpen) return;
     if (_ride == null || _driver == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Driver information unavailable')),
+        SnackBar(content: Text(ref.tr('driver_info_unavailable'))),
       );
       return;
     }
 
     final authState = ref.read(authStateProvider);
     final currentUserId = authState.user?.id ?? '';
-    
+
     if (currentUserId.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please log in to send messages')),
+        SnackBar(content: Text(ref.tr('login_to_message'))),
       );
       return;
     }
@@ -615,14 +691,16 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
       context: context,
       builder: (context) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Cancel Ride'),
-        content: const Text('Are you sure you want to cancel this ride?'),
+        title: Text(ref.tr('cancel_ride')),
+        content: Text(ref.tr('cancel_ride_sure')),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('No')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(ref.tr('no'))),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-            child: const Text('Yes, Cancel'),
+            child: Text(ref.tr('yes_cancel')),
           ),
         ],
       ),
@@ -635,13 +713,19 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
         // Cancel via REST API (this also triggers server-side events to driver)
         await apiClient.cancelRide(widget.rideId, reason: 'Cancelled by rider');
         if (mounted) {
-          context.go(AppRoutes.findTrip);
+          // Clear ride state before navigation
+          ref.read(activeRideProvider.notifier).clearActiveRide();
+          ref.read(rideBookingProvider.notifier).reset();
+          // Navigate to services screen (ride booking), not findTrip or home
+          context.go(AppRoutes.services);
         }
       } catch (e) {
         debugPrint('Error cancelling ride: $e');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to cancel ride'), backgroundColor: AppColors.error),
+            SnackBar(
+                content: Text(ref.tr('failed_cancel_ride')),
+                backgroundColor: AppColors.error),
           );
         }
       }
@@ -666,11 +750,11 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
         return 'Ride cancelled';
     }
   }
-  
+
   /// Convert ride status to RidePhase for map display
   RidePhase _getRidePhase() {
     if (_ride == null) return RidePhase.searching;
-    
+
     switch (_ride!.status) {
       case RideStatus.requested:
         return RidePhase.searching;
@@ -686,7 +770,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
         return RidePhase.completed;
     }
   }
-  
+
   /// Format distance in meters to human readable string
   String _formatDistance(double meters) {
     if (meters < 1000) {
@@ -735,7 +819,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
             CustomMapView(
               rideId: _ride?.id,
               pickupLocation: _ride!.pickupLocation.toLocationCoordinate(),
-              dropoffLocation: _ride!.destinationLocation.toLocationCoordinate(),
+              dropoffLocation:
+                  _ride!.destinationLocation.toLocationCoordinate(),
               rideInProgress: true,
               ridePhase: _getRidePhase(),
               driverLocation: _driverLocation,
@@ -743,6 +828,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
               followDriverLocation: true,
               animateDriver: true,
               vehicleType: _ride?.rideType ?? _driver?.vehicleInfo?.type,
+              isDarkMode: ref.watch(settingsProvider).isDarkMode,
               onDriverDistanceUpdate: (distance, eta) {
                 if (mounted) {
                   setState(() {
@@ -770,7 +856,10 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                       decoration: BoxDecoration(
                         color: Colors.white,
                         shape: BoxShape.circle,
-                        boxShadow: [BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 8)],
+                        boxShadow: [
+                          BoxShadow(
+                              color: Colors.black.withAlpha(25), blurRadius: 8)
+                        ],
                       ),
                       child: const Icon(Icons.arrow_back, size: 20),
                     ),
@@ -779,11 +868,15 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                   // Status chip
                   if (_ride != null)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
                       decoration: BoxDecoration(
                         color: _getStatusColor(_ride!.status),
                         borderRadius: BorderRadius.circular(20),
-                        boxShadow: [BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 8)],
+                        boxShadow: [
+                          BoxShadow(
+                              color: Colors.black.withAlpha(25), blurRadius: 8)
+                        ],
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -822,8 +915,14 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-                  boxShadow: [BoxShadow(color: Colors.black.withAlpha(30), blurRadius: 20, offset: const Offset(0, -4))],
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(24)),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withAlpha(30),
+                        blurRadius: 20,
+                        offset: const Offset(0, -4))
+                  ],
                 ),
                 child: _isLoading ? _buildLoadingState() : _buildRideInfo(),
               ),
@@ -870,21 +969,21 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
   }
 
   Widget _buildLoadingState() {
-    return const Column(
+    return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        CircularProgressIndicator(),
-        SizedBox(height: 16),
-        Text('Loading ride details...'),
+        const CircularProgressIndicator(),
+        const SizedBox(height: 16),
+        Text(ref.tr('loading_ride_details')),
       ],
     );
   }
 
   Widget _buildRideInfo() {
-    final isDriverArriving = _ride?.status == RideStatus.accepted || 
-                             _ride?.status == RideStatus.arriving ||
-                             _ride?.status == RideStatus.driverArriving;
-    
+    final isDriverArriving = _ride?.status == RideStatus.accepted ||
+        _ride?.status == RideStatus.arriving ||
+        _ride?.status == RideStatus.driverArriving;
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -901,7 +1000,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
             ),
           ),
         ),
-        
+
         // Driver arriving info (show when driver is on the way)
         if (isDriverArriving && _driverLocation != null) ...[
           Container(
@@ -921,7 +1020,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                     color: Colors.green.withAlpha(30),
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.directions_car, color: Colors.green, size: 22),
+                  child: const Icon(Icons.directions_car,
+                      color: Colors.green, size: 22),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -979,7 +1079,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                   color: AppColors.dropoffMarker.withAlpha(25),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.location_on, color: AppColors.dropoffMarker, size: 20),
+                child: const Icon(Icons.location_on,
+                    color: AppColors.dropoffMarker, size: 20),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -988,11 +1089,13 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                   children: [
                     Text(
                       isDriverArriving ? 'Then heading to' : 'Heading to',
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.textSecondary),
                     ),
                     Text(
                       _ride!.destinationLocation.address ?? 'Drop-off Location',
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -1001,14 +1104,16 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
               ),
               // ETA
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: AppColors.inputBackground,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
                   '${_ride!.estimatedDuration} min',
-                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w600, fontSize: 13),
                 ),
               ),
             ],
@@ -1026,8 +1131,13 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                 radius: 22,
                 backgroundColor: AppColors.secondary.withAlpha(76),
                 child: Text(
-                  _driver!.name.isNotEmpty ? _driver!.name[0].toUpperCase() : '?',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: AppColors.textPrimary),
+                  _driver!.name.isNotEmpty
+                      ? _driver!.name[0].toUpperCase()
+                      : '?',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                      color: AppColors.textPrimary),
                 ),
               ),
               const SizedBox(width: 12),
@@ -1037,17 +1147,21 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                   children: [
                     Row(
                       children: [
-                        Text(_driver!.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                        Text(_driver!.name,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 15)),
                         if (_driver!.isVerified) ...[
                           const SizedBox(width: 4),
-                          const Icon(Icons.verified, size: 16, color: AppColors.info),
+                          const Icon(Icons.verified,
+                              size: 16, color: AppColors.info),
                         ],
                       ],
                     ),
                     if (_driver!.vehicleInfo != null)
                       Text(
                         '${_driver!.vehicleInfo!.color} ${_driver!.vehicleInfo!.type} - ${_driver!.vehicleInfo!.plateNumber}',
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                        style: const TextStyle(
+                            fontSize: 12, color: AppColors.textSecondary),
                       ),
                   ],
                 ),
@@ -1062,11 +1176,13 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.star, size: 14, color: AppColors.starYellow),
+                    const Icon(Icons.star,
+                        size: 14, color: AppColors.starYellow),
                     const SizedBox(width: 2),
                     Text(
                       _driver!.rating.toStringAsFixed(1),
-                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13),
                     ),
                   ],
                 ),
@@ -1095,7 +1211,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                 label: 'Message',
                 onTap: _messageDriver,
                 color: AppColors.info,
-                badgeCount: ref.watch(chatProvider(widget.rideId).select((s) => s.unreadCount)),
+                badgeCount: ref.watch(
+                    chatProvider(widget.rideId).select((s) => s.unreadCount)),
               ),
             ),
             if (_ride?.status != RideStatus.inProgress) ...[
@@ -1124,10 +1241,13 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Estimated Fare', style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                const Text('Estimated Fare',
+                    style: TextStyle(
+                        color: AppColors.textSecondary, fontSize: 13)),
                 Text(
                   '\u20B9${_ride!.fare.round()}',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 18),
                 ),
               ],
             ),
@@ -1166,7 +1286,9 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen> {
                   )
                 : Icon(icon, color: color, size: 20),
             const SizedBox(height: 4),
-            Text(label, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w500)),
+            Text(label,
+                style: TextStyle(
+                    color: color, fontSize: 12, fontWeight: FontWeight.w500)),
           ],
         ),
       ),
@@ -1195,12 +1317,161 @@ class _RatingBottomSheet extends StatefulWidget {
   State<_RatingBottomSheet> createState() => _RatingBottomSheetState();
 }
 
-class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTickerProviderStateMixin {
+class _RatingBottomSheetState extends State<_RatingBottomSheet>
+    with SingleTickerProviderStateMixin {
   int _selectedStars = 0;
   final _feedbackController = TextEditingController();
   bool _isSubmitting = false;
+  bool _paymentCompleted = false;
   late AnimationController _animController;
   late Animation<double> _scaleAnim;
+
+  // UPI Payment Apps configuration
+  static const List<Map<String, dynamic>> _upiApps = [
+    {
+      'name': 'Google Pay',
+      'package': 'com.google.android.apps.nbu.paisa.user',
+      'scheme': 'gpay',
+      'icon': Icons.g_mobiledata,
+      'color': Color(0xFF4285F4),
+    },
+    {
+      'name': 'PhonePe',
+      'package': 'com.phonepe.app',
+      'scheme': 'phonepe',
+      'icon': Icons.phone_android,
+      'color': Color(0xFF5F259F),
+    },
+    {
+      'name': 'Paytm',
+      'package': 'net.one97.paytm',
+      'scheme': 'paytmmp',
+      'icon': Icons.payment,
+      'color': Color(0xFF00BAF2),
+    },
+    {
+      'name': 'CRED',
+      'package': 'com.dreamplug.androidapp',
+      'scheme': 'credpay',
+      'icon': Icons.credit_score,
+      'color': Color(0xFF1A1A1A),
+    },
+  ];
+
+  /// Launch UPI payment intent with the specified app
+  Future<void> _launchUpiPayment(Map<String, dynamic> app) async {
+    final amount = widget.ride.fare.toStringAsFixed(2);
+    final transactionNote = 'Raahi Ride Payment - ${widget.ride.id}';
+    // Use company UPI ID for all ride payments
+    final payeeVpa = AppConfig.companyUpiId;
+    final payeeName = AppConfig.companyDisplayName;
+
+    // Construct UPI URL
+    // Format: upi://pay?pa=<payee_vpa>&pn=<payee_name>&am=<amount>&cu=INR&tn=<note>
+    final upiUrl = Uri.parse(
+        'upi://pay?pa=$payeeVpa&pn=$payeeName&am=$amount&cu=INR&tn=${Uri.encodeComponent(transactionNote)}');
+
+    try {
+      // Try to launch with the specific app scheme first
+      final appScheme = app['scheme'] as String;
+      final appSpecificUrl = Uri.parse(
+          '$appScheme://pay?pa=$payeeVpa&pn=$payeeName&am=$amount&cu=INR&tn=${Uri.encodeComponent(transactionNote)}');
+
+      if (await canLaunchUrl(appSpecificUrl)) {
+        await launchUrl(appSpecificUrl, mode: LaunchMode.externalApplication);
+        // Mark payment as initiated (user will confirm manually)
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Opening ${app['name']}...'),
+              backgroundColor: app['color'] as Color,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      } else if (await canLaunchUrl(upiUrl)) {
+        // Fallback to generic UPI intent
+        await launchUrl(upiUrl, mode: LaunchMode.externalApplication);
+      } else {
+        // App not installed
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${app['name']} is not installed'),
+              backgroundColor: Colors.orange,
+              action: SnackBarAction(
+                label: 'Install',
+                textColor: Colors.white,
+                onPressed: () {
+                  // Open Play Store
+                  final playStoreUrl = Uri.parse(
+                      'https://play.google.com/store/apps/details?id=${app['package']}');
+                  launchUrl(playStoreUrl, mode: LaunchMode.externalApplication);
+                },
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not open ${app['name']}: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void _markPaymentComplete() {
+    setState(() => _paymentCompleted = true);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Payment marked as complete'),
+        backgroundColor: Color(0xFF4CAF50),
+      ),
+    );
+  }
+
+  Widget _buildUpiAppButton(Map<String, dynamic> app) {
+    return GestureDetector(
+      onTap: () => _launchUpiPayment(app),
+      child: Column(
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: (app['color'] as Color).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: (app['color'] as Color).withOpacity(0.3),
+                width: 1.5,
+              ),
+            ),
+            child: Center(
+              child: UpiAppIcon(
+                appName: app['name'] as String,
+                size: 28,
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            app['name'] as String,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: AppColors.textPrimary,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -1209,7 +1480,8 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
-    _scaleAnim = CurvedAnimation(parent: _animController, curve: Curves.elasticOut);
+    _scaleAnim =
+        CurvedAnimation(parent: _animController, curve: Curves.elasticOut);
     _animController.forward();
   }
 
@@ -1240,7 +1512,8 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         decoration: const BoxDecoration(
           color: Colors.white,
@@ -1311,9 +1584,12 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.receipt_long, color: AppColors.textSecondary, size: 20),
+                      const Icon(Icons.receipt_long,
+                          color: AppColors.textSecondary, size: 20),
                       const SizedBox(width: 8),
-                      const Text('Total Fare:', style: TextStyle(color: AppColors.textSecondary, fontSize: 14)),
+                      const Text('Total Fare:',
+                          style: TextStyle(
+                              color: AppColors.textSecondary, fontSize: 14)),
                       const SizedBox(width: 8),
                       Text(
                         '\u20B9${widget.ride.fare.round()}',
@@ -1323,6 +1599,101 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
                           color: AppColors.textPrimary,
                         ),
                       ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // Pay Now Section
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFE8E8E8)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.05),
+                        blurRadius: 10,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            _paymentCompleted
+                                ? Icons.check_circle
+                                : Icons.payment,
+                            color: _paymentCompleted
+                                ? const Color(0xFF4CAF50)
+                                : const Color(0xFFD4956A),
+                            size: 22,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _paymentCompleted ? 'Payment Complete' : 'Pay Now',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: _paymentCompleted
+                                  ? const Color(0xFF4CAF50)
+                                  : AppColors.textPrimary,
+                            ),
+                          ),
+                          const Spacer(),
+                          if (!_paymentCompleted)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFD4956A).withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '\u20B9${widget.ride.fare.round()}',
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFFD4956A),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      if (!_paymentCompleted) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          'Choose your preferred payment app',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        // UPI App Grid
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: _upiApps
+                              .map((app) => _buildUpiAppButton(app))
+                              .toList(),
+                        ),
+                        const SizedBox(height: 16),
+                        // Mark as Paid button (for cash payments)
+                        Center(
+                          child: TextButton.icon(
+                            onPressed: _markPaymentComplete,
+                            icon: const Icon(Icons.money, size: 18),
+                            label: const Text('Paid in Cash'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.grey[600],
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -1337,8 +1708,13 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
                         radius: 20,
                         backgroundColor: AppColors.secondary.withAlpha(76),
                         child: Text(
-                          widget.driver!.name.isNotEmpty ? widget.driver!.name[0].toUpperCase() : '?',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppColors.textPrimary),
+                          widget.driver!.name.isNotEmpty
+                              ? widget.driver!.name[0].toUpperCase()
+                              : '?',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                              color: AppColors.textPrimary),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -1379,9 +1755,13 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
                         duration: const Duration(milliseconds: 200),
                         padding: const EdgeInsets.symmetric(horizontal: 6),
                         child: Icon(
-                          isSelected ? Icons.star_rounded : Icons.star_outline_rounded,
+                          isSelected
+                              ? Icons.star_rounded
+                              : Icons.star_outline_rounded,
                           size: isSelected ? 48 : 44,
-                          color: isSelected ? AppColors.starYellow : Colors.grey[350],
+                          color: isSelected
+                              ? AppColors.starYellow
+                              : Colors.grey[350],
                         ),
                       ),
                     );
@@ -1398,7 +1778,9 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
-                      color: _selectedStars > 0 ? AppColors.textPrimary : Colors.grey[500],
+                      color: _selectedStars > 0
+                          ? AppColors.textPrimary
+                          : Colors.grey[500],
                     ),
                   ),
                 ),
@@ -1444,18 +1826,21 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet> with SingleTicke
                       foregroundColor: Colors.white,
                       disabledBackgroundColor: Colors.grey[300],
                       disabledForegroundColor: Colors.grey[500],
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
                       elevation: 0,
                     ),
                     child: _isSubmitting
                         ? const SizedBox(
                             width: 22,
                             height: 22,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white),
                           )
                         : const Text(
                             'Submit Rating',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w600),
                           ),
                   ),
                 ),

@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
+import '../../../../core/widgets/upi_app_icon.dart';
+import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
@@ -19,33 +23,180 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   bool _isLoading = false;
   String? _appliedVoucher;
   double _voucherDiscount = 0;
-  
+
   // Linked UPI accounts - will be displayed in payment methods section
   final List<Map<String, dynamic>> _linkedUpiAccounts = [];
-  
+
   /// Generate a 4-digit PIN for ride verification.
   /// This is a fallback when backend doesn't provide OTP.
   String _generateRidePin() {
     final random = DateTime.now().millisecondsSinceEpoch % 9000 + 1000;
     return random.toString();
   }
-  
+
   // Available payment methods
   final List<Map<String, dynamic>> _walletOptions = [
-    {'id': 'raahi_wallet', 'name': 'Raahi Wallet', 'icon': Icons.account_balance_wallet, 'balance': 0},
+    {
+      'id': 'raahi_wallet',
+      'name': 'Raahi Wallet',
+      'icon': Icons.account_balance_wallet,
+      'balance': 0
+    },
   ];
-  
+
   final List<Map<String, dynamic>> _upiOptions = [
-    {'id': 'paytm', 'name': 'Paytm UPI', 'icon': Icons.payment, 'color': Color(0xFF00BAF2)},
-    {'id': 'gpay', 'name': 'GPay UPI', 'icon': Icons.g_mobiledata, 'color': Color(0xFF4285F4)},
-    {'id': 'phonepe', 'name': 'PhonePe', 'icon': Icons.phone_android, 'color': Color(0xFF5F259F)},
-    {'id': 'bhim', 'name': 'BHIM UPI', 'icon': Icons.account_balance, 'color': Color(0xFF00695C)},
+    {
+      'id': 'paytm',
+      'name': 'Paytm UPI',
+      'icon': Icons.payment,
+      'color': Color(0xFF00BAF2)
+    },
+    {
+      'id': 'gpay',
+      'name': 'GPay UPI',
+      'icon': Icons.g_mobiledata,
+      'color': Color(0xFF4285F4)
+    },
+    {
+      'id': 'phonepe',
+      'name': 'PhonePe',
+      'icon': Icons.phone_android,
+      'color': Color(0xFF5F259F)
+    },
+    {
+      'id': 'bhim',
+      'name': 'BHIM UPI',
+      'icon': Icons.account_balance,
+      'color': Color(0xFF00695C)
+    },
   ];
-  
+
   final List<Map<String, dynamic>> _otherOptions = [
-    {'id': 'card', 'name': 'Credit/Debit Card', 'icon': Icons.credit_card, 'color': Color(0xFF1A1A1A)},
-    {'id': 'netbanking', 'name': 'Net Banking', 'icon': Icons.account_balance, 'color': Color(0xFF2196F3)},
+    {
+      'id': 'card',
+      'name': 'Credit/Debit Card',
+      'icon': Icons.credit_card,
+      'color': Color(0xFF1A1A1A)
+    },
+    {
+      'id': 'netbanking',
+      'name': 'Net Banking',
+      'icon': Icons.account_balance,
+      'color': Color(0xFF2196F3)
+    },
   ];
+
+  // Direct UPI Payment Apps
+  static const List<Map<String, dynamic>> _directUpiApps = [
+    {
+      'name': 'Google Pay',
+      'package': 'com.google.android.apps.nbu.paisa.user',
+      'scheme': 'gpay',
+      'icon': Icons.g_mobiledata,
+      'color': Color(0xFF4285F4),
+    },
+    {
+      'name': 'PhonePe',
+      'package': 'com.phonepe.app',
+      'scheme': 'phonepe',
+      'icon': Icons.phone_android,
+      'color': Color(0xFF5F259F),
+    },
+    {
+      'name': 'Paytm',
+      'package': 'net.one97.paytm',
+      'scheme': 'paytmmp',
+      'icon': Icons.payment,
+      'color': Color(0xFF00BAF2),
+    },
+    {
+      'name': 'CRED',
+      'package': 'com.dreamplug.androidapp',
+      'scheme': 'credpay',
+      'icon': Icons.credit_score,
+      'color': Color(0xFF1A1A1A),
+    },
+  ];
+
+  /// Launch UPI payment intent with the specified app
+  Future<void> _launchDirectUpiPayment(Map<String, dynamic> app) async {
+    final rideBookingState = ref.read(rideBookingProvider);
+    final baseAmount =
+        rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
+
+    // Calculate discount if voucher is applied
+    double discountAmount = 0;
+    if (_appliedVoucher != null && _voucherDiscount > 0) {
+      discountAmount = baseAmount * (_voucherDiscount / 100);
+      if (_appliedVoucher == 'FIRST50' && discountAmount > 100) {
+        discountAmount = 100;
+      } else if (_appliedVoucher == 'RAAHI20' && discountAmount > 50) {
+        discountAmount = 50;
+      } else if (_appliedVoucher == 'WELCOME10' && discountAmount > 30) {
+        discountAmount = 30;
+      }
+    }
+    final totalAmount = (baseAmount - discountAmount).toStringAsFixed(2);
+
+    final transactionNote = 'Raahi Ride Payment';
+    final payeeVpa = AppConfig.companyUpiId; // Company UPI ID
+    final payeeName = AppConfig.companyDisplayName;
+
+    // Construct UPI URL
+    final upiUrl = Uri.parse(
+        'upi://pay?pa=$payeeVpa&pn=$payeeName&am=$totalAmount&cu=INR&tn=${Uri.encodeComponent(transactionNote)}');
+
+    try {
+      // Try to launch with the specific app scheme first
+      final appScheme = app['scheme'] as String;
+      final appSpecificUrl = Uri.parse(
+          '$appScheme://pay?pa=$payeeVpa&pn=$payeeName&am=$totalAmount&cu=INR&tn=${Uri.encodeComponent(transactionNote)}');
+
+      if (await canLaunchUrl(appSpecificUrl)) {
+        await launchUrl(appSpecificUrl, mode: LaunchMode.externalApplication);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Opening ${app['name']}...'),
+              backgroundColor: app['color'] as Color,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      } else if (await canLaunchUrl(upiUrl)) {
+        // Fallback to generic UPI intent
+        await launchUrl(upiUrl, mode: LaunchMode.externalApplication);
+      } else {
+        // App not installed
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${app['name']} is not installed'),
+              backgroundColor: Colors.orange,
+              action: SnackBarAction(
+                label: 'Install',
+                textColor: Colors.white,
+                onPressed: () {
+                  final playStoreUrl = Uri.parse(
+                      'https://play.google.com/store/apps/details?id=${app['package']}');
+                  launchUrl(playStoreUrl, mode: LaunchMode.externalApplication);
+                },
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not open ${app['name']}: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -147,15 +298,15 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           ),
         ),
         const SizedBox(height: 16),
-        
+
         // Linked UPI accounts
         if (_linkedUpiAccounts.isNotEmpty) ...[
           ..._linkedUpiAccounts.map((account) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: _buildLinkedUpiOption(account),
-          )),
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _buildLinkedUpiOption(account),
+              )),
         ],
-        
+
         // Scan to Pay option
         _buildPaymentOption(
           icon: Icons.qr_code_scanner,
@@ -163,9 +314,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           isSelected: _selectedPaymentMethod == 'scan',
           onTap: () => setState(() => _selectedPaymentMethod = 'scan'),
         ),
-        
+
         const SizedBox(height: 12),
-        
+
         // Add payment method
         _buildPaymentOption(
           icon: Icons.add,
@@ -174,13 +325,161 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           onTap: _showPaymentMethodsSheet,
           showArrow: false,
         ),
+
+        const SizedBox(height: 24),
+
+        // Direct UPI Payment Section
+        _buildDirectUpiPaymentSection(),
       ],
     );
   }
-  
+
+  Widget _buildDirectUpiPaymentSection() {
+    final rideBookingState = ref.watch(rideBookingProvider);
+    final baseAmount =
+        rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
+
+    // Calculate discount if voucher is applied
+    double discountAmount = 0;
+    if (_appliedVoucher != null && _voucherDiscount > 0) {
+      discountAmount = baseAmount * (_voucherDiscount / 100);
+      if (_appliedVoucher == 'FIRST50' && discountAmount > 100) {
+        discountAmount = 100;
+      } else if (_appliedVoucher == 'RAAHI20' && discountAmount > 50) {
+        discountAmount = 50;
+      } else if (_appliedVoucher == 'WELCOME10' && discountAmount > 30) {
+        discountAmount = 30;
+      }
+    }
+    final totalAmount = baseAmount - discountAmount;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAF8F5),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE8E8E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD4956A).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.flash_on,
+                  color: Color(0xFFD4956A),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Pay Directly via UPI',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1A1A1A),
+                      ),
+                    ),
+                    Text(
+                      'Quick payment through your favorite app',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF888888),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD4956A),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '₹${totalAmount.toStringAsFixed(0)}',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          // UPI App Grid
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: _directUpiApps
+                .map((app) => _buildDirectUpiAppButton(app))
+                .toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDirectUpiAppButton(Map<String, dynamic> app) {
+    return GestureDetector(
+      onTap: () => _launchDirectUpiPayment(app),
+      child: Column(
+        children: [
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: (app['color'] as Color).withOpacity(0.3),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: (app['color'] as Color).withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Center(
+              child: UpiAppIcon(
+                appName: app['name'] as String,
+                size: 26,
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            app['name'] as String,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFF1A1A1A),
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildLinkedUpiOption(Map<String, dynamic> account) {
     final isSelected = _selectedPaymentMethod == account['id'];
-    
+
     return GestureDetector(
       onTap: () => setState(() => _selectedPaymentMethod = account['id']),
       child: Container(
@@ -189,7 +488,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           color: isSelected ? const Color(0xFFFAF8F5) : Colors.white,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: isSelected ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
+            color:
+                isSelected ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
             width: isSelected ? 2 : 1,
           ),
         ),
@@ -237,21 +537,23 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
             else
               GestureDetector(
                 onTap: () => _removeLinkedUpi(account['id']),
-                child: const Icon(Icons.close, color: Color(0xFF888888), size: 20),
+                child:
+                    const Icon(Icons.close, color: Color(0xFF888888), size: 20),
               ),
           ],
         ),
       ),
     );
   }
-  
+
   void _removeLinkedUpi(String accountId) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         title: const Text('Remove UPI'),
-        content: const Text('Are you sure you want to remove this UPI account?'),
+        content:
+            const Text('Are you sure you want to remove this UPI account?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -293,7 +595,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         const SizedBox(height: 16),
         _buildPaymentOption(
           icon: Icons.confirmation_number_outlined,
-          title: _appliedVoucher != null ? 'Voucher: $_appliedVoucher' : 'Add voucher',
+          title: _appliedVoucher != null
+              ? 'Voucher: $_appliedVoucher'
+              : 'Add voucher',
           isSelected: _appliedVoucher != null,
           onTap: _showVoucherSheet,
           showArrow: false,
@@ -315,10 +619,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   void _addWalletToLinkedAccounts() {
     setState(() {
       // Check if Raahi Wallet already exists
-      final existingIndex = _linkedUpiAccounts.indexWhere(
-        (acc) => acc['id'] == 'raahi_wallet'
-      );
-      
+      final existingIndex =
+          _linkedUpiAccounts.indexWhere((acc) => acc['id'] == 'raahi_wallet');
+
       if (existingIndex == -1) {
         // Add Raahi Wallet to linked accounts
         _linkedUpiAccounts.insert(0, {
@@ -330,11 +633,11 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           'color': const Color(0xFFD4956A),
         });
       }
-      
+
       // Select Raahi Wallet
       _selectedPaymentMethod = 'raahi_wallet';
     });
-    
+
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Raahi Wallet selected'),
@@ -347,7 +650,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   void _showUpiInputDialog(String upiMethod, String methodId) {
     final upiController = TextEditingController();
     String? upiError;
-    
+
     // Get placeholder based on method
     String placeholder;
     String hint;
@@ -372,12 +675,13 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         placeholder = 'yourname@bank';
         hint = 'Enter your UPI ID';
     }
-    
+
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Row(
             children: [
               Container(
@@ -387,7 +691,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                   color: const Color(0xFFD4956A).withOpacity(0.1),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Icon(Icons.account_balance, color: Color(0xFFD4956A)),
+                child:
+                    const Icon(Icons.account_balance, color: Color(0xFFD4956A)),
               ),
               const SizedBox(width: 12),
               Text(upiMethod, style: const TextStyle(fontSize: 18)),
@@ -441,21 +746,21 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
             ElevatedButton(
               onPressed: () {
                 final upiId = upiController.text.trim();
-                
+
                 // Validate UPI ID
                 if (upiId.isEmpty) {
                   setDialogState(() => upiError = 'Please enter UPI ID');
                   return;
                 }
-                
+
                 if (!upiId.contains('@')) {
                   setDialogState(() => upiError = 'Invalid UPI ID format');
                   return;
                 }
-                
+
                 // Valid UPI ID - Add to linked accounts
                 Navigator.pop(context);
-                
+
                 // Get icon and color for the UPI method
                 IconData upiIcon;
                 Color upiColor;
@@ -480,16 +785,16 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     upiIcon = Icons.account_balance;
                     upiColor = const Color(0xFFD4956A);
                 }
-                
+
                 // Create unique ID for this linked account
-                final linkedId = '${methodId}_${DateTime.now().millisecondsSinceEpoch}';
-                
+                final linkedId =
+                    '${methodId}_${DateTime.now().millisecondsSinceEpoch}';
+
                 setState(() {
                   // Check if this UPI ID already exists
-                  final existingIndex = _linkedUpiAccounts.indexWhere(
-                    (acc) => acc['upiId'] == upiId
-                  );
-                  
+                  final existingIndex = _linkedUpiAccounts
+                      .indexWhere((acc) => acc['upiId'] == upiId);
+
                   if (existingIndex == -1) {
                     // Add new linked account
                     _linkedUpiAccounts.add({
@@ -501,11 +806,11 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                       'color': upiColor,
                     });
                   }
-                  
+
                   // Select this payment method
                   _selectedPaymentMethod = linkedId;
                 });
-                
+
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text('$upiMethod linked: $upiId'),
@@ -519,7 +824,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              child: const Text('Link UPI', style: TextStyle(color: Colors.white)),
+              child:
+                  const Text('Link UPI', style: TextStyle(color: Colors.white)),
             ),
           ],
         ),
@@ -617,7 +923,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     Row(
                       children: [
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(4),
@@ -704,7 +1011,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                       trailingColor: const Color(0xFF2196F3),
                       onTap: () {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Simpl integration coming soon')),
+                          const SnackBar(
+                              content: Text('Simpl integration coming soon')),
                         );
                       },
                     ),
@@ -819,7 +1127,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
   void _showVoucherSheet() {
     final voucherController = TextEditingController();
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -943,15 +1251,20 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     final code = voucherController.text.trim().toUpperCase();
                     if (code.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please enter a voucher code')),
+                        const SnackBar(
+                            content: Text('Please enter a voucher code')),
                       );
                       return;
                     }
                     // Check voucher validity
-                    if (code == 'FIRST50' || code == 'RAAHI20' || code == 'WELCOME10') {
+                    if (code == 'FIRST50' ||
+                        code == 'RAAHI20' ||
+                        code == 'WELCOME10') {
                       setState(() {
                         _appliedVoucher = code;
-                        _voucherDiscount = code == 'FIRST50' ? 50 : (code == 'RAAHI20' ? 20 : 10);
+                        _voucherDiscount = code == 'FIRST50'
+                            ? 50
+                            : (code == 'RAAHI20' ? 20 : 10);
                       });
                       Navigator.pop(context);
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -1025,7 +1338,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     required VoidCallback onApply,
   }) {
     final isApplied = _appliedVoucher == code;
-    
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -1114,7 +1427,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           color: isSelected ? const Color(0xFFFAF8F5) : Colors.white,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: isSelected ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
+            color:
+                isSelected ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
           ),
         ),
         child: Row(
@@ -1149,8 +1463,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
   Widget _buildSelectedPayment() {
     final rideBookingState = ref.watch(rideBookingProvider);
-    final baseAmount = rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
-    
+    final baseAmount =
+        rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
+
     // Calculate discount if voucher is applied
     double discountAmount = 0;
     if (_appliedVoucher != null && _voucherDiscount > 0) {
@@ -1165,19 +1480,19 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       }
     }
     final totalAmount = baseAmount - discountAmount;
-    
+
     // Get selected payment method details
     String paymentName = 'Cash';
     String paymentSubtitle = 'Pay on delivery';
     IconData paymentIcon = Icons.money;
     Color paymentColor = const Color(0xFF4CAF50);
-    
+
     // Check if it's a linked UPI account
     final linkedAccount = _linkedUpiAccounts.firstWhere(
       (acc) => acc['id'] == _selectedPaymentMethod,
       orElse: () => {},
     );
-    
+
     if (linkedAccount.isNotEmpty) {
       paymentName = linkedAccount['methodName'] as String;
       paymentSubtitle = linkedAccount['upiId'] as String;
@@ -1205,7 +1520,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       paymentColor = const Color(0xFF1A1A1A);
     }
     // Default is Cash
-    
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -1294,7 +1609,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         showDialog(
           context: context,
           builder: (ctx) => AlertDialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: Row(
               children: const [
                 Icon(Icons.info_outline, color: Color(0xFFD4956A), size: 28),
@@ -1342,10 +1658,10 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     }
 
     setState(() => _isLoading = true);
-    
+
     final client = ref.read(apiClientProvider);
     final user = ref.read(currentUserProvider);
-    
+
     try {
       debugPrint('💰 Creating ride via apiClient...');
 
@@ -1366,7 +1682,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         dropLat: rideBookingState.destinationLocation?.latitude ?? 0,
         dropLng: rideBookingState.destinationLocation?.longitude ?? 0,
         pickupAddress: rideBookingState.pickupAddress ?? 'Unknown pickup',
-        dropAddress: rideBookingState.destinationAddress ?? 'Unknown destination',
+        dropAddress:
+            rideBookingState.destinationAddress ?? 'Unknown destination',
         paymentMethod: _selectedPaymentMethod.toUpperCase(),
         waypoints: waypoints,
         vehicleType: rideBookingState.selectedCabTypeId,
@@ -1378,23 +1695,26 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         final rideData = responseData['data'];
         if (rideData != null && rideData is Map) {
           final rideId = rideData['id']?.toString();
-          
+
           // Backend generates OTP during ride creation and returns it in rideOtp field.
           // This OTP is stored in the database and will be verified when driver starts the ride.
-          final rideOtp = rideData['rideOtp']?.toString() ?? rideData['otp']?.toString();
-          
+          final rideOtp =
+              rideData['rideOtp']?.toString() ?? rideData['otp']?.toString();
+
           if (rideOtp == null || rideOtp.isEmpty) {
-            debugPrint('⚠️ No OTP received from backend - this may cause issues');
+            debugPrint(
+                '⚠️ No OTP received from backend - this may cause issues');
           }
 
           debugPrint('✅ Ride created: $rideId');
-          debugPrint('🔐 Ride OTP from backend: $rideOtp - Share this with your driver!');
+          debugPrint(
+              '🔐 Ride OTP from backend: $rideOtp - Share this with your driver!');
 
           // Store the ride ID and PIN
           ref.read(rideBookingProvider.notifier).setRideDetails(
-            rideId: rideId,
-            otp: rideOtp,
-          );
+                rideId: rideId,
+                otp: rideOtp,
+              );
 
           if (mounted) {
             // Navigate to searching drivers screen
@@ -1415,7 +1735,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(responseData['error']?.toString() ?? 'Failed to create ride'),
+              content: Text(
+                  responseData['error']?.toString() ?? 'Failed to create ride'),
               backgroundColor: Colors.red,
             ),
           );
@@ -1426,7 +1747,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error creating ride: ${e.toString().contains('Connection') ? 'Cannot connect to server' : e}'),
+            content: Text(
+                'Error creating ride: ${e.toString().contains('Connection') ? 'Cannot connect to server' : e}'),
             backgroundColor: Colors.red,
           ),
         );
@@ -1447,17 +1769,19 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           width: double.infinity,
           height: 56,
           decoration: BoxDecoration(
-            color: _isLoading ? const Color(0xFFE0E0E0) : const Color(0xFFD4956A),
+            color:
+                _isLoading ? const Color(0xFFE0E0E0) : const Color(0xFFD4956A),
             borderRadius: BorderRadius.circular(28),
           ),
           child: Center(
             child: _isLoading
-                ? const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ? const UberShimmer(
+                    baseColor: Color(0x99FFFFFF),
+                    highlightColor: Color(0xFFFFFFFF),
+                    child: UberShimmerBox(
+                      width: 140,
+                      height: 16,
+                      borderRadius: BorderRadius.all(Radius.circular(8)),
                     ),
                   )
                 : const Text(

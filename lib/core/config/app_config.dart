@@ -34,6 +34,13 @@ class AppConfig {
     defaultValue: 'AIzaSyAaTuhvB_WuJosSUXfgMyhMxAD-6sEmfVc',
   );
 
+  // Google Sign-In server client id (Web OAuth client ID from Firebase).
+  static const String googleServerClientId = String.fromEnvironment(
+    'GOOGLE_SERVER_CLIENT_ID',
+    defaultValue:
+        '877632727493-drmcekkvc4ui34cb09a0oq7538ildj0r.apps.googleusercontent.com',
+  );
+
   // Razorpay Configuration
   static const String razorpayKeyId = String.fromEnvironment(
     'RAZORPAY_KEY_ID',
@@ -66,4 +73,13 @@ class AppConfig {
   // Timeouts
   static const Duration connectionTimeout = Duration(seconds: 30);
   static const Duration receiveTimeout = Duration(seconds: 30);
+
+  // Driver Subscription (Daily Platform Fee)
+  static const double dailyPlatformFee = 39.0;
+  
+  // Company UPI Details (used for all payments)
+  static const String companyUpiId =
+      'MSRAAHICABSERVICESPRIVATELIMITED.eazypay@icici';
+  static const String companyName = 'Raahi Cab Services';
+  static const String companyDisplayName = 'Raahi Cab Services';
 }

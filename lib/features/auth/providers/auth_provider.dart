@@ -2,11 +2,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../../../core/models/user.dart';
+import '../../../core/config/app_config.dart';
 import '../../../core/services/api_client.dart';
 import '../../../core/services/websocket_service.dart';
 import '../../../core/services/realtime_service.dart';
 import '../../../core/services/firebase_phone_auth_service.dart';
+import '../../../core/services/google_auth_service.dart';
 import '../../../core/services/push_notification_service.dart';
+import '../../driver/providers/driver_rides_provider.dart';
 
 // Auth state
 class AuthState {
@@ -15,6 +18,8 @@ class AuthState {
   final String? error;
   final String? currentSessionId; // Store phone for OTP verification
   final bool pendingOnboarding; // True when new user needs name entry + terms
+  final bool pendingPhoneLink; // True when social login must add phone
+  final bool onboardingAfterPhoneLink; // Preserve onboarding requirement until phone is linked
   final bool isLoggingOut;
 
   const AuthState({
@@ -23,6 +28,8 @@ class AuthState {
     this.error,
     this.currentSessionId,
     this.pendingOnboarding = false,
+    this.pendingPhoneLink = false,
+    this.onboardingAfterPhoneLink = false,
     this.isLoggingOut = false,
   });
 
@@ -32,6 +39,8 @@ class AuthState {
     String? error,
     String? currentSessionId,
     bool? pendingOnboarding,
+    bool? pendingPhoneLink,
+    bool? onboardingAfterPhoneLink,
     bool? isLoggingOut,
   }) {
     return AuthState(
@@ -40,6 +49,9 @@ class AuthState {
       error: error,
       currentSessionId: currentSessionId ?? this.currentSessionId,
       pendingOnboarding: pendingOnboarding ?? this.pendingOnboarding,
+      pendingPhoneLink: pendingPhoneLink ?? this.pendingPhoneLink,
+      onboardingAfterPhoneLink:
+          onboardingAfterPhoneLink ?? this.onboardingAfterPhoneLink,
       isLoggingOut: isLoggingOut ?? this.isLoggingOut,
     );
   }
@@ -77,14 +89,42 @@ class VerifyOTPResult {
   });
 }
 
+class SocialSignInResult {
+  final bool success;
+  final bool requiresPhone;
+  final bool isNewUser;
+  final String? error;
+
+  const SocialSignInResult({
+    required this.success,
+    this.requiresPhone = false,
+    this.isNewUser = false,
+    this.error,
+  });
+}
+
 // Auth notifier
 class AuthNotifier extends StateNotifier<AuthState> {
   final FlutterSecureStorage _secureStorage;
+  final Ref _ref;
+  bool _handlingAuthError = false;
   static const _tokenKey = 'auth_token';
   static const _refreshTokenKey = 'refresh_token';
   static const _userKey = 'user_data';
+  static const _testOtp = '123456';
+  static const bool _allowTestOtpBypass = true; // Always allow test OTP for dev builds
+  
+  // Test phone numbers that bypass Firebase and use direct backend auth
+  // NOTE: These are for LOCAL DEV ONLY when Firebase is not configured.
+  // For Firebase Console test numbers, use the normal Firebase flow - they work automatically.
+  static const List<String> _testPhoneNumbers = [
+    '9794696252',
+    '1234567890',
+    '9999999999',
+  ];
 
-  AuthNotifier(this._secureStorage) : super(const AuthState(isLoading: true)) {
+  AuthNotifier(this._secureStorage, this._ref)
+      : super(const AuthState(isLoading: true)) {
     // Set up auth error callback for automatic logout on 401/403
     apiClient.setOnAuthError(_handleAuthError);
     // Defer initialization to next microtask to avoid blocking constructor
@@ -93,8 +133,29 @@ class AuthNotifier extends StateNotifier<AuthState> {
   
   /// Handle auth errors (401 after refresh fails, 403 deactivated user)
   void _handleAuthError() {
-    debugPrint('🔐 Auth error detected, signing out...');
-    signOut();
+    if (_handlingAuthError || state.isLoggingOut) return;
+    _handlingAuthError = true;
+    debugPrint('🔐 Auth error detected, forcing local sign out once...');
+    _forceLocalSignOutFromAuthError();
+  }
+
+  Future<void> _forceLocalSignOutFromAuthError() async {
+    state = state.copyWith(isLoading: true, isLoggingOut: true);
+    try {
+      await realtimeService.stop(reason: RealtimeStopReason.logout);
+      realtimeService.cancelReconnectTimer();
+      realtimeService.resetConnectionStateSilently();
+      webSocketService.disconnect();
+      await pushNotificationService.unregisterToken();
+      await firebasePhoneAuth.signOut();
+    } catch (e) {
+      debugPrint('Forced local sign out cleanup error: $e');
+    } finally {
+      _handlingAuthError = false;
+    }
+
+    await _clearAuthData();
+    state = const AuthState();
   }
 
   void _registerPushTokenSilently() {
@@ -157,9 +218,13 @@ class AuthNotifier extends StateNotifier<AuthState> {
               }
               
               final user = _mapUserFromBackend(userJson);
+              final requiresPhoneLink = _requiresPhoneLink(user.phone);
               
               // Cache user data for offline session persistence
               await _secureStorage.write(key: _userKey, value: _encodeUser(user));
+
+              // Fresh auth session: do not carry old driver offer cards.
+              _ref.read(driverRidesProvider.notifier).resetForNewSession();
 
               // Connect to Socket.io (non-blocking - fire and forget)
               // Don't await to prevent UI freeze if server is unreachable
@@ -167,7 +232,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
                 debugPrint('Socket.io connection failed: $e');
               });
 
-              state = AuthState(user: user);
+              state = AuthState(
+                user: user,
+                pendingPhoneLink: requiresPhoneLink,
+                pendingOnboarding: false,
+              );
               _registerPushTokenSilently();
               return;
             }
@@ -185,7 +254,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
             if (cachedUserJson != null) {
               final user = _decodeUser(cachedUserJson);
               if (user != null) {
-                state = AuthState(user: user);
+                state = AuthState(
+                  user: user,
+                  pendingPhoneLink: _requiresPhoneLink(user.phone),
+                  pendingOnboarding: false,
+                );
                 _registerPushTokenSilently();
                 return;
               }
@@ -207,7 +280,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
             debugPrint('📴 Network error but keeping session with cached user');
             final user = _decodeUser(cachedUserJson);
             if (user != null) {
-              state = AuthState(user: user);
+              state = AuthState(
+                user: user,
+                pendingPhoneLink: _requiresPhoneLink(user.phone),
+                pendingOnboarding: false,
+              );
               _registerPushTokenSilently();
               return;
             }
@@ -290,47 +367,108 @@ class AuthNotifier extends StateNotifier<AuthState> {
     apiClient.setRefreshToken(null);
   }
 
+  /// Check if phone is a test number that bypasses Firebase
+  bool _isTestPhone(String phone) {
+    final normalized = _normalizePhoneDigits(phone);
+    return _allowTestOtpBypass && _testPhoneNumbers.contains(normalized);
+  }
+
   /// Request OTP for phone number.
-  /// Firebase is bypassed — no OTP is sent. Use static OTP "123456".
+  /// Uses Firebase directly. For test numbers: skip Firebase, use test OTP.
   Future<OTPResult> requestOTP(String phone) async {
+    debugPrint('📱 AuthNotifier.requestOTP called for $phone');
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      String formattedPhone = phone.replaceAll(RegExp(r'[\s\-()]'), '');
-
-      if (formattedPhone.startsWith('+91')) {
-        // Already has +91
-      } else if (formattedPhone.startsWith('91') && formattedPhone.length > 10) {
-        formattedPhone = '+$formattedPhone';
-      } else if (formattedPhone.startsWith('+')) {
-        // Other country codes - keep as is
-      } else {
-        formattedPhone = '+91$formattedPhone';
+      final normalizedPhone = _normalizePhoneDigits(phone);
+      if (normalizedPhone.length != 10) {
+        const msg = 'Please enter a valid 10-digit mobile number.';
+        state = state.copyWith(isLoading: false, error: msg);
+        return const OTPResult(success: false, error: msg);
       }
 
-      debugPrint('🔓 DEV MODE: Skipping Firebase OTP for $formattedPhone');
-      debugPrint('🔓 Use OTP: 123456');
+      final isTest = _isTestPhone(normalizedPhone);
+      debugPrint('📱 Request OTP for $normalizedPhone (isTestPhone: $isTest)');
 
+      // For test numbers, skip Firebase entirely
+      if (isTest) {
+        debugPrint('🔓 TEST MODE: Skipping Firebase OTP, use OTP $_testOtp');
+        state = state.copyWith(
+          isLoading: false,
+          currentSessionId: 'TEST_$normalizedPhone',
+        );
+        return OTPResult(
+          success: true,
+          sessionId: 'TEST_$normalizedPhone',
+          expiresIn: 300,
+        );
+      }
+
+      // For real numbers: Firebase OTP dispatch DIRECTLY (no backend call)
+      debugPrint('🔥 Sending OTP via Firebase directly (no backend dependency)');
+      final firebaseResult = await firebasePhoneAuth.sendOTP(normalizedPhone);
+      
+      if (!firebaseResult.success) {
+        final errorMsg = firebaseResult.error ?? 'Failed to send OTP';
+        debugPrint('❌ Firebase OTP send failed: $errorMsg (code: ${firebaseResult.code})');
+        
+        // Provide user-friendly error messages
+        String userMessage;
+        switch (firebaseResult.code) {
+          case 'too-many-requests':
+            userMessage = 'Too many OTP requests. Please wait a few minutes and try again.';
+            break;
+          case 'invalid-phone-number':
+            userMessage = 'Invalid phone number. Please check and try again.';
+            break;
+          case 'quota-exceeded':
+            userMessage = 'SMS service temporarily unavailable. Please try again later.';
+            break;
+          case 'app-not-authorized':
+            userMessage = 'App configuration error. Please contact support.';
+            break;
+          case 'captcha-check-failed':
+            userMessage = 'Verification failed. Please try again.';
+            break;
+          default:
+            userMessage = errorMsg;
+        }
+        
+        state = state.copyWith(isLoading: false, error: userMessage);
+        return OTPResult(success: false, error: userMessage);
+      }
+
+      debugPrint('✅ Firebase OTP sent successfully');
       state = state.copyWith(
         isLoading: false,
-        currentSessionId: formattedPhone,
+        currentSessionId: normalizedPhone,
       );
 
       return OTPResult(
         success: true,
-        sessionId: formattedPhone,
-        expiresIn: 300,
+        sessionId: normalizedPhone,
+        expiresIn: 120,
       );
     } catch (e) {
       debugPrint('📱 Request OTP error: $e');
-      state = state.copyWith(isLoading: false, error: e.toString());
-      return OTPResult(success: false, error: e.toString());
+      
+      String errorMessage;
+      if (e.toString().contains('network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else if (e.toString().contains('timeout')) {
+        errorMessage = 'Request timed out. Please try again.';
+      } else {
+        errorMessage = 'Failed to send OTP. Please try again.';
+      }
+      
+      state = state.copyWith(isLoading: false, error: errorMessage);
+      return OTPResult(success: false, error: errorMessage);
     }
   }
 
-  /// Verify OTP and authenticate with backend.
-  /// Firebase is bypassed — only static OTP "123456" is accepted.
-  /// In DEV MODE: If backend is unavailable, creates a mock user session.
+  /// Verify OTP.
+  /// For test sessions: use direct backend verify-otp endpoint.
+  /// For real sessions: verify via Firebase then authenticate with backend using Firebase idToken.
   Future<VerifyOTPResult> verifyOTP(String phone, String otp, {bool isNewUser = false}) async {
     state = state.copyWith(isLoading: true, error: null);
 
@@ -344,35 +482,76 @@ class AuthNotifier extends StateNotifier<AuthState> {
         );
       }
 
-      if (otp != '123456') {
-        state = state.copyWith(isLoading: false);
+      debugPrint('📱 Verify OTP: session=$sessionPhone, otp=$otp');
+
+      // Check if this is a test session (marked with TEST_ prefix)
+      final isTestSession = sessionPhone.startsWith('TEST_');
+      final actualPhone = isTestSession ? sessionPhone.substring(5) : sessionPhone;
+
+      // For test sessions with test OTP: use direct backend verification
+      if (isTestSession && otp == _testOtp) {
+        // Build E.164 formatted phone for backend (e.g., +919794696252)
+        final e164Phone = '+91$actualPhone';
+        debugPrint('🔓 TEST MODE: Trying backend authentication for test phone $actualPhone (E.164: $e164Phone)');
+        
+        // Try 1: phone endpoint (direct phone auth for dev/test mode) - send E.164 format
+        try {
+          debugPrint('🔓 Attempt 1: /auth/phone with E.164 format');
+          final phoneResponse = await apiClient.authenticateWithPhone(e164Phone);
+          debugPrint('🔓 phone auth response: $phoneResponse');
+          if (phoneResponse['success'] == true) {
+            return await _handleBackendAuthResponse(phoneResponse);
+          }
+          final msg = phoneResponse['message'] as String? ?? '';
+          debugPrint('🔓 phone auth failed: $msg');
+        } catch (e) {
+          debugPrint('🔓 phone auth exception: $e');
+        }
+        
+        // Try 2: verify-otp endpoint with E.164 format
+        try {
+          debugPrint('🔓 Attempt 2: /auth/verify-otp with E.164 format');
+          final verifyResponse = await apiClient.verifyOTP(e164Phone, otp, countryCode: '+91');
+          debugPrint('🔓 verify-otp response: $verifyResponse');
+          if (verifyResponse['success'] == true) {
+            return await _handleBackendAuthResponse(verifyResponse);
+          }
+          final msg = verifyResponse['message'] as String? ?? '';
+          debugPrint('🔓 verify-otp failed: $msg');
+        } catch (e) {
+          debugPrint('🔓 verify-otp exception: $e');
+        }
+
+        // All attempts failed
+        state = state.copyWith(isLoading: false, error: 'Backend does not support test OTP. Configure Firebase test numbers.');
         return const VerifyOTPResult(
-          success: false,
-          error: 'Invalid OTP. Use 123456 for dev mode.',
+          success: false, 
+          error: 'Backend requires Firebase auth. Add +919794696252 as test phone in Firebase Console with OTP 123456.',
         );
       }
 
-      // Try backend first so we get real token (uploads will work). If backend rejects or is down, use mock session.
-      debugPrint('🔓 DEV MODE: OTP 123456 — trying backend verify-otp for real JWT token');
-      try {
-        final response = await apiClient.verifyOTP(sessionPhone, otp);
-        debugPrint('🔓 Backend verify-otp response: $response');
-        final success = response['success'] as bool? ?? false;
-        if (success) {
-          debugPrint('🔓 Backend accepted 123456, extracting real JWT token');
-          final tokens = (response['data'] as Map?)?['tokens'] as Map?;
-          final accessToken = tokens?['accessToken'] as String?;
-          debugPrint('🔓 AccessToken from backend: ${accessToken?.substring(0, 20)}...');
-          return await _handleBackendAuthResponse(response);
-        } else {
-          debugPrint('🔓 Backend returned success=false: ${response['message']}');
-        }
-      } catch (e) {
-        debugPrint('🔓 Backend verify-otp exception: $e');
+      // For test sessions with wrong OTP
+      if (isTestSession && otp != _testOtp) {
+        state = state.copyWith(isLoading: false, error: 'Invalid OTP. For test numbers use $_testOtp');
+        return VerifyOTPResult(success: false, error: 'Invalid OTP. For test numbers use $_testOtp');
       }
 
-      debugPrint('🔓 DEV MODE: Backend failed, using mock session (NOTE: mock token will NOT work for API calls)');
-      return await _createMockDevSession(sessionPhone);
+      // For real sessions: Firebase verification
+      debugPrint('🔥 Verifying OTP via Firebase for phone: $actualPhone');
+      final firebaseVerify = await firebasePhoneAuth.verifyOTP(otp);
+      debugPrint('🔥 Firebase verify result: success=${firebaseVerify.success}, hasToken=${firebaseVerify.idToken != null}, error=${firebaseVerify.error}');
+      
+      if (!firebaseVerify.success || firebaseVerify.idToken == null || firebaseVerify.idToken!.isEmpty) {
+        final msg = firebaseVerify.error ?? 'Firebase OTP verification failed.';
+        debugPrint('🔥 Firebase verification failed: $msg');
+        state = state.copyWith(isLoading: false, error: msg);
+        return VerifyOTPResult(success: false, error: msg);
+      }
+
+      debugPrint('🔥 Firebase verification successful, calling backend /auth/firebase-phone');
+      final backendResponse = await apiClient.authenticateWithFirebase(firebaseVerify.idToken!);
+      debugPrint('🔥 Backend firebase-phone response: $backendResponse');
+      return await _handleBackendAuthResponse(backendResponse);
     } catch (e) {
       debugPrint('📱 Verify OTP error: $e');
 
@@ -390,60 +569,199 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
-  /// DEV MODE: Create a mock user session when backend is unavailable.
-  /// This allows developers to test the app UI without a running backend.
-  /// WARNING: This uses an invalid token - API calls WILL fail with "jwt malformed".
-  Future<VerifyOTPResult> _createMockDevSession(String phone) async {
-    debugPrint('⚠️ DEV MODE: Creating MOCK session (backend unavailable)');
-    debugPrint('⚠️ WARNING: Mock token is NOT a valid JWT - all API calls will fail!');
-    
-    // Generate a mock user ID based on phone
-    final mockUserId = 'dev_${phone.replaceAll(RegExp(r'[^0-9]'), '')}';
-    // NOTE: This is NOT a valid JWT - it will cause "jwt malformed" errors!
-    const mockToken = 'MOCK_TOKEN_NOT_VALID_JWT';
-    
-    final mockUser = User(
-      id: mockUserId,
-      email: 'dev@example.com',
-      phone: phone,
-      name: 'Dev User',
-      avatarUrl: null,
-      userType: UserType.rider,
-      createdAt: DateTime.now(),
-      updatedAt: DateTime.now(),
-      userMetadata: {
-        'firstName': 'Dev',
-        'lastName': 'User',
-        'isVerified': true,
-        'isActive': true,
-        'isDevMode': true,
-      },
-    );
+  String _normalizePhoneDigits(String phone) {
+    var normalized = phone.replaceAll(RegExp(r'[^\d]'), '');
+    if (normalized.startsWith('91') && normalized.length > 10) {
+      normalized = normalized.substring(normalized.length - 10);
+    } else if (normalized.length > 10) {
+      normalized = normalized.substring(normalized.length - 10);
+    }
+    return normalized;
+  }
 
-    // Store mock credentials - but note the token is invalid for API calls
-    await _secureStorage.write(key: _tokenKey, value: mockToken);
-    await _secureStorage.write(key: _userKey, value: _encodeUser(mockUser));
-    
-    apiClient.setAuthToken(mockToken);
-
-    debugPrint('✅ DEV MODE: Mock user created for UI testing only');
-    debugPrint('   User ID: $mockUserId');
-    debugPrint('   Phone: $phone');
-    debugPrint('   ❌ API calls (upload, status, etc.) WILL FAIL - backend not connected');
-
-    state = AuthState(user: mockUser, pendingOnboarding: true);
-
-    return VerifyOTPResult(
-      success: true,
-      user: mockUser,
-      token: mockToken,
-      isNewUser: true,
-    );
+  bool _requiresPhoneLink(String? phone) {
+    final value = (phone ?? '').trim();
+    return value.isEmpty || value.startsWith('google_');
   }
 
   Future<OTPResult> resendOTP(String phone) async {
     state = state.copyWith(currentSessionId: null);
     return requestOTP(phone);
+  }
+
+  /// True when Firebase has an active verification session.
+  bool hasActiveOtpSession() => firebasePhoneAuth.hasValidSession;
+
+  Future<SocialSignInResult> signInWithGoogle() async {
+    state = state.copyWith(isLoading: true, error: null);
+    try {
+      final googleResult = await GoogleAuthService.signIn();
+      if (!googleResult.success || googleResult.idToken == null) {
+        state = state.copyWith(isLoading: false);
+        return SocialSignInResult(
+          success: false,
+          error: googleResult.error ?? 'Google sign-in failed',
+        );
+      }
+
+      final backendResponse =
+          await apiClient.authenticateWithGoogle(googleResult.idToken!);
+      return await _handleSocialAuthResponse(backendResponse);
+    } catch (e) {
+      state = state.copyWith(isLoading: false);
+      return SocialSignInResult(
+        success: false,
+        error: e.toString(),
+      );
+    }
+  }
+
+  Future<SocialSignInResult> signInWithTruecaller({
+    String? phone,
+    Map<String, dynamic>? profile,
+    String? accessToken,
+    String? truecallerToken,
+  }) async {
+    state = state.copyWith(isLoading: true, error: null);
+    try {
+      String? normalizedE164Phone;
+      if (phone != null && phone.isNotEmpty) {
+        final normalizedPhone = _normalizePhoneDigits(phone);
+        if (normalizedPhone.length != 10) {
+          state = state.copyWith(isLoading: false);
+          return const SocialSignInResult(
+            success: false,
+            error: 'Please enter a valid 10-digit mobile number.',
+          );
+        }
+        normalizedE164Phone = '+91$normalizedPhone';
+      }
+
+      final backendResponse = await apiClient.authenticateWithTruecaller(
+        phone: normalizedE164Phone,
+        profile: profile,
+        accessToken: accessToken,
+        truecallerToken: truecallerToken,
+      );
+      return await _handleSocialAuthResponse(backendResponse);
+    } catch (e) {
+      state = state.copyWith(isLoading: false);
+      return SocialSignInResult(
+        success: false,
+        error: e.toString(),
+      );
+    }
+  }
+
+  Future<VerifyOTPResult> verifyOtpForPhoneLink(String otp) async {
+    state = state.copyWith(isLoading: true, error: null);
+    try {
+      final firebaseVerify = await firebasePhoneAuth.verifyOTP(otp);
+      if (!firebaseVerify.success ||
+          firebaseVerify.idToken == null ||
+          firebaseVerify.idToken!.isEmpty) {
+        final msg = firebaseVerify.error ?? 'OTP verification failed';
+        state = state.copyWith(isLoading: false, error: msg);
+        return VerifyOTPResult(success: false, error: msg);
+      }
+
+      final response =
+          await apiClient.addPhoneWithFirebase(firebaseVerify.idToken!);
+      final success = response['success'] as bool? ?? false;
+      if (!success) {
+        final msg =
+            response['message'] as String? ?? 'Failed to link phone number';
+        state = state.copyWith(isLoading: false, error: msg);
+        return VerifyOTPResult(success: false, error: msg);
+      }
+
+      final data = response['data'] as Map<String, dynamic>?;
+      final userJson = data?['user'] as Map<String, dynamic>?;
+      if (userJson == null) {
+        state = state.copyWith(isLoading: false);
+        return const VerifyOTPResult(
+          success: false,
+          error: 'Invalid response from server',
+        );
+      }
+
+      final user = _mapUserFromBackend(userJson);
+      await _secureStorage.write(key: _userKey, value: _encodeUser(user));
+      state = state.copyWith(
+        user: user,
+        isLoading: false,
+        pendingPhoneLink: false,
+        pendingOnboarding: state.onboardingAfterPhoneLink,
+        onboardingAfterPhoneLink: false,
+      );
+
+      return VerifyOTPResult(
+        success: true,
+        user: user,
+        isNewUser: state.pendingOnboarding,
+      );
+    } catch (e) {
+      state = state.copyWith(isLoading: false, error: e.toString());
+      return VerifyOTPResult(success: false, error: e.toString());
+    }
+  }
+
+  Future<SocialSignInResult> _handleSocialAuthResponse(
+      Map<String, dynamic> response) async {
+    final success = response['success'] as bool? ?? false;
+    if (!success) {
+      state = state.copyWith(isLoading: false);
+      return SocialSignInResult(
+        success: false,
+        error: response['message'] as String? ?? 'Authentication failed',
+      );
+    }
+
+    final data = response['data'] as Map<String, dynamic>?;
+    final userJson = data?['user'] as Map<String, dynamic>?;
+    final tokens = data?['tokens'] as Map<String, dynamic>?;
+    final accessToken = tokens?['accessToken'] as String?;
+    final refreshToken = tokens?['refreshToken'] as String?;
+    final requiresPhone = data?['requiresPhone'] as bool? ?? false;
+    final isNewUser = data?['isNewUser'] as bool? ?? false;
+
+    if (userJson == null || accessToken == null) {
+      state = state.copyWith(isLoading: false);
+      return const SocialSignInResult(
+        success: false,
+        error: 'Invalid response from server',
+      );
+    }
+
+    final user = _mapUserFromBackend(userJson);
+    await _secureStorage.write(key: _tokenKey, value: accessToken);
+    if (refreshToken != null) {
+      await _secureStorage.write(key: _refreshTokenKey, value: refreshToken);
+    }
+    await _secureStorage.write(key: _userKey, value: _encodeUser(user));
+
+    apiClient.setAuthToken(accessToken);
+    apiClient.setRefreshToken(refreshToken);
+    _ref.read(driverRidesProvider.notifier).resetForNewSession();
+    webSocketService.connect(token: accessToken).catchError((e) {
+      debugPrint('Socket.io connection failed: $e');
+    });
+    pushNotificationService.registerToken().catchError((e) {
+      debugPrint('FCM token registration failed: $e');
+    });
+
+    state = AuthState(
+      user: user,
+      pendingPhoneLink: requiresPhone,
+      onboardingAfterPhoneLink: requiresPhone ? isNewUser : false,
+      pendingOnboarding: requiresPhone ? false : isNewUser,
+    );
+
+    return SocialSignInResult(
+      success: true,
+      requiresPhone: requiresPhone,
+      isNewUser: isNewUser,
+    );
   }
 
   /// Helper method to handle backend auth response
@@ -506,6 +824,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
     apiClient.setAuthToken(accessToken);
     apiClient.setRefreshToken(refreshToken);
 
+    // Fresh auth session: do not carry old driver offer cards.
+    _ref.read(driverRidesProvider.notifier).resetForNewSession();
+
     // Connect to Socket.io (non-blocking)
     webSocketService.connect(token: accessToken).catchError((e) {
       debugPrint('Socket.io connection failed: $e');
@@ -516,16 +837,19 @@ class AuthNotifier extends StateNotifier<AuthState> {
       debugPrint('FCM token registration failed: $e');
     });
 
+    // Trust backend's isNewUser flag - only show onboarding for truly new users
     final backendIsNewUser = data['isNewUser'] as bool? ?? false;
     final firstName = userJson['firstName'] as String? ?? '';
-    final lastName = userJson['lastName'] as String?;
-    final hasRealName = firstName.isNotEmpty && 
-        firstName != 'User' && firstName != 'New' && !firstName.startsWith('+');
-    final needsOnboarding = backendIsNewUser || (!hasRealName && (lastName == null || lastName.isEmpty));
+    final lastName = userJson['lastName'] as String? ?? '';
     
     debugPrint('🔍 Backend isNewUser: $backendIsNewUser');
     debugPrint('🔍 User data: firstName="$firstName", lastName="$lastName"');
-    debugPrint('🔍 hasRealName=$hasRealName, needsOnboarding=$needsOnboarding');
+    
+    // Only require onboarding if backend explicitly says this is a new user
+    // Don't second-guess based on name fields - user may have completed onboarding
+    // but just has no name set (which is fine)
+    final needsOnboarding = backendIsNewUser;
+    debugPrint('🔍 needsOnboarding=$needsOnboarding');
 
     state = AuthState(user: user, pendingOnboarding: needsOnboarding);
 
@@ -538,6 +862,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   Future<void> signOut() async {
+    if (state.isLoggingOut) return;
     state = state.copyWith(isLoading: true, isLoggingOut: true);
 
     try {
@@ -623,12 +948,19 @@ class AuthNotifier extends StateNotifier<AuthState> {
             final freshUser = _mapUserFromBackend(userJson);
             await _secureStorage.write(key: _userKey, value: _encodeUser(freshUser));
 
+            // Account switch should never show stale offer cards from prior session.
+            _ref.read(driverRidesProvider.notifier).resetForNewSession();
+
             // Reconnect socket (non-blocking)
             webSocketService.connect(token: token).catchError((e) {
               debugPrint('Socket.io connection failed: $e');
             });
 
-            state = AuthState(user: freshUser);
+            state = AuthState(
+              user: freshUser,
+              pendingPhoneLink: _requiresPhoneLink(freshUser.phone),
+              pendingOnboarding: false,
+            );
             debugPrint('📱 Switched to account: ${freshUser.name}');
             return true;
           }
@@ -704,7 +1036,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       email: json['email'] as String? ?? '',
       phone: json['phone'] as String?,
       name: fullName.isNotEmpty ? fullName : 'User',
-      avatarUrl: json['profileImage'] as String?,
+      avatarUrl: json['profileImage'] as String? ?? json['profile_image'] as String?,
       userType: UserType.rider, // Default; backend doesn't have user_type field yet
       createdAt: json['createdAt'] != null
           ? (json['createdAt'] is String
@@ -736,7 +1068,7 @@ final secureStorageProvider = Provider<FlutterSecureStorage>((ref) {
 
 final authStateProvider = StateNotifierProvider<AuthNotifier, AuthState>((ref) {
   final secureStorage = ref.watch(secureStorageProvider);
-  return AuthNotifier(secureStorage);
+  return AuthNotifier(secureStorage, ref);
 });
 
 // Convenience providers
@@ -754,6 +1086,10 @@ final isLoadingAuthProvider = Provider<bool>((ref) {
 
 final pendingOnboardingProvider = Provider<bool>((ref) {
   return ref.watch(authStateProvider).pendingOnboarding;
+});
+
+final pendingPhoneLinkProvider = Provider<bool>((ref) {
+  return ref.watch(authStateProvider).pendingPhoneLink;
 });
 
 final currentSessionIdProvider = Provider<String?>((ref) {

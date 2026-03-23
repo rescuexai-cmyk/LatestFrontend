@@ -29,8 +29,11 @@ class AppRoutes {
   static const String driverHome = '/driver';
   static const String driverOnboarding = '/driver/onboarding';
   static const String driverWelcome = '/driver/welcome';
+  static const String driverDocuments = '/driver/documents';  // Update/manage documents
   static const String driverProfile = '/driver/profile';
   static const String driverActiveRide = '/driver/active-ride';
+  static const String driverSubscriptionPayment = '/driver/subscription-payment';
+  static const String driverPenaltyPayment = '/driver/penalty-payment';
 
   // Payment routes
   static const String payment = '/payment';

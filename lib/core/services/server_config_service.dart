@@ -27,15 +27,16 @@ class ServerConfigService {
   /// The compile-time app version (bumped on every meaningful build).
   static const String _appVersion = String.fromEnvironment(
     'APP_VERSION',
-    defaultValue: '2.4.0', // Bumped to force config reset (realtime via nginx /realtime path)
+    defaultValue:
+        '2.4.3', // Bumped - revert to no trailing slash, use origin-only baseUrl
   );
 
   /// The compile-time default API URL for this build.
   /// Production: DigitalOcean droplet
   static String get buildDefault => const String.fromEnvironment(
-    'API_URL',
-    defaultValue: 'http://139.59.34.68/api',
-  );
+        'API_URL',
+        defaultValue: 'https://api.raahionrescue.com',
+      );
 
   /// Must be called once at app startup (before ApiClient is used).
   static Future<void> init() async {
@@ -46,14 +47,16 @@ class ServerConfigService {
     // 1. Version change → clear (APK was updated)
     final previousVersion = prefs.getString(_keyAppVersion);
     if (previousVersion != null && previousVersion != _appVersion) {
-      debugPrint('🔄 App version changed ($previousVersion → $_appVersion), clearing server config');
+      debugPrint(
+          '🔄 App version changed ($previousVersion → $_appVersion), clearing server config');
       shouldClear = true;
     }
 
     // 2. Build default changed → clear (different --dart-define IP)
     final previousBuildDefault = prefs.getString(_keyBuildDefault);
     if (previousBuildDefault != null && previousBuildDefault != buildDefault) {
-      debugPrint('🔄 Build default changed ($previousBuildDefault → $buildDefault), clearing server config');
+      debugPrint(
+          '🔄 Build default changed ($previousBuildDefault → $buildDefault), clearing server config');
       shouldClear = true;
     }
 
@@ -76,17 +79,19 @@ class ServerConfigService {
       _wsUrl = null;
       await prefs.remove(_keyWsUrl);
     }
-    
+
     // Migrate: clear WS URLs that use ws:// scheme (socket_io_client needs HTTP)
-    if (_wsUrl != null && (_wsUrl!.startsWith('ws://') || _wsUrl!.startsWith('wss://'))) {
+    if (_wsUrl != null &&
+        (_wsUrl!.startsWith('ws://') || _wsUrl!.startsWith('wss://'))) {
       debugPrint('🔄 Clearing stale ws:// URL, socket_io_client requires HTTP');
       _wsUrl = null;
       await prefs.remove(_keyWsUrl);
     }
-    
+
     // Migrate: clear WS URLs that use port 5007 directly (should use /realtime path instead)
     if (_wsUrl != null && _wsUrl!.contains(':5007')) {
-      debugPrint('🔄 Clearing stale :5007 URL, should use /realtime path via nginx');
+      debugPrint(
+          '🔄 Clearing stale :5007 URL, should use /realtime path via nginx');
       _wsUrl = null;
       await prefs.remove(_keyWsUrl);
     }
@@ -103,7 +108,8 @@ class ServerConfigService {
 
     if (!_isHealthy && _apiUrl != null && _apiUrl!.isNotEmpty) {
       // Saved URL is unreachable — try the build default instead
-      debugPrint('⚠️ Saved URL ($activeUrl) unreachable, trying build default ($buildDefault)');
+      debugPrint(
+          '⚠️ Saved URL ($activeUrl) unreachable, trying build default ($buildDefault)');
       final defaultHealthy = await _checkHealth(buildDefault);
       if (defaultHealthy) {
         debugPrint('✅ Build default reachable, clearing stale saved config');
@@ -123,18 +129,22 @@ class ServerConfigService {
   /// Quick HTTP health check (3-second timeout).
   /// Tries /health first, then /rides/available as fallback.
   static Future<bool> _checkHealth(String baseUrl) async {
-    Future<bool> tryGet(String url) async {
+    Future<bool> tryGet(
+      String url, {
+      required bool Function(int statusCode) acceptStatus,
+    }) async {
       for (var attempt = 1; attempt <= _healthRetries; attempt++) {
         HttpClient? client;
         try {
           client = HttpClient()..connectionTimeout = _healthTimeout;
           final request = await client.getUrl(Uri.parse(url));
           final response = await request.close().timeout(_healthTimeout);
-          if (response.statusCode >= 200 && response.statusCode < 500) {
+          if (acceptStatus(response.statusCode)) {
             return true;
           }
         } catch (e) {
-          debugPrint('   health attempt $attempt/$_healthRetries failed for $url: $e');
+          debugPrint(
+              '   health attempt $attempt/$_healthRetries failed for $url: $e');
           if (attempt < _healthRetries) {
             await Future.delayed(const Duration(milliseconds: 350));
           }
@@ -145,22 +155,34 @@ class ServerConfigService {
       return false;
     }
 
+    // Remove any trailing slash for consistent URL building
+    final cleanBase = baseUrl.endsWith('/')
+        ? baseUrl.substring(0, baseUrl.length - 1)
+        : baseUrl;
+
     // Attempt 1: /health at the server root
     try {
-      String healthUrl = baseUrl;
-      if (healthUrl.endsWith('/api')) {
-        healthUrl = healthUrl.substring(0, healthUrl.length - 4);
+      final healthUrl = '$cleanBase/health';
+      if (await tryGet(
+        healthUrl,
+        acceptStatus: (code) => code >= 200 && code < 400,
+      )) {
+        return true;
       }
-      healthUrl = '$healthUrl/health';
-      if (await tryGet(healthUrl)) return true;
     } catch (e) {
       debugPrint('   /health check failed for $baseUrl: $e');
     }
 
-    // Attempt 2: try an actual API endpoint (use /auth/me - doesn't require query params)
+    // Attempt 2: try an actual API endpoint (use /api/auth/me)
     try {
-      final apiUrl = baseUrl.endsWith('/api') ? baseUrl : '$baseUrl/api';
-      if (await tryGet('$apiUrl/auth/me')) return true;
+      if (await tryGet(
+        '$cleanBase/api/auth/me',
+        // 401/403 means backend is reachable but auth required.
+        acceptStatus: (code) =>
+            (code >= 200 && code < 400) || code == 401 || code == 403,
+      )) {
+        return true;
+      }
     } catch (e) {
       debugPrint('   API fallback check failed for $baseUrl: $e');
     }
@@ -226,7 +248,8 @@ class ServerConfigService {
 
   /// Check if the realtime service is reachable from this device.
   /// Uses nginx-proxied /realtime endpoint (port 80) for better mobile compatibility.
-  static Future<bool> checkRealtimeReachable({Duration timeout = const Duration(seconds: 6)}) async {
+  static Future<bool> checkRealtimeReachable(
+      {Duration timeout = const Duration(seconds: 6)}) async {
     try {
       final url = Uri.parse('$realtimeHttpUrl/health');
       debugPrint('🔌 Realtime health check: $url');
@@ -235,7 +258,8 @@ class ServerConfigService {
       final response = await request.close().timeout(timeout);
       client.close(force: true);
       final ok = response.statusCode == 200;
-      debugPrint('🔌 Realtime health: ${response.statusCode} -> ${ok ? "OK" : "FAIL"}');
+      debugPrint(
+          '🔌 Realtime health: ${response.statusCode} -> ${ok ? "OK" : "FAIL"}');
       return ok;
     } catch (e) {
       debugPrint('🔌 Realtime health check failed: $e');
@@ -244,21 +268,21 @@ class ServerConfigService {
   }
 
   /// Derive the Socket.io URL from an API URL automatically.
-  /// 
+  ///
   /// IMPORTANT: socket_io_client package expects HTTP/HTTPS URLs, NOT ws/wss.
   /// The package handles transport (polling → websocket upgrade) internally.
-  /// 
+  ///
   /// Production DigitalOcean setup:
   /// - API Gateway on port 3000 (proxied through nginx on port 80 at /api)
   /// - Realtime/Socket.io service on port 5007 (proxied through nginx on port 80 at /realtime)
-  /// 
+  ///
   /// Mobile networks often block non-standard ports, so we use nginx proxy.
   static String deriveWsUrl(String apiUrl) {
     try {
       final uri = Uri.parse(apiUrl);
       // Socket.io client uses HTTP/HTTPS, not ws/wss
       final scheme = uri.scheme == 'https' ? 'https' : 'http';
-      
+
       // If URL has explicit port that's not 80/443, use it as-is
       // (likely a development/local setup)
       if (uri.hasPort && uri.port != 80 && uri.port != 443) {
@@ -268,12 +292,12 @@ class ServerConfigService {
         }
         return '$scheme://${uri.host}:${uri.port}';
       }
-      
+
       // Production: Use nginx-proxied realtime endpoint on port 80
       // This works better with mobile networks that block non-standard ports
       return '$scheme://${uri.host}/realtime';
     } catch (_) {
-      return 'http://139.59.34.68/realtime';
+      return 'https://api.raahionrescue.com/realtime';
     }
   }
 }

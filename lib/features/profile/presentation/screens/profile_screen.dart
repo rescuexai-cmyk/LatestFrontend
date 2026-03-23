@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
@@ -15,6 +16,7 @@ import '../../../../core/services/places_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -26,21 +28,79 @@ class ProfileScreen extends ConsumerStatefulWidget {
   ConsumerState<ProfileScreen> createState() => _ProfileScreenState();
 }
 
-class _ProfileScreenState extends ConsumerState<ProfileScreen> {
+class _ProfileScreenState extends ConsumerState<ProfileScreen>
+    with WidgetsBindingObserver {
   // User stats - loaded from backend
   int _totalRides = 0;
   double _rating = 0.0;
   int _savedPlacesCount = 0;
   bool _isLoadingStats = true;
-  
+
   // Saved places
   List<Map<String, dynamic>> _savedPlaces = [];
+
+  // Notification permission state – kept in sync with the OS
+  bool _notificationsGranted = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadUserStats();
     _loadSavedPlaces();
+    _syncNotificationStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _syncNotificationStatus();
+    }
+  }
+
+  /// Re-read the OS notification permission and align local prefs / FCM token.
+  Future<void> _syncNotificationStatus() async {
+    final status = await Permission.notification.status;
+    final granted = status.isGranted;
+
+    if (mounted && granted != _notificationsGranted) {
+      setState(() => _notificationsGranted = granted);
+
+      final prefs = await SharedPreferences.getInstance();
+      if (granted) {
+        // User enabled notifications from device settings – re-register FCM
+        if (prefs.getBool('pref_push_notifications') != true) {
+          await prefs.setBool('pref_push_notifications', true);
+          await prefs.setBool('notificationsEnabled', true);
+          pushNotificationService.registerToken().catchError((_) {});
+        }
+      } else {
+        // User revoked notifications from device settings – unregister FCM
+        if (prefs.getBool('pref_push_notifications') == true) {
+          await prefs.setBool('pref_push_notifications', false);
+          await prefs.setBool('notificationsEnabled', false);
+          await pushNotificationService.unregisterToken();
+        }
+      }
+    } else if (mounted) {
+      setState(() => _notificationsGranted = granted);
+    }
+  }
+
+  /// Format E.164 phone (+919450665544) as "+91 94506 65544"
+  String _formatPhone(String phone) {
+    var digits = phone.replaceFirst(RegExp(r'^\+91\s*'), '');
+    digits = digits.replaceAll(RegExp(r'[^\d]'), '');
+    if (digits.length == 10) {
+      return '+91 ${digits.substring(0, 5)} ${digits.substring(5)}';
+    }
+    return phone.startsWith('+') ? phone : '+91 $phone';
   }
 
   Future<void> _loadUserStats() async {
@@ -72,11 +132,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     try {
       final placesJson = prefs.getString('saved_places') ?? '[]';
       final places = json.decode(placesJson) as List;
-      final loadedPlaces = places.map((p) => Map<String, dynamic>.from(p)).toList();
-      
+      final loadedPlaces =
+          places.map((p) => Map<String, dynamic>.from(p)).toList();
+
       // Also sync from savedLocationsProvider to ensure consistency
       final savedLocations = ref.read(savedLocationsProvider);
-      
+
       // Check if home exists in provider but not in local storage
       if (savedLocations.homeLocation != null) {
         final homeExists = loadedPlaces.any((p) => p['type'] == 'home');
@@ -92,7 +153,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           });
         }
       }
-      
+
       // Check if work exists in provider but not in local storage
       if (savedLocations.workLocation != null) {
         final workExists = loadedPlaces.any((p) => p['type'] == 'work');
@@ -108,7 +169,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           });
         }
       }
-      
+
       setState(() {
         _savedPlaces = loadedPlaces;
         _savedPlacesCount = _savedPlaces.length;
@@ -142,176 +203,202 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       body: Stack(
         children: [
           SingleChildScrollView(
-            padding: const EdgeInsets.only(left: 20, right: 20, top: 20, bottom: 100),
+            padding: const EdgeInsets.only(
+                left: 20, right: 20, top: 20, bottom: 100),
             child: Column(
               children: [
-            // Profile header
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: AppColors.inputBackground,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 40,
-                    backgroundColor: AppColors.secondary.withOpacity(0.2),
-                    backgroundImage: user?.avatarUrl != null
-                        ? NetworkImage(user!.avatarUrl!)
-                        : null,
-                    child: user?.avatarUrl == null
-                        ? Text(
-                            user?.name.isNotEmpty == true
-                                ? user!.name[0].toUpperCase()
-                                : 'U',
-                            style: const TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.secondary,
-                            ),
-                          )
-                        : null,
+                // Profile header
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: AppColors.inputBackground,
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          user?.name ?? 'User',
-                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          user?.email ?? '',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: AppColors.textSecondary,
-                          ),
-                        ),
-                        if (user?.phone != null) ...[
-                          const SizedBox(height: 2),
-                          Text(
-                            '+91 ${user!.phone!}',
-                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                              color: AppColors.textSecondary,
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 40,
+                        backgroundColor: AppColors.secondary.withOpacity(0.2),
+                        backgroundImage: user?.avatarUrl != null
+                            ? NetworkImage(user!.avatarUrl!)
+                            : null,
+                        child: user?.avatarUrl == null
+                            ? Text(
+                                user?.name.isNotEmpty == true
+                                    ? user!.name[0].toUpperCase()
+                                    : 'U',
+                                style: const TextStyle(
+                                  fontSize: 32,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.secondary,
+                                ),
+                              )
+                            : null,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              user?.name ?? 'User',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleLarge
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                  ),
                             ),
-                          ),
-                        ],
-                      ],
+                            const SizedBox(height: 4),
+                            Text(
+                              user?.email ?? '',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodyMedium
+                                  ?.copyWith(
+                                    color: AppColors.textSecondary,
+                                  ),
+                            ),
+                            if (user?.phone != null &&
+                                user!.phone!.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                _formatPhone(user.phone!),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodyMedium
+                                    ?.copyWith(
+                                      color: AppColors.textSecondary,
+                                    ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // Stats row - Dynamic values
+                Row(
+                  children: [
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.directions_car,
+                        label: 'Total Rides',
+                        value: _isLoadingStats ? '' : _totalRides.toString(),
+                        isLoading: _isLoadingStats,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.star,
+                        label: 'Rating',
+                        value: _isLoadingStats
+                            ? ''
+                            : (_rating > 0
+                                ? _rating.toStringAsFixed(1)
+                                : 'N/A'),
+                        isLoading: _isLoadingStats,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.favorite,
+                        label: 'Saved',
+                        value:
+                            _isLoadingStats ? '' : _savedPlacesCount.toString(),
+                        isLoading: _isLoadingStats,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+
+                // Menu items - Removed Ride History and Payment Methods
+                _MenuItem(
+                  icon: Icons.location_on_outlined,
+                  title: ref.tr('saved_places'),
+                  subtitle: 'Home, Work, and more',
+                  onTap: () => _openSavedPlaces(context),
+                ),
+                _MenuItem(
+                  icon: _notificationsGranted
+                      ? Icons.notifications_active
+                      : Icons.notifications_off_outlined,
+                  title: ref.tr('notifications'),
+                  subtitle: _notificationsGranted
+                      ? ref.tr('notifications_enabled')
+                      : ref.tr('notifications_disabled_tap'),
+                  onTap: () => _openNotificationPreferences(context),
+                ),
+                _MenuItem(
+                  icon: Icons.help_outline,
+                  title: ref.tr('help_support'),
+                  subtitle: 'Get help with your rides',
+                  onTap: () => _openHelpOptions(context),
+                ),
+                _MenuItem(
+                  icon: Icons.info_outline,
+                  title: ref.tr('about'),
+                  subtitle: ref.tr('about_desc'),
+                  onTap: () {
+                    showAboutDialog(
+                      context: context,
+                      applicationName: 'Raahi',
+                      applicationVersion: '1.0.0',
+                      applicationIcon: const Icon(Icons.directions_car,
+                          size: 48, color: AppColors.primary),
+                    );
+                  },
+                ),
+                const SizedBox(height: 24),
+
+                // Logout button
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      final langCode = ref.read(settingsProvider).languageCode;
+                      final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: Text(trWithCode('logout', langCode)),
+                          content: Text(trWithCode('logout_confirm', langCode)),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: Text(trWithCode('cancel', langCode)),
+                            ),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppColors.error),
+                              child: Text(trWithCode('logout', langCode)),
+                            ),
+                          ],
+                        ),
+                      );
+
+                      if (confirmed == true) {
+                        await ref.read(authStateProvider.notifier).signOut();
+                        if (context.mounted) {
+                          context.go(AppRoutes.login);
+                        }
+                      }
+                    },
+                    icon: const Icon(Icons.logout, color: AppColors.error),
+                    label: Text(ref.tr('logout'),
+                        style: const TextStyle(color: AppColors.error)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: AppColors.error),
                     ),
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Stats row - Dynamic values
-            Row(
-              children: [
-                Expanded(
-                  child: _StatCard(
-                    icon: Icons.directions_car,
-                    label: 'Total Rides',
-                    value: _isLoadingStats ? '...' : _totalRides.toString(),
-                  ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatCard(
-                    icon: Icons.star,
-                    label: 'Rating',
-                    value: _isLoadingStats ? '...' : (_rating > 0 ? _rating.toStringAsFixed(1) : 'N/A'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatCard(
-                    icon: Icons.favorite,
-                    label: 'Saved',
-                    value: _isLoadingStats ? '...' : _savedPlacesCount.toString(),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-
-            // Menu items - Removed Ride History and Payment Methods
-            _MenuItem(
-              icon: Icons.location_on_outlined,
-              title: ref.tr('saved_places'),
-              subtitle: 'Home, Work, and more',
-              onTap: () => _openSavedPlaces(context),
-            ),
-            _MenuItem(
-              icon: Icons.notifications_outlined,
-              title: ref.tr('notifications'),
-              subtitle: ref.tr('notifications_desc'),
-              onTap: () => _openNotificationPreferences(context),
-            ),
-            _MenuItem(
-              icon: Icons.help_outline,
-              title: ref.tr('help_support'),
-              subtitle: 'Get help with your rides',
-              onTap: () => _openHelpOptions(context),
-            ),
-            _MenuItem(
-              icon: Icons.info_outline,
-              title: ref.tr('about'),
-              subtitle: ref.tr('about_desc'),
-              onTap: () {
-                showAboutDialog(
-                  context: context,
-                  applicationName: 'Raahi',
-                  applicationVersion: '1.0.0',
-                  applicationIcon: const Icon(Icons.directions_car, size: 48, color: AppColors.primary),
-                );
-              },
-            ),
-            const SizedBox(height: 24),
-
-            // Logout button
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () async {
-                  final langCode = ref.read(settingsProvider).languageCode;
-                  final confirmed = await showDialog<bool>(
-                    context: context,
-                    builder: (context) => AlertDialog(
-                      title: Text(trWithCode('logout', langCode)),
-                      content: Text(trWithCode('logout_confirm', langCode)),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(context, false),
-                          child: Text(trWithCode('cancel', langCode)),
-                        ),
-                        ElevatedButton(
-                          onPressed: () => Navigator.pop(context, true),
-                          style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-                          child: Text(trWithCode('logout', langCode)),
-                        ),
-                      ],
-                    ),
-                  );
-
-                  if (confirmed == true) {
-                    await ref.read(authStateProvider.notifier).signOut();
-                    if (context.mounted) {
-                      context.go(AppRoutes.login);
-                    }
-                  }
-                },
-                icon: const Icon(Icons.logout, color: AppColors.error),
-                label: Text(ref.tr('logout'), style: const TextStyle(color: AppColors.error)),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: AppColors.error),
-                ),
-              ),
-            ),
-            const SizedBox(height: 32),
+                const SizedBox(height: 32),
               ],
             ),
           ),
@@ -333,10 +420,21 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final prefs = await _prefs();
     bool pushEnabled = prefs.getBool('pref_push_notifications') ?? false;
     bool promoEnabled = prefs.getBool('pref_promo_notifications') ?? false;
-    
+
     // Check current notification permission status
     final notificationStatus = await Permission.notification.status;
     pushEnabled = pushEnabled && notificationStatus.isGranted;
+
+    // Capture translations before entering StatefulBuilder
+    final trNotificationsEnabled = ref.tr('notifications_enabled');
+    final trNotifications = ref.tr('notifications');
+    final trNotificationsDesc = ref.tr('notifications_desc');
+    final trEnableInSettings = ref.tr('enable_in_settings');
+    final trPromotions = ref.tr('promotions');
+    final trPromotionsDesc = ref.tr('promotions_desc');
+    final trEnableNotificationsFirst = ref.tr('enable_notifications_first');
+    final trServerConfig = ref.tr('server_config');
+    final trServerConfigDesc = ref.tr('server_config_desc');
 
     // ignore: use_build_context_synchronously
     await showModalBottomSheet(
@@ -348,7 +446,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            
             // Function to request notification permission
             Future<void> requestNotificationPermission(bool enable) async {
               if (enable) {
@@ -364,8 +461,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   pushNotificationService.registerToken().catchError((_) {});
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Notifications enabled'),
+                      SnackBar(
+                        content: Text(trNotificationsEnabled),
                         backgroundColor: Color(0xFF4CAF50),
                       ),
                     );
@@ -377,7 +474,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   // returns denied without showing a dialog; Settings is the only path.
                   if (context.mounted) {
                     _showOpenSettingsDialog(context, onOpenSettings: () {
-                      Navigator.of(context).pop(); // pop sheet so next open reads fresh state
+                      Navigator.of(context)
+                          .pop(); // pop sheet so next open reads fresh state
                       openAppSettings();
                     });
                   }
@@ -390,15 +488,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 await pushNotificationService.unregisterToken();
               }
             }
-            
+
             return Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   SwitchListTile(
-                    title: const Text('Notifications'),
-                    subtitle: const Text('Receive ride alerts and updates'),
+                    title: Text(trNotifications),
+                    subtitle: Text(trNotificationsDesc),
                     value: pushEnabled,
                     activeColor: const Color(0xFFD4956A),
                     onChanged: (value) => requestNotificationPermission(value),
@@ -406,17 +504,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   // When permission not granted, offer direct path to settings
                   if (!pushEnabled) ...[
                     Padding(
-                      padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+                      padding:
+                          const EdgeInsets.only(left: 16, right: 16, bottom: 8),
                       child: TextButton.icon(
                         onPressed: () => openAppSettings(),
-                        icon: const Icon(Icons.settings, size: 18, color: Color(0xFFD4956A)),
-                        label: const Text('Enable in Settings', style: TextStyle(color: Color(0xFFD4956A))),
+                        icon: const Icon(Icons.settings,
+                            size: 18, color: Color(0xFFD4956A)),
+                        label: Text(trEnableInSettings,
+                            style: TextStyle(color: Color(0xFFD4956A))),
                       ),
                     ),
                   ],
                   SwitchListTile(
-                    title: const Text('Promotions'),
-                    subtitle: const Text('Discounts and special offers'),
+                    title: Text(trPromotions),
+                    subtitle: Text(trPromotionsDesc),
                     value: promoEnabled,
                     activeColor: const Color(0xFFD4956A),
                     onChanged: (value) async {
@@ -424,8 +525,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         // Need to enable notifications first
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Please enable notifications first'),
+                            SnackBar(
+                              content: Text(trEnableNotificationsFirst),
                               backgroundColor: Colors.orange,
                             ),
                           );
@@ -437,19 +538,22 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     },
                   ),
                   const Divider(),
-                  // Language display (locked to English)
-                  const ListTile(
-                    leading: Icon(Icons.language, color: Colors.grey),
-                    title: Text('Language', style: TextStyle(color: Colors.grey)),
-                    subtitle: Text('English (India)'),
-                    trailing: Icon(Icons.lock_outline, size: 18, color: Colors.grey),
-                    onTap: null,
+                  // Language selection
+                  ListTile(
+                    leading: const Icon(Icons.language),
+                    title: const Text('Language'),
+                    subtitle: Text(_getCurrentLanguageName()),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _showLanguageSelector();
+                    },
                   ),
                   const Divider(),
                   ListTile(
                     leading: const Icon(Icons.dns_outlined),
-                    title: const Text('Server Configuration'),
-                    subtitle: const Text('Change backend URL'),
+                    title: Text(trServerConfig),
+                    subtitle: Text(trServerConfigDesc),
                     trailing: const Icon(Icons.chevron_right),
                     onTap: () {
                       Navigator.pop(context);
@@ -464,19 +568,169 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       },
     );
   }
-  
-  void _showOpenSettingsDialog(BuildContext context, {VoidCallback? onOpenSettings}) {
+
+  /// Get current language display name
+  String _getCurrentLanguageName() {
+    final settings = ref.read(settingsProvider);
+    final currentLang = supportedLanguages.firstWhere(
+      (l) => l.code == settings.languageCode,
+      orElse: () => supportedLanguages.first,
+    );
+    return currentLang.nativeName.isNotEmpty
+        ? '${currentLang.name} (${currentLang.nativeName})'
+        : currentLang.name;
+  }
+
+  /// Show language selection bottom sheet
+  /// FIXED: Use Consumer to get reactive updates so language can be changed multiple times
+  void _showLanguageSelector() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => Consumer(
+        builder: (context, ref, child) {
+          // Watch settings to get reactive updates
+          final settings = ref.watch(settingsProvider);
+          final currentCode = settings.languageCode;
+          
+          debugPrint('🌐 Language selector opened - current: $currentCode');
+          
+          return Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Handle bar
+                Container(
+                  margin: const EdgeInsets.only(top: 12),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                // Title
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.language, color: Color(0xFFD4956A)),
+                      const SizedBox(width: 12),
+                      Text(
+                        ref.tr('select_language'),
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // Language list
+                ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: supportedLanguages.length,
+                  itemBuilder: (context, index) {
+                    final lang = supportedLanguages[index];
+                    final isSelected = lang.code == currentCode;
+
+                    return ListTile(
+                      leading: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? const Color(0xFFD4956A).withOpacity(0.1)
+                              : Colors.grey[100],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Center(
+                          child: Text(
+                            lang.code.toUpperCase(),
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: isSelected
+                                  ? const Color(0xFFD4956A)
+                                  : Colors.grey[600],
+                            ),
+                          ),
+                        ),
+                      ),
+                      title: Text(
+                        lang.name,
+                        style: TextStyle(
+                          fontWeight:
+                              isSelected ? FontWeight.w600 : FontWeight.normal,
+                          color:
+                              isSelected ? const Color(0xFFD4956A) : Colors.black87,
+                        ),
+                      ),
+                      subtitle:
+                          lang.nativeName.isNotEmpty && lang.nativeName != lang.name
+                              ? Text(lang.nativeName)
+                              : null,
+                      trailing: isSelected
+                          ? const Icon(Icons.check_circle, color: Color(0xFFD4956A))
+                          : null,
+                      onTap: () async {
+                        // Close sheet first
+                        Navigator.pop(sheetContext);
+                        
+                        // Always allow language change (removed the currentCode check that was blocking)
+                        debugPrint('🌐 Language change requested: ${lang.code} (was: $currentCode)');
+                        
+                        // Small delay to let sheet animation finish
+                        await Future.delayed(const Duration(milliseconds: 200));
+                        
+                        await ref
+                            .read(settingsProvider.notifier)
+                            .setLanguage(lang.code, lang.name);
+                        
+                        debugPrint('✅ Language changed to: ${lang.code}');
+                        
+                        if (mounted) {
+                          ScaffoldMessenger.of(this.context).showSnackBar(
+                            SnackBar(
+                              content: Text('Language changed to ${lang.name}'),
+                              backgroundColor: const Color(0xFF4CAF50),
+                            ),
+                          );
+                          setState(() {}); // Refresh UI
+                        }
+                      },
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showOpenSettingsDialog(BuildContext context,
+      {VoidCallback? onOpenSettings}) {
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Notifications Disabled'),
+        title: Text(ref.tr('notifications_disabled')),
         content: const Text(
           'Notification permission has been denied. To enable notifications, please go to your device settings and allow notifications for this app.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
+            child: Text(ref.tr('cancel')),
           ),
           ElevatedButton(
             onPressed: () {
@@ -490,7 +744,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFD4956A),
             ),
-            child: const Text('Open Settings', style: TextStyle(color: Colors.white)),
+            child: Text(ref.tr('open_settings'),
+                style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -567,10 +822,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                               width: 44,
                               height: 44,
                               decoration: BoxDecoration(
-                                color: const Color(0xFFD4956A).withOpacity(0.15),
+                                color:
+                                    const Color(0xFFD4956A).withOpacity(0.15),
                                 borderRadius: BorderRadius.circular(10),
                               ),
-                              child: const Icon(Icons.add_location_alt, color: Color(0xFFD4956A)),
+                              child: const Icon(Icons.add_location_alt,
+                                  color: Color(0xFFD4956A)),
                             ),
                             const SizedBox(width: 16),
                             const Expanded(
@@ -594,7 +851,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                 ],
                               ),
                             ),
-                            const Icon(Icons.chevron_right, color: Color(0xFF888888)),
+                            const Icon(Icons.chevron_right,
+                                color: Color(0xFF888888)),
                           ],
                         ),
                       ),
@@ -608,7 +866,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Icon(Icons.location_off_outlined, size: 64, color: Colors.grey[400]),
+                                Icon(Icons.location_off_outlined,
+                                    size: 64, color: Colors.grey[400]),
                                 const SizedBox(height: 16),
                                 Text(
                                   'No saved places yet',
@@ -649,10 +908,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
-  Widget _buildSavedPlaceTile(Map<String, dynamic> place, StateSetter setModalState) {
+  Widget _buildSavedPlaceTile(
+      Map<String, dynamic> place, StateSetter setModalState) {
     IconData placeIcon;
     Color iconColor;
-    
+
     switch (place['type'] ?? 'other') {
       case 'home':
         placeIcon = Icons.home;
@@ -724,17 +984,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (context) => AlertDialog(
-                  title: const Text('Delete Place'),
-                  content: Text('Are you sure you want to delete "${place['name']}"?'),
+                  title: Text(ref.tr('delete_place')),
+                  content: Text(
+                      'Are you sure you want to delete "${place['name']}"?'),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(context, false),
-                      child: const Text('Cancel'),
+                      child: Text(ref.tr('cancel')),
                     ),
                     ElevatedButton(
                       onPressed: () => Navigator.pop(context, true),
-                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-                      child: const Text('Delete', style: TextStyle(color: Colors.white)),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.error),
+                      child: Text(ref.tr('delete'),
+                          style: TextStyle(color: Colors.white)),
                     ),
                   ],
                 ),
@@ -747,7 +1010,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 await _savePlacesToPrefs();
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Place deleted')),
+                    SnackBar(content: Text(ref.tr('place_deleted'))),
                   );
                 }
               }
@@ -804,7 +1067,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   setModalState(() => isSearching = true);
 
                   try {
-                    final results = await placesService.searchPlacesAsMap(query, location: userLocation);
+                    final results = await placesService.searchPlacesAsMap(query,
+                        location: userLocation);
                     setModalState(() {
                       searchResults = results;
                       isSearching = false;
@@ -823,23 +1087,26 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   final type = await showDialog<String>(
                     context: context,
                     builder: (context) => AlertDialog(
-                      title: const Text('Save as'),
+                      title: Text(ref.tr('save_as')),
                       content: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           ListTile(
-                            leading: const Icon(Icons.home, color: Color(0xFF4CAF50)),
-                            title: const Text('Home'),
+                            leading: const Icon(Icons.home,
+                                color: Color(0xFF4CAF50)),
+                            title: Text(ref.tr('home')),
                             onTap: () => Navigator.pop(context, 'home'),
                           ),
                           ListTile(
-                            leading: const Icon(Icons.work, color: Color(0xFF2196F3)),
-                            title: const Text('Work'),
+                            leading: const Icon(Icons.work,
+                                color: Color(0xFF2196F3)),
+                            title: Text(ref.tr('work')),
                             onTap: () => Navigator.pop(context, 'work'),
                           ),
                           ListTile(
-                            leading: const Icon(Icons.place, color: Color(0xFFD4956A)),
-                            title: const Text('Other'),
+                            leading: const Icon(Icons.place,
+                                color: Color(0xFFD4956A)),
+                            title: Text(ref.tr('other')),
                             onTap: () => Navigator.pop(context, 'other'),
                           ),
                         ],
@@ -852,16 +1119,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   // Get place details if we don't have coordinates yet
                   double? lat = place['lat'] as double?;
                   double? lng = place['lng'] as double?;
-                  
-                  if ((lat == null || lng == null) && place['place_id'] != null) {
-                    final placeDetails = await placesService.getPlaceDetailsAsMap(place['place_id']);
+
+                  if ((lat == null || lng == null) &&
+                      place['place_id'] != null) {
+                    final placeDetails = await placesService
+                        .getPlaceDetailsAsMap(place['place_id']);
                     lat = placeDetails?['lat'] as double?;
                     lng = placeDetails?['lng'] as double?;
                   }
 
                   final newPlace = {
                     'id': DateTime.now().millisecondsSinceEpoch.toString(),
-                    'name': type == 'home' ? 'Home' : (type == 'work' ? 'Work' : place['name']),
+                    'name': type == 'home'
+                        ? 'Home'
+                        : (type == 'work' ? 'Work' : place['name']),
                     'address': place['address'] ?? place['name'],
                     'type': type,
                     'lat': lat,
@@ -870,8 +1141,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   };
 
                   // Check for duplicates
-                  final existingIndex = _savedPlaces.indexWhere((p) => p['type'] == type && (type == 'home' || type == 'work'));
-                  if (existingIndex != -1 && (type == 'home' || type == 'work')) {
+                  final existingIndex = _savedPlaces.indexWhere((p) =>
+                      p['type'] == type && (type == 'home' || type == 'work'));
+                  if (existingIndex != -1 &&
+                      (type == 'home' || type == 'work')) {
                     setState(() {
                       _savedPlaces[existingIndex] = newPlace;
                     });
@@ -882,31 +1155,37 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   }
 
                   await _savePlacesToPrefs();
-                  
+
                   // Sync with savedLocationsProvider so it reflects everywhere in the app
                   if (lat != null && lng != null) {
                     final location = LatLng(lat, lng);
                     final placeName = newPlace['name'] as String;
                     final address = newPlace['address'] as String;
-                    
+
                     if (type == 'home') {
-                      await ref.read(savedLocationsProvider.notifier).setHomeLocation(
-                        name: placeName,
-                        address: address,
-                        location: location,
-                      );
+                      await ref
+                          .read(savedLocationsProvider.notifier)
+                          .setHomeLocation(
+                            name: placeName,
+                            address: address,
+                            location: location,
+                          );
                     } else if (type == 'work') {
-                      await ref.read(savedLocationsProvider.notifier).setWorkLocation(
-                        name: placeName,
-                        address: address,
-                        location: location,
-                      );
+                      await ref
+                          .read(savedLocationsProvider.notifier)
+                          .setWorkLocation(
+                            name: placeName,
+                            address: address,
+                            location: location,
+                          );
                     } else {
-                      await ref.read(savedLocationsProvider.notifier).addFavorite(
-                        name: placeName,
-                        address: address,
-                        location: location,
-                      );
+                      await ref
+                          .read(savedLocationsProvider.notifier)
+                          .addFavorite(
+                            name: placeName,
+                            address: address,
+                            location: location,
+                          );
                     }
                   }
 
@@ -962,7 +1241,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         controller: searchController,
                         autofocus: true,
                         decoration: InputDecoration(
-                          hintText: 'Search for a place (e.g., Delhi, Connaught Place)',
+                          hintText:
+                              'Search for a place (e.g., Delhi, Connaught Place)',
                           prefixIcon: const Icon(Icons.search),
                           suffixIcon: searchController.text.isNotEmpty
                               ? IconButton(
@@ -975,11 +1255,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                               : null,
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(color: Color(0xFFE8E8E8)),
+                            borderSide:
+                                const BorderSide(color: Color(0xFFE8E8E8)),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(color: Color(0xFFD4956A)),
+                            borderSide:
+                                const BorderSide(color: Color(0xFFD4956A)),
                           ),
                         ),
                         onChanged: (value) => searchPlaces(value),
@@ -1007,10 +1289,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                 width: 40,
                                 height: 40,
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFFD4956A).withOpacity(0.15),
+                                  color:
+                                      const Color(0xFFD4956A).withOpacity(0.15),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
-                                child: const Icon(Icons.map, color: Color(0xFFD4956A)),
+                                child: const Icon(Icons.map,
+                                    color: Color(0xFFD4956A)),
                               ),
                               const SizedBox(width: 12),
                               const Expanded(
@@ -1034,7 +1318,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                   ],
                                 ),
                               ),
-                              const Icon(Icons.chevron_right, color: Color(0xFF888888)),
+                              const Icon(Icons.chevron_right,
+                                  color: Color(0xFF888888)),
                             ],
                           ),
                         ),
@@ -1044,9 +1329,36 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     // Search results
                     Expanded(
                       child: isSearching
-                          ? const Center(
-                              child: CircularProgressIndicator(
-                                color: Color(0xFFD4956A),
+                          ? UberShimmer(
+                              child: ListView.separated(
+                                itemCount: 6,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 12),
+                                itemBuilder: (_, __) => const Row(
+                                  children: [
+                                    UberShimmerBox(
+                                      width: 36,
+                                      height: 36,
+                                      borderRadius:
+                                          BorderRadius.all(Radius.circular(18)),
+                                    ),
+                                    SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          UberShimmerBox(
+                                              width: double.infinity,
+                                              height: 12),
+                                          SizedBox(height: 6),
+                                          UberShimmerBox(
+                                              width: 180, height: 10),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             )
                           : searchResults.isEmpty
@@ -1054,7 +1366,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                   child: Column(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
-                                      Icon(Icons.search, size: 64, color: Colors.grey[400]),
+                                      Icon(Icons.search,
+                                          size: 64, color: Colors.grey[400]),
                                       const SizedBox(height: 16),
                                       Text(
                                         searchController.text.isEmpty
@@ -1067,9 +1380,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                           color: Colors.grey[600],
                                         ),
                                       ),
-                                      if (searchController.text.isNotEmpty && searchController.text.length >= 2)
+                                      if (searchController.text.isNotEmpty &&
+                                          searchController.text.length >= 2)
                                         Padding(
-                                          padding: const EdgeInsets.only(top: 8),
+                                          padding:
+                                              const EdgeInsets.only(top: 8),
                                           child: Text(
                                             'Try "Pick from map" option above',
                                             style: TextStyle(
@@ -1083,7 +1398,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                 )
                               : ListView.builder(
                                   controller: scrollController,
-                                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 20),
                                   itemCount: searchResults.length,
                                   itemBuilder: (context, index) {
                                     final result = searchResults[index];
@@ -1093,13 +1409,16 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                         height: 40,
                                         decoration: BoxDecoration(
                                           color: const Color(0xFFF5F5F5),
-                                          borderRadius: BorderRadius.circular(8),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
                                         ),
-                                        child: const Icon(Icons.place, color: Color(0xFFD4956A)),
+                                        child: const Icon(Icons.place,
+                                            color: Color(0xFFD4956A)),
                                       ),
                                       title: Text(
                                         result['name'] ?? '',
-                                        style: const TextStyle(fontWeight: FontWeight.w500),
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w500),
                                       ),
                                       subtitle: Text(
                                         result['address'] ?? '',
@@ -1121,16 +1440,28 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       ),
     );
   }
-  
+
   Future<void> _showMapPicker(BuildContext context) async {
     LatLng? selectedLocation;
     String? selectedAddress;
     GoogleMapController? mapController;
     bool isLoadingAddress = false;
-    
+    String? mapStyle;
+
+    // Load map style based on dark mode
+    final isDarkMode = ref.read(settingsProvider).isDarkMode;
+    try {
+      final stylePath = isDarkMode
+          ? 'assets/map_styles/raahi_dark.json'
+          : 'assets/map_styles/raahi_light.json';
+      mapStyle = await rootBundle.loadString(stylePath);
+    } catch (e) {
+      debugPrint('Failed to load map style: $e');
+    }
+
     // Default to Delhi NCR
     LatLng initialPosition = const LatLng(28.6139, 77.2090);
-    
+
     // Try to get current location
     try {
       final position = await Geolocator.getCurrentPosition(
@@ -1140,9 +1471,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     } catch (e) {
       debugPrint('Could not get location for map: $e');
     }
-    
+
     selectedLocation = initialPosition;
-    
+
     if (!context.mounted) return;
 
     await showModalBottomSheet(
@@ -1170,25 +1501,32 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   if (placemarks.isNotEmpty) {
                     final place = placemarks.first;
                     final parts = <String>[];
-                    if (place.name != null && place.name!.isNotEmpty) parts.add(place.name!);
-                    if (place.subLocality != null && place.subLocality!.isNotEmpty) parts.add(place.subLocality!);
-                    if (place.locality != null && place.locality!.isNotEmpty) parts.add(place.locality!);
-                    if (place.administrativeArea != null && place.administrativeArea!.isNotEmpty) parts.add(place.administrativeArea!);
-                    
+                    if (place.name != null && place.name!.isNotEmpty)
+                      parts.add(place.name!);
+                    if (place.subLocality != null &&
+                        place.subLocality!.isNotEmpty)
+                      parts.add(place.subLocality!);
+                    if (place.locality != null && place.locality!.isNotEmpty)
+                      parts.add(place.locality!);
+                    if (place.administrativeArea != null &&
+                        place.administrativeArea!.isNotEmpty)
+                      parts.add(place.administrativeArea!);
+
                     selectedAddress = parts.join(', ');
                   }
                 } catch (e) {
                   debugPrint('Error getting address: $e');
-                  selectedAddress = '${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}';
+                  selectedAddress =
+                      '${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}';
                 }
                 setModalState(() => isLoadingAddress = false);
               }
-              
+
               // Get initial address
               if (selectedAddress == null && !isLoadingAddress) {
                 getAddressFromLatLng(selectedLocation!);
               }
-              
+
               return Column(
                 children: [
                   // Handle bar
@@ -1233,6 +1571,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           ),
                           onMapCreated: (controller) {
                             mapController = controller;
+                            // Apply map style
+                            if (mapStyle != null) {
+                              controller.setMapStyle(mapStyle);
+                            }
                           },
                           onCameraMove: (position) {
                             selectedLocation = position.target;
@@ -1284,23 +1626,32 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                               width: 40,
                               height: 40,
                               decoration: BoxDecoration(
-                                color: const Color(0xFFD4956A).withOpacity(0.15),
+                                color:
+                                    const Color(0xFFD4956A).withOpacity(0.15),
                                 borderRadius: BorderRadius.circular(8),
                               ),
-                              child: const Icon(Icons.place, color: Color(0xFFD4956A)),
+                              child: const Icon(Icons.place,
+                                  color: Color(0xFFD4956A)),
                             ),
                             const SizedBox(width: 12),
                             Expanded(
                               child: isLoadingAddress
-                                  ? const Text(
-                                      'Getting address...',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: Color(0xFF888888),
+                                  ? const UberShimmer(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          UberShimmerBox(
+                                              width: 120, height: 12),
+                                          SizedBox(height: 6),
+                                          UberShimmerBox(
+                                              width: 170, height: 10),
+                                        ],
                                       ),
                                     )
                                   : Text(
-                                      selectedAddress ?? 'Move map to select location',
+                                      selectedAddress ??
+                                          'Move map to select location',
                                       style: const TextStyle(
                                         fontSize: 14,
                                         fontWeight: FontWeight.w500,
@@ -1315,7 +1666,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton(
-                            onPressed: selectedLocation != null && !isLoadingAddress
+                            onPressed: selectedLocation != null &&
+                                    !isLoadingAddress
                                 ? () async {
                                     Navigator.pop(context);
                                     await _saveMapLocation(
@@ -1353,46 +1705,48 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       ),
     );
   }
-  
-  Future<void> _saveMapLocation(BuildContext context, LatLng location, String address) async {
+
+  Future<void> _saveMapLocation(
+      BuildContext context, LatLng location, String address) async {
     final type = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Save as'),
+        title: Text(ref.tr('save_as')),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
               leading: const Icon(Icons.home, color: Color(0xFF4CAF50)),
-              title: const Text('Home'),
+              title: Text(ref.tr('home')),
               onTap: () => Navigator.pop(context, 'home'),
             ),
             ListTile(
               leading: const Icon(Icons.work, color: Color(0xFF2196F3)),
-              title: const Text('Work'),
+              title: Text(ref.tr('work')),
               onTap: () => Navigator.pop(context, 'work'),
             ),
             ListTile(
               leading: const Icon(Icons.place, color: Color(0xFFD4956A)),
-              title: const Text('Other'),
+              title: Text(ref.tr('other')),
               onTap: () => Navigator.pop(context, 'other'),
             ),
           ],
         ),
       ),
     );
-    
+
     if (type == null || !context.mounted) return;
-    
-    String placeName = type == 'home' ? 'Home' : (type == 'work' ? 'Work' : 'Saved Place');
-    
+
+    String placeName =
+        type == 'home' ? 'Home' : (type == 'work' ? 'Work' : 'Saved Place');
+
     // For 'other' type, let user enter a custom name
     if (type == 'other') {
       final nameController = TextEditingController();
       final customName = await showDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Place Name'),
+          title: Text(ref.tr('place_name')),
           content: TextField(
             controller: nameController,
             autofocus: true,
@@ -1404,21 +1758,24 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: Text(ref.tr('cancel')),
             ),
             ElevatedButton(
-              onPressed: () => Navigator.pop(context, nameController.text.trim()),
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD4956A)),
-              child: const Text('Save', style: TextStyle(color: Colors.white)),
+              onPressed: () =>
+                  Navigator.pop(context, nameController.text.trim()),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFD4956A)),
+              child:
+                  Text(ref.tr('save'), style: TextStyle(color: Colors.white)),
             ),
           ],
         ),
       );
-      
+
       if (customName == null || customName.isEmpty || !context.mounted) return;
       placeName = customName;
     }
-    
+
     final newPlace = {
       'id': DateTime.now().millisecondsSinceEpoch.toString(),
       'name': placeName,
@@ -1427,8 +1784,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       'lat': location.latitude,
       'lng': location.longitude,
     };
-    
-    final existingIndex = _savedPlaces.indexWhere((p) => p['type'] == type && (type == 'home' || type == 'work'));
+
+    final existingIndex = _savedPlaces.indexWhere(
+        (p) => p['type'] == type && (type == 'home' || type == 'work'));
     if (existingIndex != -1 && (type == 'home' || type == 'work')) {
       setState(() {
         _savedPlaces[existingIndex] = newPlace;
@@ -1438,30 +1796,30 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         _savedPlaces.add(newPlace);
       });
     }
-    
+
     await _savePlacesToPrefs();
-    
+
     // Sync with savedLocationsProvider so it reflects everywhere in the app
     if (type == 'home') {
       await ref.read(savedLocationsProvider.notifier).setHomeLocation(
-        name: placeName,
-        address: address,
-        location: location,
-      );
+            name: placeName,
+            address: address,
+            location: location,
+          );
     } else if (type == 'work') {
       await ref.read(savedLocationsProvider.notifier).setWorkLocation(
-        name: placeName,
-        address: address,
-        location: location,
-      );
+            name: placeName,
+            address: address,
+            location: location,
+          );
     } else {
       await ref.read(savedLocationsProvider.notifier).addFavorite(
-        name: placeName,
-        address: address,
-        location: location,
-      );
+            name: placeName,
+            address: address,
+            location: location,
+          );
     }
-    
+
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1475,6 +1833,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   Future<void> _openNotificationPreferences(BuildContext context) async {
     await _openSettings(context);
+    _syncNotificationStatus();
   }
 
   Future<void> _openHelpOptions(BuildContext context) async {
@@ -1493,25 +1852,29 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           children: [
             ListTile(
               leading: const Icon(Icons.call),
-              title: const Text('Call support'),
+              title: Text(ref.tr('call_support_profile')),
               subtitle: Text(supportNumber),
-              onTap: () => _launchUri(Uri(scheme: 'tel', path: supportNumber), context),
+              onTap: () =>
+                  _launchUri(Uri(scheme: 'tel', path: supportNumber), context),
             ),
             ListTile(
               leading: const Icon(Icons.email_outlined),
-              title: const Text('Email support'),
+              title: Text(ref.tr('email_support_profile')),
               subtitle: Text(supportEmail),
-              onTap: () => _launchUri(Uri(
-                scheme: 'mailto',
-                path: supportEmail,
-                query: 'subject=Support request',
-              ), context),
+              onTap: () => _launchUri(
+                  Uri(
+                    scheme: 'mailto',
+                    path: supportEmail,
+                    query: 'subject=Support request',
+                  ),
+                  context),
             ),
             ListTile(
               leading: const Icon(Icons.chat_bubble_outline),
-              title: const Text('Message support'),
-              subtitle: const Text('We will reply shortly'),
-              onTap: () => _launchUri(Uri(scheme: 'sms', path: supportNumber), context),
+              title: Text(ref.tr('message_support')),
+              subtitle: Text(ref.tr('reply_shortly')),
+              onTap: () =>
+                  _launchUri(Uri(scheme: 'sms', path: supportNumber), context),
             ),
           ],
         );
@@ -1524,7 +1887,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       await launchUrl(uri);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Cannot open link'), backgroundColor: AppColors.error),
+        SnackBar(
+            content: Text(ref.tr('cannot_open_link')),
+            backgroundColor: AppColors.error),
       );
     }
   }
@@ -1534,11 +1899,13 @@ class _StatCard extends StatelessWidget {
   final IconData icon;
   final String label;
   final String value;
+  final bool isLoading;
 
   const _StatCard({
     required this.icon,
     required this.label,
     required this.value,
+    this.isLoading = false,
   });
 
   @override
@@ -1553,19 +1920,29 @@ class _StatCard extends StatelessWidget {
         children: [
           Icon(icon, color: AppColors.primary, size: 24),
           const SizedBox(height: 8),
-          Text(
-            value,
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.bold,
+          if (isLoading)
+            const UberShimmer(
+              child: UberShimmerBox(width: 44, height: 18),
+            )
+          else
+            Text(
+              value,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
             ),
-          ),
           const SizedBox(height: 4),
-          Text(
-            label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: AppColors.textSecondary,
+          if (isLoading)
+            const UberShimmer(
+              child: UberShimmerBox(width: 56, height: 10),
+            )
+          else
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
             ),
-          ),
         ],
       ),
     );
@@ -1598,15 +1975,10 @@ class _MenuItem extends StatelessWidget {
         child: Icon(icon, color: AppColors.textPrimary, size: 22),
       ),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+      subtitle: Text(subtitle,
+          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
       trailing: const Icon(Icons.chevron_right, color: AppColors.textSecondary),
       onTap: onTap,
     );
   }
 }
-
-
-
-
-
-

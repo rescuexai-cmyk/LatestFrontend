@@ -78,6 +78,9 @@ dependencies:
   
   # Local Notifications (for foreground FCM display)
   flutter_local_notifications: ^17.2.4
+  file_picker: ^10.3.10
+  google_sign_in: ^7.2.0
+  truecaller_sdk: ^1.2.0
 
 dev_dependencies:
   flutter_test:

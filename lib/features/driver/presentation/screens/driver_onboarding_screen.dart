@@ -5,10 +5,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/services/api_client.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 class DriverOnboardingScreen extends ConsumerStatefulWidget {
-  const DriverOnboardingScreen({super.key});
+  final bool isUpdateMode;
+  final bool returnToProfileOnBack;
+
+  const DriverOnboardingScreen({
+    super.key,
+    this.isUpdateMode = false,
+    this.returnToProfileOnBack = false,
+  });
 
   @override
   ConsumerState<DriverOnboardingScreen> createState() => _DriverOnboardingScreenState();
@@ -17,6 +26,7 @@ class DriverOnboardingScreen extends ConsumerStatefulWidget {
 class _DriverOnboardingScreenState extends ConsumerState<DriverOnboardingScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
+  bool _isResolvingUpdateMode = false;
 
   // Raahi color palette
   static const _beige = Color(0xFFF6EFE4);
@@ -25,6 +35,86 @@ class _DriverOnboardingScreenState extends ConsumerState<DriverOnboardingScreen>
   static const _textSecondary = Color(0xFF888888);
   static const _inputBg = Color(0xFFEDE6DA);
   static const _border = Color(0xFFE8E0D4);
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isUpdateMode) {
+      _isResolvingUpdateMode = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _resolveUpdateModeEntry();
+      });
+    }
+  }
+
+  Future<void> _resolveUpdateModeEntry() async {
+    try {
+      final response = await ref.read(apiClientProvider).getDriverProfile();
+      final data = (response['data'] as Map<String, dynamic>?) ?? const {};
+      final profile = (data['driver'] as Map<String, dynamic>?) ?? data;
+      final onboarding =
+          (profile['onboarding'] as Map<String, dynamic>?) ?? const {};
+
+      final isOnboarded = profile['isOnboarded'] == true ||
+          profile['is_onboarded'] == true ||
+          profile['onboardingCompleted'] == true ||
+          profile['onboarding_completed'] == true ||
+          onboarding['is_verified'] == true ||
+          onboarding['documents_verified'] == true ||
+          onboarding['documents_submitted'] == true ||
+          (onboarding['status'] as String?)?.toUpperCase() == 'COMPLETED' ||
+          (onboarding['status'] as String?)?.toUpperCase() ==
+              'DOCUMENT_VERIFICATION';
+      final hasDocuments = _profileHasDocuments(profile['documents']);
+
+      if (mounted && widget.isUpdateMode && isOnboarded && hasDocuments) {
+        final returnToProfile = widget.returnToProfileOnBack ? 'true' : 'false';
+        context.go(
+          '${AppRoutes.driverDocuments}?isUpdateMode=true&returnToProfile=$returnToProfile',
+        );
+        return;
+      }
+    } catch (e) {
+      debugPrint('❌ Failed to resolve update mode entry: $e');
+    }
+
+    if (mounted) {
+      setState(() => _isResolvingUpdateMode = false);
+    }
+  }
+
+  bool _profileHasDocuments(dynamic rawDocuments) {
+    if (rawDocuments is List) {
+      return rawDocuments.isNotEmpty;
+    }
+    if (rawDocuments is Map) {
+      if (rawDocuments.isEmpty) return false;
+      final pendingCount =
+          (rawDocuments['pending_count'] as num?)?.toInt() ??
+              (rawDocuments['pendingCount'] as num?)?.toInt() ??
+              0;
+      if (pendingCount > 0) return true;
+
+      if (rawDocuments['all_verified'] == true ||
+          rawDocuments['allVerified'] == true ||
+          rawDocuments['license_verified'] == true ||
+          rawDocuments['insurance_verified'] == true ||
+          rawDocuments['vehicle_registration_verified'] == true) {
+        return true;
+      }
+
+      return rawDocuments.values.any((value) {
+        if (value == null) return false;
+        if (value is bool) return value;
+        if (value is num) return value > 0;
+        if (value is String) return value.trim().isNotEmpty;
+        if (value is List) return value.isNotEmpty;
+        if (value is Map) return value.isNotEmpty;
+        return true;
+      });
+    }
+    return false;
+  }
 
   @override
   void dispose() {
@@ -48,12 +138,25 @@ class _DriverOnboardingScreenState extends ConsumerState<DriverOnboardingScreen>
         curve: Curves.easeInOut,
       );
     } else {
-      context.pop();
+      if (widget.returnToProfileOnBack) {
+        context.go(AppRoutes.driverHome);
+      } else {
+        context.pop();
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_isResolvingUpdateMode) {
+      return const Scaffold(
+        backgroundColor: _beige,
+        body: Center(
+          child: CircularProgressIndicator(color: _accent),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: _beige,
       body: SafeArea(
@@ -200,8 +303,8 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     if (email.isEmpty) {
       setState(() => _isEmailValid = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter your email address'),
+        SnackBar(
+          content: Text(ref.tr('enter_email_prompt')),
           backgroundColor: Colors.red,
         ),
       );
@@ -211,8 +314,8 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     if (!_validateEmail(email)) {
       setState(() => _isEmailValid = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a valid email address'),
+        SnackBar(
+          content: Text(ref.tr('enter_valid_email')),
           backgroundColor: Colors.red,
         ),
       );
@@ -235,8 +338,8 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
           widget.onContinue();
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Failed to save email. Please try again.'),
+            SnackBar(
+              content: Text(ref.tr('email_save_failed')),
               backgroundColor: Colors.red,
             ),
           );
@@ -358,7 +461,7 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
           ),
           const SizedBox(height: 16),
           
-          const Text('Language', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('language'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -757,7 +860,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
           const SizedBox(height: 24),
           
           // Full name
-          const Text('Full name', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('full_name'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           TextField(
             controller: _nameController,
@@ -780,7 +883,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
           // Vehicle registration number (mandatory — used to cross-verify RC)
           Row(
             children: [
-              const Text('Vehicle registration number', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+              Text(ref.tr('vehicle_reg_number'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
               const Text(' *', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.red)),
             ],
           ),
@@ -816,7 +919,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
             },
           ),
           const SizedBox(height: 16),
-          const Text('Vehicle model', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('vehicle_model'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           TextField(
             controller: _vehicleModelController,
@@ -845,7 +948,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
           const SizedBox(height: 16),
           
           // Aadhaar number
-          const Text('Aadhar number', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('aadhaar_number'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           TextField(
             controller: _aadhaarController,
@@ -1098,8 +1201,8 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
                 ),
                 child: const Icon(Icons.camera_alt, color: _accent),
               ),
-              title: const Text('Camera', style: TextStyle(color: _textPrimary)),
-              subtitle: Text('Take a new photo', style: TextStyle(color: _textSecondary)),
+              title: Text(ref.tr('camera'), style: const TextStyle(color: _textPrimary)),
+              subtitle: Text(ref.tr('take_photo'), style: const TextStyle(color: _textSecondary)),
               onTap: () => Navigator.pop(context, ImageSource.camera),
             ),
             const SizedBox(height: 8),
@@ -1112,8 +1215,8 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
                 ),
                 child: const Icon(Icons.photo_library, color: _blue),
               ),
-              title: const Text('Gallery', style: TextStyle(color: _textPrimary)),
-              subtitle: Text('Choose from gallery', style: TextStyle(color: _textSecondary)),
+              title: Text(ref.tr('gallery'), style: const TextStyle(color: _textPrimary)),
+              subtitle: Text(ref.tr('choose_gallery'), style: const TextStyle(color: _textSecondary)),
               onTap: () => Navigator.pop(context, ImageSource.gallery),
             ),
           ],
@@ -1158,8 +1261,8 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
     
     if (imagePath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please select an image first'),
+        SnackBar(
+          content: Text(ref.tr('please_select_image')),
           backgroundColor: Colors.orange,
         ),
       );
@@ -1270,7 +1373,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
               Navigator.pop(context);
               _nextDocument(); // Skip this document
             },
-            child: Text('Skip for now', style: TextStyle(color: _textSecondary)),
+            child: Text(ref.tr('skip_for_now'), style: const TextStyle(color: _textSecondary)),
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context),
@@ -1279,7 +1382,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
-            child: const Text('Try Again'),
+            child: Text(ref.tr('try_again')),
           ),
         ],
       ),
@@ -1906,7 +2009,7 @@ class _VerificationStatusPageState extends ConsumerState<_VerificationStatusPage
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Verification Progress', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                  Text(ref.tr('verification_progress'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                   Text('$progress%', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFFD4956A))),
                 ],
               ),

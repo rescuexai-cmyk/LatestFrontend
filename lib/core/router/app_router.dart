@@ -23,6 +23,9 @@ import '../../features/driver/presentation/screens/driver_home_screen.dart';
 import '../../features/driver/presentation/screens/driver_active_ride_screen.dart';
 import '../../features/driver/presentation/screens/driver_onboarding_screen.dart';
 import '../../features/driver/presentation/screens/driver_welcome_screen.dart';
+import '../../features/driver/presentation/screens/driver_document_management_screen.dart';
+import '../../features/driver/presentation/screens/driver_subscription_payment_screen.dart';
+import '../../features/driver/presentation/screens/driver_penalty_payment_screen.dart';
 import '../../features/settings/presentation/screens/server_config_screen.dart';
 import '../services/server_config_service.dart';
 import 'app_routes.dart';
@@ -37,6 +40,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
   // Watch auth status AND onboarding flag so redirects re-evaluate when either changes
   final isAuthenticated = ref.watch(isAuthenticatedProvider);
   final pendingOnboarding = ref.watch(pendingOnboardingProvider);
+  final pendingPhoneLink = ref.watch(pendingPhoneLinkProvider);
   
   // Determine initial location based on server config state
   final initialLocation = ServerConfigService.isConfigured
@@ -58,6 +62,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       final isLoginRoute = currentLocation == AppRoutes.login ||
           currentLocation == AppRoutes.signup ||
           currentLocation.startsWith(AppRoutes.otpVerification);
+      final isOtpPhoneLinkRoute =
+          currentLocation.startsWith(AppRoutes.otpVerification) &&
+              (state.uri.queryParameters['mode'] == 'linkPhone' ||
+                  pendingPhoneLink);
+      final isPhoneLinkRoute = currentLocation == AppRoutes.phoneNumber ||
+          (currentLocation == AppRoutes.signup &&
+              state.uri.queryParameters['mode'] == 'linkPhone') ||
+          isOtpPhoneLinkRoute;
 
       // Onboarding routes (name entry + terms) — part of new-user flow post-auth
       final isOnboardingRoute =
@@ -66,7 +78,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
 
       final isAuthRoute = isLoginRoute || isOnboardingRoute;
 
-      debugPrint('🔀 Router redirect: location=$currentLocation, isAuthenticated=$isAuthenticated, pendingOnboarding=$pendingOnboarding, isAuthRoute=$isAuthRoute');
+      debugPrint('🔀 Router redirect: location=$currentLocation, isAuthenticated=$isAuthenticated, pendingOnboarding=$pendingOnboarding, pendingPhoneLink=$pendingPhoneLink, isAuthRoute=$isAuthRoute');
 
       // For demo purposes, allow navigation to home, ride booking, driver, and ride tracking routes without authentication
       // Remove this check in production
@@ -90,10 +102,19 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return AppRoutes.login;
       }
 
+      if (isAuthenticated && pendingPhoneLink && !isPhoneLinkRoute) {
+        debugPrint('🔀 Redirecting to phone number link flow');
+        return '${AppRoutes.phoneNumber}?mode=linkPhone';
+      }
+
       // If authenticated and on a login route, decide where to go:
       // - New user with pending onboarding → name entry
       // - Returning user → home
-      if (isAuthenticated && isLoginRoute) {
+      if (isAuthenticated && isLoginRoute && !isPhoneLinkRoute) {
+        if (pendingPhoneLink) {
+          debugPrint('🔀 Redirecting to phone link screen');
+          return '${AppRoutes.phoneNumber}?mode=linkPhone';
+        }
         if (pendingOnboarding) {
           debugPrint('🔀 Redirecting to name entry (new user onboarding)');
           return AppRoutes.nameEntry;
@@ -114,7 +135,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppRoutes.signup,
         name: 'signup',
-        builder: (context, state) => const SignUpScreen(),
+        builder: (context, state) {
+          final isPhoneLinkMode =
+              state.uri.queryParameters['mode'] == 'linkPhone';
+          return SignUpScreen(isPhoneLinkMode: isPhoneLinkMode);
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.phoneNumber,
+        name: 'phoneNumber',
+        builder: (context, state) {
+          final isPhoneLinkMode =
+              state.uri.queryParameters['mode'] != 'normal';
+          return SignUpScreen(isPhoneLinkMode: isPhoneLinkMode);
+        },
       ),
       GoRoute(
         path: AppRoutes.otpVerification,
@@ -122,10 +156,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final phone = state.uri.queryParameters['phone'] ?? '';
           final isNewUser = state.uri.queryParameters['isNewUser'] == 'true';
+          final isPhoneLinkMode =
+              state.uri.queryParameters['mode'] == 'linkPhone';
           debugPrint('🔀 Building OTPVerificationScreen: phone=$phone, isNewUser=$isNewUser');
           return OTPVerificationScreen(
             phone: phone,
             isNewUser: isNewUser,
+            isPhoneLinkMode: isPhoneLinkMode,
           );
         },
       ),
@@ -226,12 +263,32 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppRoutes.driverOnboarding,
         name: 'driverOnboarding',
-        builder: (context, state) => const DriverOnboardingScreen(),
+        builder: (context, state) {
+          final isUpdateMode =
+              state.uri.queryParameters['isUpdateMode'] == 'true';
+          final returnToProfile =
+              state.uri.queryParameters['returnToProfile'] == 'true';
+          return DriverOnboardingScreen(
+            isUpdateMode: isUpdateMode,
+            returnToProfileOnBack: returnToProfile,
+          );
+        },
       ),
       GoRoute(
         path: AppRoutes.driverWelcome,
         name: 'driverWelcome',
         builder: (context, state) => const DriverWelcomeScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.driverDocuments,
+        name: 'driverDocuments',
+        builder: (context, state) {
+          final returnToProfile =
+              state.uri.queryParameters['returnToProfile'] == 'true';
+          return DriverDocumentManagementScreen(
+            returnToProfileOnBack: returnToProfile,
+          );
+        },
       ),
       GoRoute(
         path: AppRoutes.driverHome,
@@ -250,7 +307,17 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           );
         },
       ),
-      
+      GoRoute(
+        path: AppRoutes.driverSubscriptionPayment,
+        name: 'driverSubscriptionPayment',
+        builder: (context, state) => const DriverSubscriptionPaymentScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.driverPenaltyPayment,
+        name: 'driverPenaltyPayment',
+        builder: (context, state) => const DriverPenaltyPaymentScreen(),
+      ),
+
       // Ride booking flow
       GoRoute(
         path: AppRoutes.findTrip,

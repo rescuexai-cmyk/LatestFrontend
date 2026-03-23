@@ -5,18 +5,22 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/providers/settings_provider.dart';
 import '../../providers/auth_provider.dart';
 
 class OTPVerificationScreen extends ConsumerStatefulWidget {
   final String phone;
   final bool isNewUser;
+  final bool isPhoneLinkMode;
 
   OTPVerificationScreen({
     super.key,
     required this.phone,
     this.isNewUser = false,
+    this.isPhoneLinkMode = false,
   }) {
-    debugPrint('📱 OTPVerificationScreen created: phone=$phone, isNewUser=$isNewUser');
+    debugPrint(
+        '📱 OTPVerificationScreen created: phone=$phone, isNewUser=$isNewUser, isPhoneLinkMode=$isPhoneLinkMode');
   }
 
   @override
@@ -82,7 +86,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
     }
     return phone;
   }
-  
+
   /// Returns formatted phone number for display (XXXXX XXXXX)
   String get _formattedPhone {
     final phone = _cleanPhone;
@@ -95,7 +99,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
   Future<void> _verifyOTP() async {
     if (_otp.length != 6) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter the complete 6-digit OTP')),
+        SnackBar(content: Text(ref.tr('enter_complete_otp'))),
       );
       return;
     }
@@ -106,18 +110,26 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
       final authNotifier = ref.read(authStateProvider.notifier);
       // Use clean 10-digit phone number for API call
       final phoneForApi = _cleanPhone;
-      final result = await authNotifier.verifyOTP(
-        phoneForApi,
-        _otp,
-        isNewUser: widget.isNewUser,
-      );
+      final result = widget.isPhoneLinkMode
+          ? await authNotifier.verifyOtpForPhoneLink(_otp)
+          : await authNotifier.verifyOTP(
+              phoneForApi,
+              _otp,
+              isNewUser: widget.isNewUser,
+            );
 
       if (mounted) {
         setState(() => _isLoading = false);
 
         if (result.success) {
           // OTP verified successfully
-          if (result.isNewUser) {
+          if (widget.isPhoneLinkMode) {
+            if (result.isNewUser) {
+              context.go('${AppRoutes.nameEntry}?phone=$phoneForApi');
+            } else {
+              context.go(AppRoutes.home);
+            }
+          } else if (result.isNewUser) {
             // New user → collect name first, then terms
             context.push('${AppRoutes.nameEntry}?phone=$phoneForApi');
           } else {
@@ -226,19 +238,41 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
   Future<void> _resendOTP() async {
     final authNotifier = ref.read(authStateProvider.notifier);
     // Use clean 10-digit phone number for API call
-    final result = await authNotifier.resendOTP(_cleanPhone);
+    final result = widget.isPhoneLinkMode
+        ? await authNotifier.requestOTP(_cleanPhone)
+        : await authNotifier.resendOTP(_cleanPhone);
     
     if (mounted) {
       if (result.success) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('OTP sent successfully')),
+          SnackBar(
+            content: Text(ref.tr('otp_sent')),
+            backgroundColor: Colors.green,
+          ),
         );
         _startResendTimer();
         _clearOTP();
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result.error ?? 'Failed to resend OTP')),
-        );
+        final error = result.error ?? '';
+        // Handle rate limiting (429)
+        if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
+          // Extend cooldown on rate limit
+          _resendTimer = 60; // Force 60 second wait
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(ref.tr('too_many_requests_60')),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result.error ?? 'Failed to resend OTP'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }

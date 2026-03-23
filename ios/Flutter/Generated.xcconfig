@@ -1,6 +1,6 @@
 // This is a generated file; do not edit or check into version control.
-FLUTTER_ROOT=/opt/homebrew/share/flutter
-FLUTTER_APPLICATION_PATH=/Users/jaibalasrujanmelam/Downloads/raahi-flutter-app
+FLUTTER_ROOT=/Users/sarthakmishra/development/flutter
+FLUTTER_APPLICATION_PATH=/Users/sarthakmishra/Downloads/LatestFrontend_bkp 2
 COCOAPODS_PARALLEL_CODE_SIGN=true
 FLUTTER_TARGET=lib/main.dart
 FLUTTER_BUILD_DIR=build

@@ -5,9 +5,11 @@
 *.swp
 .DS_Store
 .atom/
+.build/
 .buildlog/
 .history
 .svn/
+.swiftpm/
 migrate_working_dir/
 
 # IntelliJ related
@@ -31,6 +33,7 @@ build/
 android/.gradle
 android/.idea
 android/local.properties
+android/key.properties
 android/**/gradle-wrapper.jar
 *.jks
 
@@ -59,6 +62,10 @@ windows/flutter/generated_plugin_registrant.cpp
 windows/flutter/generated_plugin_registrant.h
 windows/flutter/generated_plugins.cmake
 windows/flutter/ephemeral/
+
+# Temporary files
+tmp_*/
+*.zip
 
 # Environment
 .env

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -15,6 +16,7 @@ import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/sse_service.dart';
 import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/providers/settings_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -29,7 +31,7 @@ class _PolylineSnapResult {
   final LatLng point;
   final double distance;
   final int segmentIndex;
-  
+
   _PolylineSnapResult({
     required this.point,
     required this.distance,
@@ -48,10 +50,12 @@ class DriverAssignedScreen extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<DriverAssignedScreen> createState() => _DriverAssignedScreenState();
+  ConsumerState<DriverAssignedScreen> createState() =>
+      _DriverAssignedScreenState();
 }
 
-class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
+class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
+    with WidgetsBindingObserver {
   // Driver data
   String _driverName = 'Driver';
   String _vehicleNumber = '';
@@ -91,18 +95,25 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   LatLng? _lastRouteRecalculationFrom;
   Timer? _driverMarkerAnimationTimer;
   int _routeRevision = 0;
-  static const Duration _driverMarkerAnimationDuration = Duration(milliseconds: 1000);
+  static const Duration _driverMarkerAnimationDuration =
+      Duration(milliseconds: 1000);
   static const Duration _routeRecalculationCooldown = Duration(seconds: 4);
   static const double _routeRecalculationMinDriverMoveMeters = 15.0;
-  
+
   // Vehicle-specific marker icon
   BitmapDescriptor? _vehicleIcon;
   String? _vehicleType;
-  
+
+  // Map style for dark mode
+  String? _mapStyle;
+  bool _lastDarkMode = false;
+  GoogleMapController? _mapControllerInstance;
+
   // Route points for smart deviation handling
   List<LatLng> _currentRoutePoints = [];
   static const double _snapThreshold = 30.0; // meters - snap to route if within
-  static const double _deviationThreshold = 50.0; // meters - recalculate if beyond
+  static const double _deviationThreshold =
+      50.0; // meters - recalculate if beyond
 
   // SSE + Socket.io
   SSESubscription? _sseSubscription;
@@ -117,10 +128,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
 
   // Rating state
   bool _isSubmittingRating = false;
+  bool _completionHandled = false;
+  bool _ratingSheetOpen = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     final bookingState = ref.read(rideBookingProvider);
 
@@ -134,26 +148,39 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     _fareAmount = bookingState.fare;
     _rideId = widget.initialRideId ?? bookingState.rideId;
 
-    _pickupLocation = bookingState.pickupLocation ?? const LatLng(12.9081, 77.6476);
-    _destinationLocation = bookingState.destinationLocation ?? const LatLng(12.9116, 77.6389);
+    // CRITICAL: Locations should ALWAYS be set from GPS/user selection before reaching this screen
+    if (bookingState.pickupLocation == null) {
+      debugPrint('⚠️ WARNING: pickupLocation is null in driver_assigned_screen!');
+    }
+    if (bookingState.destinationLocation == null) {
+      debugPrint('⚠️ WARNING: destinationLocation is null in driver_assigned_screen!');
+    }
+    
+    _pickupLocation =
+        bookingState.pickupLocation ?? const LatLng(28.4595, 77.0266); // Fallback only for safety
+    _destinationLocation =
+        bookingState.destinationLocation ?? const LatLng(28.4949, 77.0887); // Fallback only for safety
     _driverLocation = LatLng(
       _pickupLocation.latitude + 0.003,
       _pickupLocation.longitude + 0.002,
     );
 
-    debugPrint('📍 DriverAssigned — rideId=$_rideId, pickup=$_pickupAddress, drop=$_dropAddress');
-    debugPrint('🔐 OTP from booking state: $_otp (raw: ${bookingState.rideOtp})');
+    debugPrint(
+        '📍 DriverAssigned — rideId=$_rideId, pickup=$_pickupAddress, drop=$_dropAddress');
+    debugPrint(
+        '🔐 OTP from booking state: $_otp (raw: ${bookingState.rideOtp})');
 
     // Get vehicle type from booking state
     _vehicleType = bookingState.selectedCabTypeId;
-    
+
     _loadVehicleIcon();
+    _loadMapStyle();
     _setupMapElements();
     _calculateRoutes();
     _initializeChatProvider();
     _subscribeToNotificationChatOpens();
     _subscribeToRideUpdates();
-    
+
     // Always fetch ride details from backend to get OTP and driver info
     if (_rideId != null) {
       _fetchOtpFromBackend();
@@ -166,26 +193,26 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     final currentUserId = authState.user?.id ?? '';
     if (currentUserId.isEmpty) return;
     ref.read(chatProvider(_rideId!).notifier).initialize(
-      currentUserId: currentUserId,
-      passengerId: currentUserId,
-      isDriver: false,
-    );
+          currentUserId: currentUserId,
+          passengerId: currentUserId,
+          isDriver: false,
+        );
     ref.read(chatProvider(_rideId!).notifier).closeChat();
   }
-  
+
   /// Fetch OTP and driver details from backend, and sync phase with current status
   Future<void> _fetchOtpFromBackend() async {
     if (_rideId == null) return;
-    
+
     try {
       debugPrint('🔐 Fetching ride details from backend for ride: $_rideId');
       final response = await apiClient.getRide(_rideId!);
-      
+
       debugPrint('🔐 getRide response: $response');
-      
+
       // Backend returns { success: true, data: { rideOtp: "1234", driver: {...}, status, ... } }
       final rideData = response['data'] as Map<String, dynamic>? ?? response;
-      
+
       // Sync phase from backend status — handles cases where driver already started/completed before we connected
       _syncPhaseFromStatus(rideData);
       final backendFare = _extractRideFare(rideData);
@@ -194,11 +221,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           _fareAmount = backendFare;
         });
       }
-      
+
       // Fetch OTP
-      final fetchedOtp = rideData['rideOtp']?.toString() ?? rideData['otp']?.toString();
-      
-      if (fetchedOtp != null && fetchedOtp.isNotEmpty && fetchedOtp.length == 4) {
+      final fetchedOtp =
+          rideData['rideOtp']?.toString() ?? rideData['otp']?.toString();
+
+      if (fetchedOtp != null &&
+          fetchedOtp.isNotEmpty &&
+          fetchedOtp.length == 4) {
         debugPrint('🔐 OTP fetched from backend: $fetchedOtp');
         if (mounted) {
           setState(() {
@@ -208,17 +238,19 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           ref.read(rideBookingProvider.notifier).setRideOtp(fetchedOtp);
         }
       } else {
-        debugPrint('⚠️ Backend did not return OTP for ride $_rideId (got: $fetchedOtp)');
+        debugPrint(
+            '⚠️ Backend did not return OTP for ride $_rideId (got: $fetchedOtp)');
       }
-      
+
       // Fetch driver details if available
       final driverData = rideData['driver'] as Map<String, dynamic>?;
       final vehicleData = rideData['vehicle'] as Map<String, dynamic>? ??
           (driverData?['vehicle'] as Map<String, dynamic>?);
       if (driverData != null && mounted) {
-        final driverName = driverData['name']?.toString() ?? 
-                          driverData['fullName']?.toString() ??
-                          '${driverData['firstName'] ?? ''} ${driverData['lastName'] ?? ''}'.trim();
+        final driverName = driverData['name']?.toString() ??
+            driverData['fullName']?.toString() ??
+            '${driverData['firstName'] ?? ''} ${driverData['lastName'] ?? ''}'
+                .trim();
         final vehicleNumber = _firstNonEmptyString([
           driverData['vehicleNumber'],
           driverData['vehicle_number'],
@@ -244,9 +276,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                       driverData['user']['phoneNumber']?.toString())
                   : null),
         );
-        
+
         debugPrint('🚗 Driver info: $driverName, $driverPhone');
-        
+
         if (driverName.isNotEmpty) {
           setState(() {
             _driverName = driverName;
@@ -262,7 +294,6 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           });
         }
       }
-      
     } catch (e) {
       debugPrint('❌ Failed to fetch ride details from backend: $e');
     } finally {
@@ -297,7 +328,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   }
 
   void _maybeAutoOpenChat() {
-    if (!widget.autoOpenChat || _autoChatHandled || _rideId == null || !mounted) return;
+    if (!widget.autoOpenChat || _autoChatHandled || _rideId == null || !mounted)
+      return;
     _autoChatHandled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -309,23 +341,31 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   /// Sync _phase from backend status (handles missed real-time events)
   void _syncPhaseFromStatus(Map<String, dynamic> rideData) {
     if (!mounted) return;
-    final status = (rideData['status']?.toString() ?? rideData['rideStatus']?.toString() ?? '').toLowerCase();
+    final status = (rideData['status']?.toString() ??
+            rideData['rideStatus']?.toString() ??
+            '')
+        .toLowerCase();
     if (status.isEmpty) return;
     final startedStatuses = ['in_progress', 'started', 'ride_started'];
     final completedStatuses = ['completed', 'ride_completed'];
-    if (startedStatuses.any((s) => status.contains(s)) && _phase == _RidePhase.driverEnRoute) {
-      debugPrint('📡 Syncing phase to rideInProgress from backend status: $status');
+    if (startedStatuses.any((s) => status.contains(s)) &&
+        _phase == _RidePhase.driverEnRoute) {
+      debugPrint(
+          '📡 Syncing phase to rideInProgress from backend status: $status');
       _transitionToInProgress();
-    } else if (completedStatuses.any((s) => status.contains(s)) && _phase != _RidePhase.completed) {
+    } else if (completedStatuses.any((s) => status.contains(s)) &&
+        _phase != _RidePhase.completed) {
       debugPrint('📡 Syncing phase to completed from backend status: $status');
       _transitionToCompleted();
     } else if (status == 'cancelled' || status == 'canceled') {
-      _handleRideCancelled({'reason': rideData['cancelReason'] ?? 'Ride was cancelled'});
+      _handleRideCancelled(
+          {'reason': rideData['cancelReason'] ?? 'Ride was cancelled'});
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _messageController.dispose();
     _scrollController.dispose();
     _driverMarkerAnimationTimer?.cancel();
@@ -343,10 +383,21 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Refresh status to handle missed completion while app was backgrounded.
+      unawaited(_fetchOtpFromBackend());
+    }
+  }
+
   void _subscribeToNotificationChatOpens() {
-    _chatOpenSubscription = pushNotificationService.chatOpenStream.listen((payload) {
+    _chatOpenSubscription =
+        pushNotificationService.chatOpenStream.listen((payload) {
       final targetRideId = payload['rideId']?.toString() ?? '';
-      if (_rideId == null || targetRideId.isEmpty || targetRideId != _rideId) return;
+      if (_rideId == null || targetRideId.isEmpty || targetRideId != _rideId)
+        return;
       if (!mounted) return;
       _openChatBottomSheet();
     });
@@ -362,7 +413,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     try {
       final secureStorage = ref.read(secureStorageProvider);
       authToken = await secureStorage.read(key: 'auth_token');
-      debugPrint('📡 Rider: Got auth token for SSE: ${authToken != null ? 'yes' : 'no'}');
+      debugPrint(
+          '📡 Rider: Got auth token for SSE: ${authToken != null ? 'yes' : 'no'}');
     } catch (e) {
       debugPrint('⚠️ Rider: Failed to get auth token: $e');
     }
@@ -414,13 +466,18 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       if (!mounted) return;
       final data = response['data'] as Map<String, dynamic>? ?? response;
       final status = (data['status'] ?? '').toString().toLowerCase();
-      if ((status == 'in_progress' || status.contains('ride_started')) && _phase == _RidePhase.driverEnRoute) {
-        ref.read(activeRideProvider.notifier).updateActiveRideStatus(RideStatus.inProgress);
+      if ((status == 'in_progress' || status.contains('ride_started')) &&
+          _phase == _RidePhase.driverEnRoute) {
+        ref
+            .read(activeRideProvider.notifier)
+            .updateActiveRideStatus(RideStatus.inProgress);
         _transitionToInProgress();
-      } else if ((status == 'completed' || status.contains('ride_completed')) && _phase != _RidePhase.completed) {
+      } else if ((status == 'completed' || status.contains('ride_completed')) &&
+          _phase != _RidePhase.completed) {
         _transitionToCompleted();
       } else if (status == 'cancelled' || status == 'canceled') {
-        _handleRideCancelled({'reason': data['cancelReason'] ?? 'Ride was cancelled'});
+        _handleRideCancelled(
+            {'reason': data['cancelReason'] ?? 'Ride was cancelled'});
       }
     } catch (_) {}
   }
@@ -446,15 +503,20 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   void _handleStatusUpdate(Map<String, dynamic> data) {
     if (!mounted) return;
     // Status can be at top-level or in payload (depending on backend event format)
-    final status = ((data['status'] ?? data['payload']?['status']) as String?)?.toLowerCase() ?? '';
-    debugPrint('📡 Rider: Status update received: $status (current phase: $_phase)');
+    final status = ((data['status'] ?? data['payload']?['status']) as String?)
+            ?.toLowerCase() ??
+        '';
+    debugPrint(
+        '📡 Rider: Status update received: $status (current phase: $_phase)');
 
     // Update driver info if available
     if (data['driver'] != null && data['driver'] is Map<String, dynamic>) {
       final d = data['driver'] as Map<String, dynamic>;
       final statusVehicle = data['vehicle'] is Map<String, dynamic>
           ? data['vehicle'] as Map<String, dynamic>
-          : (d['vehicle'] is Map<String, dynamic> ? d['vehicle'] as Map<String, dynamic> : null);
+          : (d['vehicle'] is Map<String, dynamic>
+              ? d['vehicle'] as Map<String, dynamic>
+              : null);
       final statusVehicleNumber = _firstNonEmptyString([
         d['vehicleNumber'],
         d['vehicle_number'],
@@ -482,20 +544,34 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     }
 
     // Handle ride started - backend sends RIDE_STARTED, in_progress, or started
-    final startedStatuses = ['in_progress', 'started', 'ride_started', 'RIDE_STARTED', 'IN_PROGRESS'];
-    if (startedStatuses.contains(status) && _phase == _RidePhase.driverEnRoute) {
+    final startedStatuses = [
+      'in_progress',
+      'started',
+      'ride_started',
+      'RIDE_STARTED',
+      'IN_PROGRESS'
+    ];
+    if (startedStatuses.contains(status) &&
+        _phase == _RidePhase.driverEnRoute) {
       debugPrint('📡 Rider: Transitioning to rideInProgress');
       // Sync activeRideProvider so the banner hides OTP
-      ref.read(activeRideProvider.notifier).updateActiveRideStatus(RideStatus.inProgress);
+      ref
+          .read(activeRideProvider.notifier)
+          .updateActiveRideStatus(RideStatus.inProgress);
       _transitionToInProgress();
-    } else if ((status == 'completed' || status == 'ride_completed') && _phase != _RidePhase.completed) {
+    } else if ((status == 'completed' || status.contains('ride_completed')) &&
+        _phase != _RidePhase.completed) {
       debugPrint('📡 Rider: Transitioning to completed');
       _transitionToCompleted();
     } else if (status == 'cancelled' || status == 'canceled') {
       // Handle ride cancelled via status update
       _handleRideCancelled({'reason': data['reason'] ?? 'Ride was cancelled'});
-    } else if (status == 'accepted' || status == 'arriving' || status == 'driver_arriving' || 
-               status == 'driver_assigned' || status == 'confirmed' || status == 'driver_arrived') {
+    } else if (status == 'accepted' ||
+        status == 'arriving' ||
+        status == 'driver_arriving' ||
+        status == 'driver_assigned' ||
+        status == 'confirmed' ||
+        status == 'driver_arrived') {
       // Driver is still coming or just arrived — keep current phase
       debugPrint('📡 Rider: Driver en route status: $status');
     }
@@ -511,7 +587,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
 
       _animateDriverMarkerTo(newDriverLocation);
       _followDriverOnMap(newDriverLocation);
-      
+
       // Use shared ETA from driver if provided (ensures consistency)
       final driverEta = _extractSharedEtaMinutes(data);
       if (driverEta != null && driverEta > 0) {
@@ -530,7 +606,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           _updateRealtimeEtaEstimate(newDriverLocation);
         }
       }
-      
+
       _recalculateRouteIfNeeded(newDriverLocation);
     }
   }
@@ -540,7 +616,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     if (direct != null) return direct;
     final payload = data['payload'];
     if (payload is Map) {
-      final fromPayload = _parseEtaValue(payload['etaMinutes'] ?? payload['eta_minutes']);
+      final fromPayload =
+          _parseEtaValue(payload['etaMinutes'] ?? payload['eta_minutes']);
       if (fromPayload != null) return fromPayload;
     }
     return null;
@@ -555,7 +632,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
 
   bool _shouldUseLocalEtaFallback() {
     if (_lastSharedEtaAt == null) return true;
-    return DateTime.now().difference(_lastSharedEtaAt!) > const Duration(seconds: 12);
+    return DateTime.now().difference(_lastSharedEtaAt!) >
+        const Duration(seconds: 12);
   }
 
   void _handleChatMessage(Map<String, dynamic> data) {
@@ -567,13 +645,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
 
   void _handleRideCancelled(Map<String, dynamic> data) {
     if (!mounted) return;
-    
+
     // CRITICAL: Clear ride state immediately when cancelled
     ref.read(activeRideProvider.notifier).clearActiveRide();
 
     final reason = (data['reason'] as String? ?? '').toLowerCase();
     // Driver cancel: reason contains "driver", or we're pre-OTP and it's not rider-initiated
-    final isDriverCancel = reason.contains('driver') || reason.contains('by driver') ||
+    final isDriverCancel = reason.contains('driver') ||
+        reason.contains('by driver') ||
         (_phase == _RidePhase.driverEnRoute && !reason.contains('rider'));
 
     if (isDriverCancel && _phase == _RidePhase.driverEnRoute) {
@@ -583,7 +662,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     } else {
       // Rider cancelled or ride cancelled after OTP — clear all, go home
       ref.read(rideBookingProvider.notifier).reset();
-      _showGenericCancelledDialog(data['reason'] as String? ?? 'Your ride has been cancelled.');
+      _showGenericCancelledDialog(
+          data['reason'] as String? ?? 'Your ride has been cancelled.');
     }
   }
 
@@ -593,15 +673,16 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Ride Cancelled'),
+        title: Text(ref.tr('ride_cancelled')),
         content: Text(message),
         actions: [
           ElevatedButton(
             onPressed: () {
               Navigator.pop(ctx);
-              if (mounted) context.go(AppRoutes.home);
+              // Navigate to services screen (ride booking), not home/landing
+              if (mounted) context.go(AppRoutes.services);
             },
-            child: const Text('OK'),
+            child: Text(ref.tr('ok')),
           ),
         ],
       ),
@@ -618,9 +699,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     if (pickup == null || drop == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Unable to find another driver. Please book again.'), backgroundColor: Colors.orange),
+          SnackBar(
+              content: Text(ref.tr('unable_find_driver')),
+              backgroundColor: Colors.orange),
         );
-        context.go(AppRoutes.home);
+        // Navigate to services screen (ride booking), not home/landing
+        context.go(AppRoutes.services);
       }
       return;
     }
@@ -651,12 +735,15 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       if (response['success'] == true) {
         final rideData = response['data'] as Map<String, dynamic>?;
         final rideId = rideData?['id']?.toString();
-        final rideOtp = rideData?['rideOtp']?.toString() ?? rideData?['otp']?.toString();
+        final rideOtp =
+            rideData?['rideOtp']?.toString() ?? rideData?['otp']?.toString();
         if (rideId != null && rideId.isNotEmpty) {
-          ref.read(rideBookingProvider.notifier).setRideDetails(rideId: rideId, otp: rideOtp);
+          ref
+              .read(rideBookingProvider.notifier)
+              .setRideDetails(rideId: rideId, otp: rideOtp);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Unfortunately, the driver cancelled. Finding another driver...'),
+            SnackBar(
+              content: Text(ref.tr('finding_another_driver')),
               backgroundColor: Color(0xFFD4956A),
               behavior: SnackBarBehavior.floating,
             ),
@@ -666,7 +753,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           _navigateHomeOnError('Invalid ride data');
         }
       } else {
-        _navigateHomeOnError(response['error']?.toString() ?? response['message']?.toString() ?? 'Failed to create ride');
+        _navigateHomeOnError(response['error']?.toString() ??
+            response['message']?.toString() ??
+            'Failed to create ride');
       }
     } catch (e) {
       if (mounted) _navigateHomeOnError('Unable to connect. Please try again.');
@@ -678,7 +767,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.orange),
     );
-    context.go(AppRoutes.home);
+    // Navigate to services screen (ride booking), not home/landing
+    context.go(AppRoutes.services);
   }
 
   // ─── Phase transitions ───────────────────────────────────────
@@ -693,8 +783,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     // Recalculate route from live driver position -> destination.
     _calculateRoutes();
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Ride started! Heading to your destination.'),
+      SnackBar(
+        content: Text(ref.tr('ride_started_heading')),
         backgroundColor: Colors.green,
         behavior: SnackBarBehavior.floating,
       ),
@@ -703,7 +793,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
 
   void _transitionToCompleted() {
     if (!mounted) return;
+    if (_completionHandled) return;
+    _completionHandled = true;
     _pollTimer?.cancel();
+    // Hide persistent "active ride" banner immediately on completion.
+    ref.read(activeRideProvider.notifier).clearActiveRide();
+    ref.read(rideBookingProvider.notifier).clearRideOnly();
     setState(() => _phase = _RidePhase.completed);
     // Show rating after a brief delay
     Future.delayed(const Duration(milliseconds: 400), () {
@@ -722,10 +817,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
         case 'bike':
           assetPath = 'assets/map_icons/icon_bike.png';
           break;
+        case 'bike-rescue':
+          assetPath = 'assets/map_icons/icon_bike_rescue.png';
+          break;
         case 'auto':
           assetPath = 'assets/map_icons/icon_auto.png';
           break;
         case 'cab-premium':
+        case 'cab-xl':
           assetPath = 'assets/map_icons/icon_cab_premium.png';
           break;
         case 'cab':
@@ -734,36 +833,63 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           assetPath = 'assets/map_icons/icon_cab.png';
           break;
       }
-      
+
+      // Uber/Rapido style: ~40-50 logical pixels, with device pixel ratio for crisp rendering
       _vehicleIcon = await BitmapDescriptor.asset(
-        const ImageConfiguration(size: Size(48, 48)),
+        const ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5),
         assetPath,
       );
       debugPrint('🚗 Vehicle icon loaded from asset: $assetPath');
       if (mounted) _updateDriverMarker();
     } catch (e) {
       debugPrint('Failed to load vehicle icon asset: $e');
-      _vehicleIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+      _vehicleIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
     }
   }
-  
+
   String _normalizeVehicleType(String? type) {
     if (type == null || type.isEmpty) return 'cab';
     final lower = type.toLowerCase().trim();
+    if (lower.contains('rescue') || lower == 'bike_rescue')
+      return 'bike-rescue';
     if (lower.contains('bike') || lower.contains('moto')) return 'bike';
     if (lower.contains('auto') || lower.contains('rickshaw')) return 'auto';
-    if (lower.contains('premium') || lower.contains('suv') || lower.contains('xl')) return 'cab-premium';
+    if (lower.contains('premium') || lower.contains('suv'))
+      return 'cab-premium';
+    if (lower.contains('xl')) return 'cab-xl';
     if (lower.contains('mini') || lower.contains('hatch')) return 'cab-mini';
     return 'cab';
   }
-  
+
+  /// Load map style based on dark mode setting
+  Future<void> _loadMapStyle() async {
+    try {
+      final isDarkMode = ref.read(settingsProvider).isDarkMode;
+      _lastDarkMode = isDarkMode;
+      final stylePath = isDarkMode
+          ? 'assets/map_styles/raahi_dark.json'
+          : 'assets/map_styles/raahi_light.json';
+      _mapStyle = await rootBundle.loadString(stylePath);
+      if (_mapControllerInstance != null && _mapStyle != null) {
+        _mapControllerInstance!.setMapStyle(_mapStyle);
+      }
+      debugPrint(
+          '🗺️ Driver assigned map style loaded: ${isDarkMode ? "dark" : "light"}');
+    } catch (e) {
+      debugPrint('Failed to load map style: $e');
+    }
+  }
+
   void _updateDriverMarker() {
     if (!mounted) return;
     setState(() {
       _markers = _markers.map((m) {
         if (m.markerId.value == 'driver') {
           return m.copyWith(
-            iconParam: _vehicleIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+            iconParam: _vehicleIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueOrange),
           );
         }
         return m;
@@ -776,7 +902,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       Marker(
         markerId: const MarkerId('driver'),
         position: _driverLocation,
-        icon: _vehicleIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+        icon: _vehicleIcon ??
+            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
         anchor: const Offset(0.5, 0.5),
         flat: true,
         infoWindow: InfoWindow(title: _driverName, snippet: _vehicleNumber),
@@ -789,7 +916,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
         Marker(
           markerId: const MarkerId('pickup'),
           position: _pickupLocation,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet),
+          icon:
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet),
           infoWindow: const InfoWindow(title: 'Pickup'),
         ),
       );
@@ -804,8 +932,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     if (_isCalculatingRoute) return;
 
     final origin = _driverLocation;
-    final destination =
-        _phase == _RidePhase.rideInProgress ? _destinationLocation : _pickupLocation;
+    final destination = _phase == _RidePhase.rideInProgress
+        ? _destinationLocation
+        : _pickupLocation;
     final isDriverArriving = _phase == _RidePhase.driverEnRoute;
     final routeRevision = ++_routeRevision;
     final routeType = isDriverArriving ? 'PICKUP' : 'DROPOFF';
@@ -831,13 +960,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       setState(() {
         if (routeRevision != _routeRevision) return;
         _eta = (route.duration / 60).ceil();
-        _currentRoutePoints = List.from(route.points); // Store for deviation check
-        
+        _currentRoutePoints =
+            List.from(route.points); // Store for deviation check
+
         // Premium Uber-style polyline rendering with multiple layers
         final Color mainColor;
         final Color borderColor;
         final Color glowColor;
-        
+
         if (isDriverArriving) {
           mainColor = const Color(0xFF34A853); // Google green
           borderColor = const Color(0xFF1E7E34);
@@ -847,52 +977,33 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           borderColor = const Color(0xFF1A56DB);
           glowColor = const Color(0xFF4285F4).withOpacity(0.20);
         }
-        
+
+        // Uber/Rapido-style: thin, clean polylines
         _polylines = {
-          // Layer 1: Outer shadow
-          Polyline(
-            polylineId: const PolylineId('route_shadow'),
-            points: route.points,
-            color: Colors.black.withOpacity(0.08),
-            width: 20,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-          // Layer 2: Glow
-          Polyline(
-            polylineId: const PolylineId('route_glow'),
-            points: route.points,
-            color: glowColor,
-            width: 16,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-          // Layer 3: Border
+          // Layer 1: Border
           Polyline(
             polylineId: const PolylineId('route_border'),
             points: route.points,
             color: borderColor,
-            width: 10,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-            patterns: isDriverArriving
-                ? [PatternItem.dash(18), PatternItem.gap(12)]
-                : const <PatternItem>[],
-          ),
-          // Layer 4: Main route
-          Polyline(
-            polylineId: const PolylineId('route_main'),
-            points: route.points,
-            color: mainColor,
             width: 6,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
             patterns: isDriverArriving
-                ? [PatternItem.dash(18), PatternItem.gap(12)]
+                ? [PatternItem.dash(12), PatternItem.gap(8)]
+                : const <PatternItem>[],
+          ),
+          // Layer 2: Main route
+          Polyline(
+            polylineId: const PolylineId('route_main'),
+            points: route.points,
+            color: mainColor,
+            width: 4,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+            patterns: isDriverArriving
+                ? [PatternItem.dash(12), PatternItem.gap(8)]
                 : const <PatternItem>[],
           ),
         };
@@ -900,7 +1011,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       });
       _lastRouteRecalculationAt = DateTime.now();
       _lastRouteRecalculationFrom = _driverLocation;
-      
+
       debugPrint(
         '🗺️ [Route] Route calculated SUCCESS '
         'type=$routeType '
@@ -912,17 +1023,19 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       debugPrint('🗺️ [Route] Route calculation ERROR: $e');
       if (!mounted) return;
       setState(() {
-        // Fallback to straight line
+        // Fallback to straight line - thin style
         _polylines = {
           Polyline(
             polylineId: const PolylineId('route_fallback'),
             points: [origin, destination],
-            color: isDriverArriving ? const Color(0xFF34A853) : const Color(0xFF4285F4),
-            width: 5,
+            color: isDriverArriving
+                ? const Color(0xFF34A853)
+                : const Color(0xFF4285F4),
+            width: 4,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             patterns: isDriverArriving
-                ? [PatternItem.dash(18), PatternItem.gap(12)]
+                ? [PatternItem.dash(12), PatternItem.gap(8)]
                 : const <PatternItem>[],
           ),
         };
@@ -938,7 +1051,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     final controller = await _mapController.future;
     final points = <LatLng>[
       _driverLocation,
-      _phase == _RidePhase.rideInProgress ? _destinationLocation : _pickupLocation,
+      _phase == _RidePhase.rideInProgress
+          ? _destinationLocation
+          : _pickupLocation,
     ];
     final sw = LatLng(
       points.map((p) => p.latitude).reduce((a, b) => a < b ? a : b),
@@ -948,7 +1063,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       points.map((p) => p.latitude).reduce((a, b) => a > b ? a : b),
       points.map((p) => p.longitude).reduce((a, b) => a > b ? a : b),
     );
-    controller.animateCamera(CameraUpdate.newLatLngBounds(LatLngBounds(southwest: sw, northeast: ne), 80));
+    controller.animateCamera(CameraUpdate.newLatLngBounds(
+        LatLngBounds(southwest: sw, northeast: ne), 80));
   }
 
   void _animateDriverMarkerTo(LatLng target) {
@@ -975,7 +1091,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     // Calculate bearing for marker rotation
     final bearing = _calculateBearing(start, target);
 
-    _driverMarkerAnimationTimer = Timer.periodic(Duration(milliseconds: stepMs), (timer) {
+    _driverMarkerAnimationTimer =
+        Timer.periodic(Duration(milliseconds: stepMs), (timer) {
       if (!mounted) {
         timer.cancel();
         return;
@@ -987,7 +1104,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       final t = rawT < 0.5
           ? 4 * rawT * rawT * rawT
           : 1 - math.pow(-2 * rawT + 2, 3) / 2;
-      
+
       final lat = start.latitude + (target.latitude - start.latitude) * t;
       final lng = start.longitude + (target.longitude - start.longitude) * t;
       final interpolated = LatLng(lat, lng);
@@ -1000,7 +1117,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               positionParam: interpolated,
               rotationParam: bearing,
               flatParam: true,
-              iconParam: _vehicleIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+              iconParam: _vehicleIcon ??
+                  BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueOrange),
             );
           }
           return m;
@@ -1014,7 +1133,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
         timer.cancel();
       }
     });
-    
+
     debugPrint(
       '🚕 [Marker] Animating driver '
       'rideId=$_rideId '
@@ -1028,10 +1147,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     final lat1 = start.latitude * math.pi / 180;
     final lat2 = end.latitude * math.pi / 180;
     final dLng = (end.longitude - start.longitude) * math.pi / 180;
-    
+
     final y = math.sin(dLng) * math.cos(lat2);
-    final x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
-    
+    final x = math.cos(lat1) * math.sin(lat2) -
+        math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
+
     double bearing = math.atan2(y, x) * 180 / math.pi;
     return (bearing + 360) % 360;
   }
@@ -1039,11 +1159,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   void _followDriverOnMap(LatLng driverLocation) async {
     if (!_mapController.isCompleted) return;
     final controller = await _mapController.future;
-    
+
     // Calculate distance to target for dynamic zoom
-    final target = _phase == _RidePhase.rideInProgress ? _destinationLocation : _pickupLocation;
+    final target = _phase == _RidePhase.rideInProgress
+        ? _destinationLocation
+        : _pickupLocation;
     final distance = _distanceMeters(driverLocation, target);
-    
+
     // Dynamic zoom based on distance
     double zoom;
     if (distance < 100) {
@@ -1059,17 +1181,17 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     } else {
       zoom = 15.0;
     }
-    
+
     // Dynamic tilt based on phase
     final tilt = _phase == _RidePhase.rideInProgress ? 50.0 : 35.0;
-    
+
     // Calculate bearing to target for navigation feel
     final bearing = _calculateBearing(driverLocation, target);
-    
+
     // Project camera ahead of driver in driving direction
     final metersAhead = _phase == _RidePhase.rideInProgress ? 50.0 : 35.0;
     final leadTarget = _projectPointAhead(driverLocation, bearing, metersAhead);
-    
+
     controller.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(
@@ -1080,7 +1202,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
         ),
       ),
     );
-    
+
     debugPrint(
       '📷 [Camera] Following driver '
       'phase=$_phase '
@@ -1089,8 +1211,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       'bearing=${bearing.toStringAsFixed(0)}°',
     );
   }
-  
-  LatLng _projectPointAhead(LatLng from, double bearingDeg, double metersAhead) {
+
+  LatLng _projectPointAhead(
+      LatLng from, double bearingDeg, double metersAhead) {
     const earthRadius = 6378137.0;
     final bearing = bearingDeg * math.pi / 180;
     final lat1 = from.latitude * math.pi / 180;
@@ -1116,11 +1239,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       _calculateRoutes();
       return;
     }
-    
+
     // Find nearest point on the route polyline (segment projection)
-    final snapResult = _findNearestPointOnPolyline(latestDriverLocation, _currentRoutePoints);
+    final snapResult =
+        _findNearestPointOnPolyline(latestDriverLocation, _currentRoutePoints);
     final distanceFromRoute = snapResult.distance;
-    
+
     debugPrint(
       '📍 [Deviation] '
       'rideId=$_rideId '
@@ -1130,7 +1254,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       'distanceFromRoute=${distanceFromRoute.toStringAsFixed(1)}m '
       'segmentIndex=${snapResult.segmentIndex}',
     );
-    
+
     if (distanceFromRoute <= _snapThreshold) {
       // Driver is close to route - apply snapping for visual alignment
       _applyRouteSnapping(snapResult.point, snapResult.segmentIndex);
@@ -1141,14 +1265,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       );
       return;
     }
-    
+
     if (distanceFromRoute > _deviationThreshold) {
       // Driver significantly deviated - check cooldown before recalculating
       final now = DateTime.now();
       final lastAt = _lastRouteRecalculationAt;
       final cooledDown = lastAt == null ||
           now.difference(lastAt) >= _routeRecalculationCooldown;
-      
+
       if (cooledDown) {
         debugPrint(
           '🔄 [Deviation] Route recalculation triggered '
@@ -1157,7 +1281,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
         );
         _calculateRoutes();
       } else {
-        final cooldownRemaining = _routeRecalculationCooldown.inSeconds - 
+        final cooldownRemaining = _routeRecalculationCooldown.inSeconds -
             now.difference(lastAt!).inSeconds;
         debugPrint(
           '⏳ [Deviation] Recalculation skipped (cooldown) '
@@ -1166,11 +1290,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       }
     }
   }
-  
+
   /// Result of projecting a point onto a polyline segment
-  _PolylineSnapResult _findNearestPointOnPolyline(LatLng point, List<LatLng> polyline) {
+  _PolylineSnapResult _findNearestPointOnPolyline(
+      LatLng point, List<LatLng> polyline) {
     if (polyline.isEmpty) {
-      return _PolylineSnapResult(point: point, distance: double.infinity, segmentIndex: -1);
+      return _PolylineSnapResult(
+          point: point, distance: double.infinity, segmentIndex: -1);
     }
     if (polyline.length == 1) {
       return _PolylineSnapResult(
@@ -1179,49 +1305,51 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
         segmentIndex: 0,
       );
     }
-    
+
     double minDistance = double.infinity;
     LatLng nearestPoint = polyline[0];
     int nearestSegmentIndex = 0;
-    
+
     for (int i = 0; i < polyline.length - 1; i++) {
-      final projected = _projectPointOntoSegment(point, polyline[i], polyline[i + 1]);
+      final projected =
+          _projectPointOntoSegment(point, polyline[i], polyline[i + 1]);
       final distance = _distanceMeters(point, projected);
-      
+
       if (distance < minDistance) {
         minDistance = distance;
         nearestPoint = projected;
         nearestSegmentIndex = i;
       }
     }
-    
+
     return _PolylineSnapResult(
       point: nearestPoint,
       distance: minDistance,
       segmentIndex: nearestSegmentIndex,
     );
   }
-  
+
   /// Project a point onto a line segment
-  LatLng _projectPointOntoSegment(LatLng point, LatLng segmentStart, LatLng segmentEnd) {
+  LatLng _projectPointOntoSegment(
+      LatLng point, LatLng segmentStart, LatLng segmentEnd) {
     final px = point.longitude;
     final py = point.latitude;
     final ax = segmentStart.longitude;
     final ay = segmentStart.latitude;
     final bx = segmentEnd.longitude;
     final by = segmentEnd.latitude;
-    
+
     final dx = bx - ax;
     final dy = by - ay;
-    
+
     if (dx == 0 && dy == 0) return segmentStart;
-    
+
     final t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
     final clampedT = t.clamp(0.0, 1.0);
-    
+
     return LatLng(ay + clampedT * dy, ax + clampedT * dx);
   }
-  
+
   /// Apply route snapping - trim route and optionally update marker
   void _applyRouteSnapping(LatLng snappedPosition, int segmentIndex) {
     if (segmentIndex > 0 && segmentIndex < _currentRoutePoints.length) {
@@ -1230,7 +1358,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       if (segmentIndex + 1 < _currentRoutePoints.length) {
         newRoutePoints.addAll(_currentRoutePoints.sublist(segmentIndex + 1));
       }
-      
+
       if (newRoutePoints.length != _currentRoutePoints.length) {
         setState(() {
           _currentRoutePoints = newRoutePoints;
@@ -1240,15 +1368,15 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       }
     }
   }
-  
+
   /// Update polylines with new route points (preserves styling)
   void _updatePolylinesWithPoints(List<LatLng> points) {
     final isDriverArriving = _phase == _RidePhase.driverEnRoute;
-    
+
     final Color mainColor;
     final Color borderColor;
     final Color glowColor;
-    
+
     if (isDriverArriving) {
       mainColor = const Color(0xFF34A853);
       borderColor = const Color(0xFF1E7E34);
@@ -1258,48 +1386,31 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       borderColor = const Color(0xFF1A56DB);
       glowColor = const Color(0xFF4285F4).withOpacity(0.20);
     }
-    
+
+    // Uber/Rapido-style: thin, clean polylines
     _polylines = {
-      Polyline(
-        polylineId: const PolylineId('route_shadow'),
-        points: points,
-        color: Colors.black.withOpacity(0.08),
-        width: 20,
-        startCap: Cap.roundCap,
-        endCap: Cap.roundCap,
-        jointType: JointType.round,
-      ),
-      Polyline(
-        polylineId: const PolylineId('route_glow'),
-        points: points,
-        color: glowColor,
-        width: 16,
-        startCap: Cap.roundCap,
-        endCap: Cap.roundCap,
-        jointType: JointType.round,
-      ),
       Polyline(
         polylineId: const PolylineId('route_border'),
         points: points,
         color: borderColor,
-        width: 10,
+        width: 6,
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
         jointType: JointType.round,
         patterns: isDriverArriving
-            ? [PatternItem.dash(18), PatternItem.gap(12)]
+            ? [PatternItem.dash(12), PatternItem.gap(8)]
             : const <PatternItem>[],
       ),
       Polyline(
         polylineId: const PolylineId('route_main'),
         points: points,
         color: mainColor,
-        width: 6,
+        width: 4,
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
         jointType: JointType.round,
         patterns: isDriverArriving
-            ? [PatternItem.dash(18), PatternItem.gap(12)]
+            ? [PatternItem.dash(12), PatternItem.gap(8)]
             : const <PatternItem>[],
       ),
     };
@@ -1313,19 +1424,23 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     final dLng = (b.longitude - a.longitude) * math.pi / 180;
     final sinLat = math.sin(dLat / 2);
     final sinLng = math.sin(dLng / 2);
-    final h = sinLat * sinLat + math.cos(lat1) * math.cos(lat2) * sinLng * sinLng;
+    final h =
+        sinLat * sinLat + math.cos(lat1) * math.cos(lat2) * sinLng * sinLng;
     final c = 2 * math.atan2(math.sqrt(h), math.sqrt(1 - h));
     return earthRadius * c;
   }
 
   void _updateRealtimeEtaEstimate(LatLng driverPosition) {
     if (!_shouldUseLocalEtaFallback()) return;
-    final target = _phase == _RidePhase.rideInProgress ? _destinationLocation : _pickupLocation;
+    final target = _phase == _RidePhase.rideInProgress
+        ? _destinationLocation
+        : _pickupLocation;
     final distanceMeters = _distanceMeters(driverPosition, target);
 
     // Lightweight realtime ETA estimate between route refreshes.
     final avgKmph = _phase == _RidePhase.rideInProgress ? 24.0 : 20.0;
-    final nextEta = ((distanceMeters / 1000) / avgKmph * 60).ceil().clamp(1, 180);
+    final nextEta =
+        ((distanceMeters / 1000) / avgKmph * 60).ceil().clamp(1, 180);
 
     if (nextEta != _eta && mounted) {
       setState(() {
@@ -1337,6 +1452,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   // ─── Rating ──────────────────────────────────────────────────
 
   void _showRatingSheet() {
+    if (_ratingSheetOpen) return;
+    _ratingSheetOpen = true;
     showModalBottomSheet(
       context: context,
       isDismissible: false,
@@ -1356,10 +1473,15 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           _clearRideStateAndNavigate();
         },
       ),
-    );
+    ).whenComplete(() {
+      _ratingSheetOpen = false;
+    });
   }
 
   /// Clear all ride-related state and navigate to the services / vehicle selection screen.
+  /// 
+  /// IMPORTANT: Always navigate to services screen (ride booking), NOT home/landing screen.
+  /// This ensures users can immediately book another ride after cancellation.
   void _clearRideStateAndNavigate() {
     ref.read(activeRideProvider.notifier).clearActiveRide();
     ref.read(rideBookingProvider.notifier).reset();
@@ -1373,7 +1495,10 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       await apiClient.submitRideRating(_rideId!, rating, feedback: feedback);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Thanks for your feedback!'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating),
+          SnackBar(
+              content: Text(ref.tr('thanks_feedback')),
+              backgroundColor: AppColors.success,
+              behavior: SnackBarBehavior.floating),
         );
       }
     } catch (e) {
@@ -1389,7 +1514,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
     if (phone.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Driver phone number unavailable')),
+        SnackBar(content: Text(ref.tr('driver_phone_unavailable'))),
       );
       return;
     }
@@ -1489,7 +1614,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           return serverMessages.any((srv) {
             if (srv is! Map<String, dynamic>) return false;
             return (srv['message'] as String? ?? '') == local.text &&
-                   ((srv['sender'] as String? ?? '') == 'rider') == !local.isFromDriver;
+                ((srv['sender'] as String? ?? '') == 'rider') ==
+                    !local.isFromDriver;
           });
         });
 
@@ -1504,7 +1630,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
             id: msgId,
             text: srv['message'] as String? ?? '',
             isFromDriver: (srv['sender'] as String? ?? '') != 'rider',
-            timestamp: DateTime.fromMillisecondsSinceEpoch(srv['timestamp'] as int? ?? 0),
+            timestamp: DateTime.fromMillisecondsSinceEpoch(
+                srv['timestamp'] as int? ?? 0),
           ));
         }
         _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -1525,8 +1652,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       _messages.removeWhere((local) {
         if (local.id.isNotEmpty) return false; // Not an optimistic message
         return serverMessages.any((srv) =>
-          (srv['message'] as String? ?? '') == local.text &&
-          ((srv['sender'] as String? ?? '') == 'rider') == !local.isFromDriver);
+            (srv['message'] as String? ?? '') == local.text &&
+            ((srv['sender'] as String? ?? '') == 'rider') ==
+                !local.isFromDriver);
       });
 
       // Add any server messages we don't already have
@@ -1539,7 +1667,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           id: msgId,
           text: msg['message'] as String? ?? '',
           isFromDriver: (msg['sender'] as String? ?? '') != 'rider',
-          timestamp: DateTime.fromMillisecondsSinceEpoch(msg['timestamp'] as int? ?? 0),
+          timestamp: DateTime.fromMillisecondsSinceEpoch(
+              msg['timestamp'] as int? ?? 0),
         ));
       }
       _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -1572,11 +1701,21 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   }
 
   Future<void> _fitBounds(GoogleMapController controller) async {
-    final lats = [_pickupLocation.latitude, _destinationLocation.latitude, _driverLocation.latitude];
-    final lngs = [_pickupLocation.longitude, _destinationLocation.longitude, _driverLocation.longitude];
+    final lats = [
+      _pickupLocation.latitude,
+      _destinationLocation.latitude,
+      _driverLocation.latitude
+    ];
+    final lngs = [
+      _pickupLocation.longitude,
+      _destinationLocation.longitude,
+      _driverLocation.longitude
+    ];
     final bounds = LatLngBounds(
-      southwest: LatLng(lats.reduce((a, b) => a < b ? a : b), lngs.reduce((a, b) => a < b ? a : b)),
-      northeast: LatLng(lats.reduce((a, b) => a > b ? a : b), lngs.reduce((a, b) => a > b ? a : b)),
+      southwest: LatLng(lats.reduce((a, b) => a < b ? a : b),
+          lngs.reduce((a, b) => a < b ? a : b)),
+      northeast: LatLng(lats.reduce((a, b) => a > b ? a : b),
+          lngs.reduce((a, b) => a > b ? a : b)),
     );
     await Future.delayed(const Duration(milliseconds: 100));
     controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
@@ -1585,7 +1724,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   void _cancelRide() {
     if (_rideId != null) {
       realtimeService.cancelRide(_rideId!, reason: 'Cancelled by rider');
-      apiClient.cancelRide(_rideId!, reason: 'Cancelled by rider').catchError((_) => <String, dynamic>{});
+      apiClient
+          .cancelRide(_rideId!, reason: 'Cancelled by rider')
+          .catchError((_) => <String, dynamic>{});
     }
     _clearRideStateAndNavigate();
   }
@@ -1611,7 +1752,10 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               Column(
                 children: [
                   _buildHeader(),
-                  Expanded(child: _phase == _RidePhase.rideInProgress ? _buildRideInProgressUI() : _buildDriverEnRouteUI()),
+                  Expanded(
+                      child: _phase == _RidePhase.rideInProgress
+                          ? _buildRideInProgressUI()
+                          : _buildDriverEnRouteUI()),
                 ],
               ),
             ],
@@ -1635,7 +1779,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   /// OTP PIN banner inside the bottom sheet
   Widget _buildOtpPinBanner() {
     final hasValidOtp = _otp.isNotEmpty && _otp != '----' && _otp.length == 4;
-    
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
@@ -1652,7 +1796,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               color: const Color(0xFFD4956A).withOpacity(0.15),
               borderRadius: BorderRadius.circular(10),
             ),
-            child: const Icon(Icons.lock_outline, color: Color(0xFFD4956A), size: 18),
+            child: const Icon(Icons.lock_outline,
+                color: Color(0xFFD4956A), size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1670,8 +1815,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  hasValidOtp ? 'Share with driver to start ride' : 'Loading...',
-                  style: const TextStyle(color: Color(0xFF888888), fontSize: 11),
+                  hasValidOtp
+                      ? 'Share with driver to start ride'
+                      : 'Loading...',
+                  style:
+                      const TextStyle(color: Color(0xFF888888), fontSize: 11),
                 ),
               ],
             ),
@@ -1704,7 +1852,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
             const SizedBox(
               width: 20,
               height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFD4956A)),
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Color(0xFFD4956A)),
             ),
         ],
       ),
@@ -1728,15 +1877,26 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
             decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-              boxShadow: [BoxShadow(color: Colors.black.withAlpha(30), blurRadius: 20, offset: const Offset(0, -4))],
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(24)),
+              boxShadow: [
+                BoxShadow(
+                    color: Colors.black.withAlpha(30),
+                    blurRadius: 20,
+                    offset: const Offset(0, -4))
+              ],
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 // Handle
                 Center(
-                  child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2))),
+                  child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: Colors.grey[300],
+                          borderRadius: BorderRadius.circular(2))),
                 ),
                 const SizedBox(height: 16),
                 // Status
@@ -1749,17 +1909,24 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                         color: AppColors.info.withAlpha(25),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Icon(Icons.navigation, color: AppColors.info),
+                      child:
+                          const Icon(Icons.navigation, color: AppColors.info),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Heading to', style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                          const Text('Heading to',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.textSecondary)),
                           Text(
                             _dropAddress.split(',').first,
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+                            style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.textPrimary),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -1767,9 +1934,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                       ),
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(color: AppColors.inputBackground, borderRadius: BorderRadius.circular(8)),
-                      child: Text('$_eta min', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                          color: AppColors.inputBackground,
+                          borderRadius: BorderRadius.circular(8)),
+                      child: Text('$_eta min',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w600, fontSize: 14)),
                     ),
                   ],
                 ),
@@ -1780,7 +1952,10 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                     CircleAvatar(
                       radius: 18,
                       backgroundColor: const Color(0xFFD4956A),
-                      child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -1795,7 +1970,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            _vehicleNumber.isNotEmpty ? _vehicleNumber : 'Vehicle details unavailable',
+                            _vehicleNumber.isNotEmpty
+                                ? _vehicleNumber
+                                : 'Vehicle details unavailable',
                             style: const TextStyle(
                               fontSize: 12,
                               color: AppColors.textSecondary,
@@ -1810,7 +1987,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                     const SizedBox(width: 12),
                     Text(
                       '\u20B9${_fareAmount.round()}',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 18),
                     ),
                   ],
                 ),
@@ -1819,13 +1997,18 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                 Center(
                   child: ElevatedButton.icon(
                     onPressed: _openSafetyOptions,
-                    icon: const Icon(Icons.shield_outlined, size: 20, color: Colors.white),
-                    label: const Text('Safety', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                    icon: const Icon(Icons.shield_outlined,
+                        size: 20, color: Colors.white),
+                    label: Text(ref.tr('safety'),
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFD4956A),
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(24)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 32, vertical: 14),
                       elevation: 0,
                     ),
                   ),
@@ -1839,6 +2022,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   }
 
   Widget _buildFullScreenMap() {
+    // Watch dark mode changes
+    final isDarkMode = ref.watch(settingsProvider).isDarkMode;
+    if (isDarkMode != _lastDarkMode) {
+      _lastDarkMode = isDarkMode;
+      _loadMapStyle();
+    }
+
     return GoogleMap(
       initialCameraPosition: CameraPosition(
         target: LatLng(
@@ -1851,6 +2041,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       polylines: _polylines,
       onMapCreated: (controller) {
         if (!_mapController.isCompleted) _mapController.complete(controller);
+        _mapControllerInstance = controller;
+        // Apply map style
+        if (_mapStyle != null) {
+          controller.setMapStyle(_mapStyle);
+        }
         _fitMapToBounds();
       },
       myLocationEnabled: false,
@@ -1862,7 +2057,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   // ─── Header ──────────────────────────────────────────────────
 
   Widget _buildHeader() {
-    final bool canCancel = _phase != _RidePhase.rideInProgress; // No cancel once ride has started (OTP verified)
+    final bool canCancel = _phase !=
+        _RidePhase
+            .rideInProgress; // No cancel once ride has started (OTP verified)
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
@@ -1874,8 +2071,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               onTap: () => _showCancelDialog(),
               child: Container(
                 padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(20)),
-                child: const Icon(Icons.close, color: Color(0xFF1A1A1A), size: 20),
+                decoration: BoxDecoration(
+                    color: const Color(0xFFF5F5F5),
+                    borderRadius: BorderRadius.circular(20)),
+                child:
+                    const Icon(Icons.close, color: Color(0xFF1A1A1A), size: 20),
               ),
             )
           else
@@ -1884,12 +2084,19 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             decoration: BoxDecoration(
-              color: _phase == _RidePhase.rideInProgress ? AppColors.info : const Color(0xFFD4956A),
+              color: _phase == _RidePhase.rideInProgress
+                  ? AppColors.info
+                  : const Color(0xFFD4956A),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Text(
-              _phase == _RidePhase.rideInProgress ? 'En Route' : 'Driver Arriving',
-              style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+              _phase == _RidePhase.rideInProgress
+                  ? 'En Route'
+                  : 'Driver Arriving',
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600),
             ),
           ),
           if (canCancel)
@@ -1899,7 +2106,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                 if (v == 'cancel') _showCancelDialog();
               },
               itemBuilder: (_) => [
-                const PopupMenuItem(value: 'cancel', child: Row(children: [Icon(Icons.cancel_outlined, color: Colors.red, size: 20), SizedBox(width: 12), Text('Cancel Ride', style: TextStyle(color: Colors.red))])),
+                PopupMenuItem(
+                    value: 'cancel',
+                    child: Row(children: [
+                      Icon(Icons.cancel_outlined, color: Colors.red, size: 20),
+                      SizedBox(width: 12),
+                      Text(ref.tr('cancel_ride'),
+                          style: TextStyle(color: Colors.red))
+                    ])),
               ],
             )
           else
@@ -1914,14 +2128,20 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Cancel Ride?'),
-        content: const Text('Are you sure you want to cancel?'),
+        title: Text(ref.tr('cancel_ride_question')),
+        content: Text(ref.tr('cancel_ride_sure')),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Keep Ride')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(ref.tr('keep_ride'))),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () { Navigator.pop(ctx); _cancelRide(); },
-            child: const Text('Cancel Ride', style: TextStyle(color: Colors.white)),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _cancelRide();
+            },
+            child: Text(ref.tr('cancel_ride'),
+                style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -1949,7 +2169,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               markers: _markers,
               polylines: _polylines,
               onMapCreated: (controller) {
-                if (!_mapController.isCompleted) _mapController.complete(controller);
+                if (!_mapController.isCompleted)
+                  _mapController.complete(controller);
                 _fitBounds(controller);
               },
               myLocationEnabled: false,
@@ -1962,10 +2183,18 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
             right: 12,
             child: Container(
               padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 4)]),
+              decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 4)
+                  ]),
               child: Column(children: [
-                Text('$_eta', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700)),
-                const Text('min', style: TextStyle(fontSize: 12, color: Color(0xFF888888))),
+                Text('$_eta',
+                    style: const TextStyle(
+                        fontSize: 24, fontWeight: FontWeight.w700)),
+                const Text('min',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF888888))),
               ]),
             ),
           ),
@@ -1975,8 +2204,15 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
             right: 80,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 4)]),
-              child: Text(label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+              decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 4)
+                  ]),
+              child: Text(label,
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w500)),
             ),
           ),
         ],
@@ -1991,12 +2227,23 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        boxShadow: [BoxShadow(color: Colors.black.withAlpha(30), blurRadius: 10, offset: const Offset(0, -2))],
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withAlpha(30),
+              blurRadius: 10,
+              offset: const Offset(0, -2))
+        ],
       ),
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(children: [
-          Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2)))),
+          Center(
+              child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFE0E0E0),
+                      borderRadius: BorderRadius.circular(2)))),
           const SizedBox(height: 16),
           _buildDriverInfoCard(),
           const SizedBox(height: 12),
@@ -2015,30 +2262,48 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
   Widget _buildDriverInfoCard() {
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: const Color(0xFFFAFAFA), borderRadius: BorderRadius.circular(16)),
+      decoration: BoxDecoration(
+          color: const Color(0xFFFAFAFA),
+          borderRadius: BorderRadius.circular(16)),
       child: Row(children: [
         Container(
-          width: 56, height: 56,
-          decoration: BoxDecoration(color: const Color(0xFFD4956A), borderRadius: BorderRadius.circular(12)),
-          child: Center(child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 24))),
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+              color: const Color(0xFFD4956A),
+              borderRadius: BorderRadius.circular(12)),
+          child: Center(
+              child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 24))),
         ),
         const SizedBox(width: 12),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(
-            _vehicleNumber.isNotEmpty ? _vehicleNumber : 'Vehicle details unavailable',
+            _vehicleNumber.isNotEmpty
+                ? _vehicleNumber
+                : 'Vehicle details unavailable',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
           if (_vehicleModel.isNotEmpty)
-            Text(_vehicleModel, style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+            Text(_vehicleModel,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
         ])),
         Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text(_driverName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          Text(_driverName,
+              style:
+                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
           Row(children: [
             const Icon(Icons.star, size: 14, color: Color(0xFFFFD700)),
             const SizedBox(width: 2),
-            Text(_driverRating.toString(), style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+            Text(_driverRating.toString(),
+                style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
           ]),
         ]),
       ]),
@@ -2058,9 +2323,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
             child: Container(
               height: 48,
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(24)),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFF5F5F5),
+                  borderRadius: BorderRadius.circular(24)),
               child: Row(children: [
-                const Expanded(child: Text('Send a message...', style: TextStyle(color: Color(0xFFBDBDBD), fontSize: 14))),
+                const Expanded(
+                    child: Text('Send a message...',
+                        style:
+                            TextStyle(color: Color(0xFFBDBDBD), fontSize: 14))),
                 _chatIconWithBadge(
                   unreadCount,
                   baseIcon: Icons.chat_bubble_outline,
@@ -2165,14 +2435,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-              const ListTile(
-                leading: Icon(Icons.shield_outlined),
-                title: Text('Safety tools'),
-                subtitle: Text('Quick actions during your ride'),
+              ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: Text(ref.tr('safety_tools')),
+                subtitle: Text(ref.tr('quick_actions')),
               ),
               ListTile(
                 leading: const Icon(Icons.share_outlined),
-                title: const Text('Share Trip'),
+                title: Text(ref.tr('share_trip')),
                 onTap: () {
                   Navigator.pop(context);
                   _shareTripDetails();
@@ -2180,7 +2450,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               ),
               ListTile(
                 leading: const Icon(Icons.report_problem_outlined),
-                title: const Text('Report Issue'),
+                title: Text(ref.tr('report_issue_btn')),
                 onTap: () {
                   Navigator.pop(context);
                   _openReportIssueSheet();
@@ -2188,7 +2458,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
               ),
               ListTile(
                 leading: const Icon(Icons.sos_outlined, color: Colors.red),
-                title: const Text('SOS Alert'),
+                title: Text(ref.tr('sos_alert')),
                 onTap: () async {
                   Navigator.pop(context);
                   await _callEmergencyNumber('112');
@@ -2208,7 +2478,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen> {
       await launchUrl(uri);
     } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to open emergency dialer')),
+        SnackBar(content: Text(ref.tr('unable_open_dialer'))),
       );
     }
   }
@@ -2229,7 +2499,7 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to share trip right now')),
+        SnackBar(content: Text(ref.tr('unable_share_trip'))),
       );
     }
   }
@@ -2237,6 +2507,10 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
   Future<void> _openReportIssueSheet() async {
     if (!mounted) return;
     final parentContext = context;
+    // Capture translations before entering builder
+    final trReportIssue = ref.tr('report_issue');
+    final trSelectIssue = ref.tr('select_issue');
+    final trIssueReportedMsg = ref.tr('issue_reported_msg');
     await showModalBottomSheet(
       context: parentContext,
       shape: const RoundedRectangleBorder(
@@ -2263,10 +2537,10 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
                 ),
               ),
               const SizedBox(height: 10),
-              const ListTile(
-                leading: Icon(Icons.report_problem_outlined),
-                title: Text('Report Issue'),
-                subtitle: Text('Select the issue you are facing'),
+              ListTile(
+                leading: const Icon(Icons.report_problem_outlined),
+                title: Text(trReportIssue),
+                subtitle: Text(trSelectIssue),
               ),
               ...issues.map(
                 (issue) => ListTile(
@@ -2275,7 +2549,9 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
                     Navigator.pop(context);
                     if (!mounted) return;
                     ScaffoldMessenger.of(parentContext).showSnackBar(
-                      SnackBar(content: Text('Issue reported: $issue')),
+                      SnackBar(
+                          content: Text(
+                              trIssueReportedMsg.replaceAll('{issue}', issue))),
                     );
                   },
                 ),
@@ -2288,17 +2564,25 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
     );
   }
 
-  Widget _actionBtn(IconData icon, String label, VoidCallback onTap, {bool isPrimary = false}) {
+  Widget _actionBtn(IconData icon, String label, VoidCallback onTap,
+      {bool isPrimary = false}) {
     return GestureDetector(
       onTap: onTap,
       child: Column(children: [
         Container(
-          width: 56, height: 56,
-          decoration: BoxDecoration(color: isPrimary ? const Color(0xFFD4956A) : const Color(0xFFF5F5F5), shape: BoxShape.circle),
-          child: Icon(icon, color: isPrimary ? Colors.white : const Color(0xFF1A1A1A), size: 24),
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+              color:
+                  isPrimary ? const Color(0xFFD4956A) : const Color(0xFFF5F5F5),
+              shape: BoxShape.circle),
+          child: Icon(icon,
+              color: isPrimary ? Colors.white : const Color(0xFF1A1A1A),
+              size: 24),
         ),
         const SizedBox(height: 8),
-        Text(label, style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+        Text(label,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
       ]),
     );
   }
@@ -2306,19 +2590,39 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
   Widget _buildTripLocations() {
     return Column(children: [
       _locationRow(_pickupAddress, const Color(0xFF1A1A1A)),
-      Container(margin: const EdgeInsets.only(left: 3), width: 2, height: 24, color: const Color(0xFFE0E0E0)),
+      Container(
+          margin: const EdgeInsets.only(left: 3),
+          width: 2,
+          height: 24,
+          color: const Color(0xFFE0E0E0)),
       _locationRow(_dropAddress, const Color(0xFFD4956A)),
     ]);
   }
 
   Widget _locationRow(String address, Color dotColor) {
-    final parts = address.contains(',') ? [address.split(',').first, address.substring(address.indexOf(',') + 2)] : [address, ''];
+    final parts = address.contains(',')
+        ? [
+            address.split(',').first,
+            address.substring(address.indexOf(',') + 2)
+          ]
+        : [address, ''];
     return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Container(width: 8, height: 8, margin: const EdgeInsets.only(top: 6), decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle)),
+      Container(
+          width: 8,
+          height: 8,
+          margin: const EdgeInsets.only(top: 6),
+          decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle)),
       const SizedBox(width: 12),
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(parts[0], style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-        if (parts[1].isNotEmpty) Text(parts[1], style: const TextStyle(fontSize: 12, color: Color(0xFF888888)), maxLines: 2, overflow: TextOverflow.ellipsis),
+      Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(parts[0],
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        if (parts[1].isNotEmpty)
+          Text(parts[1],
+              style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis),
       ])),
     ]);
   }
@@ -2330,38 +2634,111 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
       color: Colors.black54,
       child: Column(children: [
         Container(
-          padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top + 8, left: 16, right: 16, bottom: 16),
-          decoration: const BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))]),
+          padding: EdgeInsets.only(
+              top: MediaQuery.of(context).padding.top + 8,
+              left: 16,
+              right: 16,
+              bottom: 16),
+          decoration: const BoxDecoration(color: Colors.white, boxShadow: [
+            BoxShadow(
+                color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))
+          ]),
           child: Row(children: [
-            GestureDetector(onTap: () { _stopChatPolling(); setState(() => _showChat = false); }, child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(20)), child: const Icon(Icons.close, size: 20))),
+            GestureDetector(
+                onTap: () {
+                  _stopChatPolling();
+                  setState(() => _showChat = false);
+                },
+                child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                        color: const Color(0xFFF5F5F5),
+                        borderRadius: BorderRadius.circular(20)),
+                    child: const Icon(Icons.close, size: 20))),
             const SizedBox(width: 12),
-            Container(width: 40, height: 40, decoration: BoxDecoration(color: const Color(0xFFD4956A), borderRadius: BorderRadius.circular(20)), child: Center(child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)))),
+            Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                    color: const Color(0xFFD4956A),
+                    borderRadius: BorderRadius.circular(20)),
+                child: Center(
+                    child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 16)))),
             const SizedBox(width: 12),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(_driverName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-              Text(
-                _vehicleSummaryLine,
-                style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ])),
-            GestureDetector(onTap: _callDriver, child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: const Color(0xFFD4956A), borderRadius: BorderRadius.circular(20)), child: const Icon(Icons.phone, color: Colors.white, size: 20))),
+            Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  Text(_driverName,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 16)),
+                  Text(
+                    _vehicleSummaryLine,
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ])),
+            GestureDetector(
+                onTap: _callDriver,
+                child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                        color: const Color(0xFFD4956A),
+                        borderRadius: BorderRadius.circular(20)),
+                    child: const Icon(Icons.phone,
+                        color: Colors.white, size: 20))),
           ]),
         ),
         Expanded(
           child: Container(
             color: const Color(0xFFF5F5F5),
-            child: ListView.builder(controller: _scrollController, padding: const EdgeInsets.all(16), itemCount: _messages.length, itemBuilder: (_, i) => _buildBubble(_messages[i])),
+            child: ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.all(16),
+                itemCount: _messages.length,
+                itemBuilder: (_, i) => _buildBubble(_messages[i])),
           ),
         ),
         Container(
-          padding: EdgeInsets.only(left: 16, right: 16, top: 12, bottom: MediaQuery.of(context).padding.bottom + 12),
-          decoration: const BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, -2))]),
+          padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 12,
+              bottom: MediaQuery.of(context).padding.bottom + 12),
+          decoration: const BoxDecoration(color: Colors.white, boxShadow: [
+            BoxShadow(
+                color: Colors.black12, blurRadius: 4, offset: Offset(0, -2))
+          ]),
           child: Row(children: [
-            Expanded(child: Container(padding: const EdgeInsets.symmetric(horizontal: 16), decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(24)), child: TextField(controller: _messageController, decoration: const InputDecoration(hintText: 'Type a message...', border: InputBorder.none, contentPadding: EdgeInsets.symmetric(vertical: 12)), onSubmitted: (_) => _sendMessage()))),
+            Expanded(
+                child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                        color: const Color(0xFFF5F5F5),
+                        borderRadius: BorderRadius.circular(24)),
+                    child: TextField(
+                        controller: _messageController,
+                        decoration: const InputDecoration(
+                            hintText: 'Type a message...',
+                            border: InputBorder.none,
+                            contentPadding: EdgeInsets.symmetric(vertical: 12)),
+                        onSubmitted: (_) => _sendMessage()))),
             const SizedBox(width: 12),
-            GestureDetector(onTap: _sendMessage, child: Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: const Color(0xFFD4956A), borderRadius: BorderRadius.circular(24)), child: const Icon(Icons.send, color: Colors.white, size: 20))),
+            GestureDetector(
+                onTap: _sendMessage,
+                child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                        color: const Color(0xFFD4956A),
+                        borderRadius: BorderRadius.circular(24)),
+                    child:
+                        const Icon(Icons.send, color: Colors.white, size: 20))),
           ]),
         ),
       ]),
@@ -2369,27 +2746,52 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
   }
 
   Widget _buildBubble(_ChatMessage msg) {
-    final time = '${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
+    final time =
+        '${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
-        mainAxisAlignment: msg.isFromDriver ? MainAxisAlignment.start : MainAxisAlignment.end,
+        mainAxisAlignment:
+            msg.isFromDriver ? MainAxisAlignment.start : MainAxisAlignment.end,
         children: [
           if (msg.isFromDriver) ...[
-            CircleAvatar(radius: 14, backgroundColor: const Color(0xFFD4956A), child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600))),
+            CircleAvatar(
+                radius: 14,
+                backgroundColor: const Color(0xFFD4956A),
+                child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600))),
             const SizedBox(width: 8),
           ],
           Flexible(
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               decoration: BoxDecoration(
-                color: msg.isFromDriver ? Colors.white : const Color(0xFFD4956A),
-                borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(msg.isFromDriver ? 4 : 16), bottomRight: Radius.circular(msg.isFromDriver ? 16 : 4)),
+                color:
+                    msg.isFromDriver ? Colors.white : const Color(0xFFD4956A),
+                borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(16),
+                    topRight: const Radius.circular(16),
+                    bottomLeft: Radius.circular(msg.isFromDriver ? 4 : 16),
+                    bottomRight: Radius.circular(msg.isFromDriver ? 16 : 4)),
               ),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                Text(msg.text, style: TextStyle(color: msg.isFromDriver ? const Color(0xFF1A1A1A) : Colors.white, fontSize: 14)),
+              child:
+                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text(msg.text,
+                    style: TextStyle(
+                        color: msg.isFromDriver
+                            ? const Color(0xFF1A1A1A)
+                            : Colors.white,
+                        fontSize: 14)),
                 const SizedBox(height: 4),
-                Text(time, style: TextStyle(color: msg.isFromDriver ? const Color(0xFFBDBDBD) : Colors.white70, fontSize: 10)),
+                Text(time,
+                    style: TextStyle(
+                        color: msg.isFromDriver
+                            ? const Color(0xFFBDBDBD)
+                            : Colors.white70,
+                        fontSize: 10)),
               ]),
             ),
           ),
@@ -2407,7 +2809,11 @@ class _ChatMessage {
   final String text;
   final bool isFromDriver;
   final DateTime timestamp;
-  _ChatMessage({this.id = '', required this.text, required this.isFromDriver, required this.timestamp});
+  _ChatMessage(
+      {this.id = '',
+      required this.text,
+      required this.isFromDriver,
+      required this.timestamp});
 }
 
 // ─── Rating sheet ────────────────────────────────────────────
@@ -2418,13 +2824,18 @@ class _RatingSheet extends StatefulWidget {
   final Future<void> Function(double rating, String? feedback) onSubmit;
   final VoidCallback onSkip;
 
-  const _RatingSheet({required this.fare, required this.driverName, required this.onSubmit, required this.onSkip});
+  const _RatingSheet(
+      {required this.fare,
+      required this.driverName,
+      required this.onSubmit,
+      required this.onSkip});
 
   @override
   State<_RatingSheet> createState() => _RatingSheetState();
 }
 
-class _RatingSheetState extends State<_RatingSheet> with SingleTickerProviderStateMixin {
+class _RatingSheetState extends State<_RatingSheet>
+    with SingleTickerProviderStateMixin {
   int _stars = 0;
   final _fc = TextEditingController();
   bool _submitting = false;
@@ -2433,77 +2844,160 @@ class _RatingSheetState extends State<_RatingSheet> with SingleTickerProviderSta
   @override
   void initState() {
     super.initState();
-    _anim = AnimationController(vsync: this, duration: const Duration(milliseconds: 600))..forward();
+    _anim = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 600))
+      ..forward();
   }
 
   @override
-  void dispose() { _fc.dispose(); _anim.dispose(); super.dispose(); }
+  void dispose() {
+    _fc.dispose();
+    _anim.dispose();
+    super.dispose();
+  }
 
-  String _label() => ['', 'Poor', 'Below Average', 'Average', 'Good', 'Excellent!'][_stars];
+  String _label() =>
+      ['', 'Poor', 'Below Average', 'Average', 'Good', 'Excellent!'][_stars];
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
-        decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+        decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
         child: SingleChildScrollView(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2))),
+              Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2))),
               const SizedBox(height: 24),
               ScaleTransition(
                 scale: CurvedAnimation(parent: _anim, curve: Curves.elasticOut),
-                child: Container(width: 72, height: 72, decoration: BoxDecoration(color: AppColors.success.withAlpha(25), shape: BoxShape.circle), child: const Icon(Icons.check_circle, color: AppColors.success, size: 40)),
+                child: Container(
+                    width: 72,
+                    height: 72,
+                    decoration: BoxDecoration(
+                        color: AppColors.success.withAlpha(25),
+                        shape: BoxShape.circle),
+                    child: const Icon(Icons.check_circle,
+                        color: AppColors.success, size: 40)),
               ),
               const SizedBox(height: 16),
-              const Text('Ride Completed!', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              const Text('Ride Completed!',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
               const SizedBox(height: 4),
-              Text('Thank you for riding with us', style: TextStyle(fontSize: 14, color: Colors.grey[600])),
+              Text('Thank you for riding with us',
+                  style: TextStyle(fontSize: 14, color: Colors.grey[600])),
               const SizedBox(height: 20),
               Container(
                 padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(color: AppColors.inputBackground, borderRadius: BorderRadius.circular(16)),
-                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  const Icon(Icons.receipt_long, color: AppColors.textSecondary, size: 20),
+                decoration: BoxDecoration(
+                    color: AppColors.inputBackground,
+                    borderRadius: BorderRadius.circular(16)),
+                child:
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const Icon(Icons.receipt_long,
+                      color: AppColors.textSecondary, size: 20),
                   const SizedBox(width: 8),
-                  const Text('Total Fare:', style: TextStyle(color: AppColors.textSecondary)),
+                  const Text('Total Fare:',
+                      style: TextStyle(color: AppColors.textSecondary)),
                   const SizedBox(width: 8),
-                  Text('\u20B9${widget.fare.round()}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
+                  Text('\u20B9${widget.fare.round()}',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 22)),
                 ]),
               ),
               const SizedBox(height: 24),
-              Text('Rate your ride with ${widget.driverName}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+              Text('Rate your ride with ${widget.driverName}',
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w500)),
               const SizedBox(height: 16),
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: List.generate(5, (i) {
-                final idx = i + 1;
-                final sel = idx <= _stars;
-                return GestureDetector(
-                  onTap: () => setState(() => _stars = idx),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: Icon(sel ? Icons.star_rounded : Icons.star_outline_rounded, size: sel ? 48 : 44, color: sel ? AppColors.starYellow : Colors.grey[350]),
-                  ),
-                );
-              })),
+              Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(5, (i) {
+                    final idx = i + 1;
+                    final sel = idx <= _stars;
+                    return GestureDetector(
+                      onTap: () => setState(() => _stars = idx),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Icon(
+                            sel
+                                ? Icons.star_rounded
+                                : Icons.star_outline_rounded,
+                            size: sel ? 48 : 44,
+                            color:
+                                sel ? AppColors.starYellow : Colors.grey[350]),
+                      ),
+                    );
+                  })),
               const SizedBox(height: 8),
-              AnimatedSwitcher(duration: const Duration(milliseconds: 200), child: Text(_stars > 0 ? _label() : 'Tap a star to rate', key: ValueKey(_stars), style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: _stars > 0 ? AppColors.textPrimary : Colors.grey[500]))),
+              AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  child: Text(_stars > 0 ? _label() : 'Tap a star to rate',
+                      key: ValueKey(_stars),
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: _stars > 0
+                              ? AppColors.textPrimary
+                              : Colors.grey[500]))),
               if (_stars > 0) ...[
                 const SizedBox(height: 20),
-                TextField(controller: _fc, maxLines: 3, decoration: InputDecoration(hintText: 'Share your experience (optional)', filled: true, fillColor: AppColors.inputBackground, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none))),
+                TextField(
+                    controller: _fc,
+                    maxLines: 3,
+                    decoration: InputDecoration(
+                        hintText: 'Share your experience (optional)',
+                        filled: true,
+                        fillColor: AppColors.inputBackground,
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: BorderSide.none))),
               ],
               const SizedBox(height: 20),
               SizedBox(
-                width: double.infinity, height: 52,
+                width: double.infinity,
+                height: 52,
                 child: ElevatedButton(
-                  onPressed: _stars > 0 && !_submitting ? () async { setState(() => _submitting = true); await widget.onSubmit(_stars.toDouble(), _fc.text.trim().isEmpty ? null : _fc.text.trim()); } : null,
-                  style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white, disabledBackgroundColor: Colors.grey[300], shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), elevation: 0),
-                  child: _submitting ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Submit Rating', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  onPressed: _stars > 0 && !_submitting
+                      ? () async {
+                          setState(() => _submitting = true);
+                          await widget.onSubmit(_stars.toDouble(),
+                              _fc.text.trim().isEmpty ? null : _fc.text.trim());
+                        }
+                      : null,
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: Colors.grey[300],
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      elevation: 0),
+                  child: _submitting
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Text('Submit Rating',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600)),
                 ),
               ),
               const SizedBox(height: 12),
-              TextButton(onPressed: _submitting ? null : widget.onSkip, child: Text('Skip', style: TextStyle(color: Colors.grey[500]))),
+              TextButton(
+                  onPressed: _submitting ? null : widget.onSkip,
+                  child:
+                      Text('Skip', style: TextStyle(color: Colors.grey[500]))),
             ]),
           ),
         ),

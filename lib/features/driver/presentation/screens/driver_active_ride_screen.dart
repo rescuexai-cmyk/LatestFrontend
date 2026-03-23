@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -12,10 +13,12 @@ import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/push_notification_service.dart';
+import '../../../../core/widgets/slide_to_action_button.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../chat/presentation/screens/ride_chat_screen.dart';
 import '../../../chat/providers/chat_provider.dart';
 import '../../providers/driver_rides_provider.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 class DriverActiveRideScreen extends ConsumerStatefulWidget {
   final String? initialRideId;
@@ -28,18 +31,20 @@ class DriverActiveRideScreen extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<DriverActiveRideScreen> createState() => _DriverActiveRideScreenState();
+  ConsumerState<DriverActiveRideScreen> createState() =>
+      _DriverActiveRideScreenState();
 }
 
-class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen> {
+class _DriverActiveRideScreenState
+    extends ConsumerState<DriverActiveRideScreen> {
   // Google Maps
   final Completer<GoogleMapController> _mapController = Completer();
   final DirectionsService _directionsService = DirectionsService();
-  
+
   // Earnings - fetched from API, 0 until real data loads
   double _todayEarnings = 0.0;
   final String _todayDate = '26.07.2025';
-  
+
   // Ride data - will be populated from provider
   late String _rideId;
   late LatLng _pickupLocation;
@@ -53,31 +58,32 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   late double _earning;
   late String _paymentMethod; // 'cash' or 'prepaid'
   String _passengerId = ''; // For chat functionality
-  
+
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
   bool _isLoadingRoute = true;
   String _distanceText = '';
   String _durationText = '';
-  
+
   // Separate tracking for driver ETA and trip distance
   String _driverEtaText = ''; // Time for driver to reach pickup
   String _driverDistanceText = ''; // Distance from driver to pickup
   String _tripDistanceText = ''; // Distance from pickup to destination
   String _tripDurationText = ''; // Duration from pickup to destination
-  
+
   // Numeric ETA/distance for syncing with passenger
   int _currentEtaMinutes = 0;
   double _currentDistanceMeters = 0;
-  
+
   // OTP Entry
   final TextEditingController _otpController = TextEditingController();
   bool _otpVerified = false;
   String _otpError = '';
   bool _otpLoading = false;
-  
+
   // Ride state
   bool _hasArrivedAtPickup = false; // Driver has arrived at pickup location
+  bool _pickupConfirmed = false; // Driver confirmed pickup before OTP prompt
   bool _isPickedUp = false; // false = going to pickup, true = going to drop
   String _rideStatus = 'DRIVER_ASSIGNED';
 
@@ -89,7 +95,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   // Chat state
   final List<Map<String, dynamic>> _chatMessages = [];
   final Set<String> _chatMessageIds = {}; // For deduplication
-  final ValueNotifier<int> _chatUpdateNotifier = ValueNotifier(0); // Triggers sheet rebuild on new message
+  final ValueNotifier<int> _chatUpdateNotifier =
+      ValueNotifier(0); // Triggers sheet rebuild on new message
   final TextEditingController _chatController = TextEditingController();
   final ScrollController _chatScrollController = ScrollController();
   VoidCallback? _unsubscribeChat;
@@ -108,12 +115,20 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   String? _activeRideIdForChat;
   StreamSubscription<Map<String, dynamic>>? _chatOpenSubscription;
 
+  // Map style for dark mode
+  String? _mapStyle;
+  bool _lastDarkMode = false;
+  GoogleMapController? _mapControllerInstance;
+  String? _driverRecordId;
+
   @override
   void initState() {
     super.initState();
+    _hydrateDriverRecordId();
     _loadRideData();
     _initializeChatProvider();
     _loadVehicleIcon();
+    _loadMapStyle();
     _setupMapElements();
     _calculateRoute();
     _subscribeToRideCancellation();
@@ -130,26 +145,68 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     final currentUserId = authState.user?.id ?? '';
     if (currentUserId.isEmpty) return;
     ref.read(chatProvider(_rideId).notifier).initialize(
-      currentUserId: currentUserId,
-      passengerId: _passengerId,
-      isDriver: true,
-    );
+          currentUserId: currentUserId,
+          passengerId: _passengerId,
+          isDriver: true,
+        );
     ref.read(chatProvider(_rideId).notifier).closeChat();
   }
 
   /// Load vehicle icon for Uber/Rapido-style map
   Future<void> _loadVehicleIcon() async {
     try {
-      const size = Size(64, 64);
-      final config = ImageConfiguration(size: size, devicePixelRatio: 2.0);
-      _vehicleIcon = await BitmapDescriptor.fromAssetImage(
+      // Uber/Rapido style: ~40-50 logical pixels, with device pixel ratio for crisp rendering
+      const config =
+          ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5);
+      _vehicleIcon = await BitmapDescriptor.asset(
         config,
         'assets/map_icons/icon_cab.png',
       );
       if (mounted) _setupMapElements();
     } catch (e) {
       debugPrint('Vehicle icon load failed: $e');
-      _vehicleIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+      _vehicleIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    }
+  }
+
+  /// Load map style based on dark mode setting
+  Future<void> _loadMapStyle() async {
+    try {
+      final isDarkMode = ref.read(settingsProvider).isDarkMode;
+      _lastDarkMode = isDarkMode;
+      final stylePath = isDarkMode
+          ? 'assets/map_styles/raahi_dark.json'
+          : 'assets/map_styles/raahi_light.json';
+      _mapStyle = await rootBundle.loadString(stylePath);
+      if (_mapControllerInstance != null && _mapStyle != null) {
+        _mapControllerInstance!.setMapStyle(_mapStyle);
+      }
+      debugPrint(
+          '🗺️ Driver active ride map style loaded: ${isDarkMode ? "dark" : "light"}');
+    } catch (e) {
+      debugPrint('Failed to load map style: $e');
+    }
+  }
+
+  Future<void> _hydrateDriverRecordId() async {
+    if (_driverRecordId != null && _driverRecordId!.isNotEmpty) return;
+    try {
+      final profile = await apiClient.getDriverProfile();
+      final data = profile['data'];
+      if (data is Map<String, dynamic>) {
+        final resolved =
+            (data['driver_id'] ?? data['driverId'] ?? data['id'])?.toString();
+        if (resolved != null && resolved.isNotEmpty) {
+          if (mounted) {
+            setState(() => _driverRecordId = resolved);
+          } else {
+            _driverRecordId = resolved;
+          }
+        }
+      }
+    } catch (_) {
+      // Non-fatal: backend now also accepts userId in location endpoint.
     }
   }
 
@@ -177,7 +234,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         });
         _updateRealtimeEtaTexts();
         _setupMapElements();
-        _updateDriverLocationOnBackend(position.latitude, position.longitude, heading: position.heading);
+        _updateDriverLocationOnBackend(position.latitude, position.longitude,
+            heading: position.heading);
         if (_cameraFollowEnabled) _animateCameraToDriver();
       });
     } catch (e) {
@@ -187,7 +245,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
 
   void _animateCameraToDriver() async {
     try {
-      _ignoreCameraMoveUntil = DateTime.now().add(const Duration(milliseconds: 800));
+      _ignoreCameraMoveUntil =
+          DateTime.now().add(const Duration(milliseconds: 800));
       final controller = await _mapController.future;
       controller.animateCamera(
         CameraUpdate.newCameraPosition(
@@ -209,11 +268,13 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       if (!mounted) return;
       final data = response['data'] as Map<String, dynamic>? ?? response;
       final backendRiderPhone = _extractPassengerPhoneFromRidePayload(data);
-      final status = (data['status'] ?? data['rideStatus'] ?? '').toString().toUpperCase();
+      final status =
+          (data['status'] ?? data['rideStatus'] ?? '').toString().toUpperCase();
       final backendFare = _extractRideFareFromPayload(data);
       final backendPayment = _extractPaymentMethodFromPayload(data);
 
-      if (backendRiderPhone.isNotEmpty && _normalizePhone(_riderPhone).isEmpty) {
+      if (backendRiderPhone.isNotEmpty &&
+          _normalizePhone(_riderPhone).isEmpty) {
         setState(() {
           _riderPhone = backendRiderPhone;
         });
@@ -224,21 +285,23 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
           if (backendPayment.isNotEmpty) _paymentMethod = backendPayment;
         });
       }
-      
+
       // Check if driver has arrived
       final arrivedStatuses = ['DRIVER_ARRIVED', 'ARRIVED'];
       if (arrivedStatuses.any((s) => status.contains(s))) {
         setState(() {
           _rideStatus = status.isNotEmpty ? status : _rideStatus;
           _hasArrivedAtPickup = true;
+          _pickupConfirmed = false;
         });
       }
-      
+
       final startedStatuses = ['RIDE_STARTED', 'IN_PROGRESS', 'STARTED'];
       if (startedStatuses.any((s) => status.contains(s))) {
         setState(() {
           _rideStatus = status.isNotEmpty ? status : _rideStatus;
           _hasArrivedAtPickup = true;
+          _pickupConfirmed = true;
           _otpVerified = true;
           _isPickedUp = true;
         });
@@ -281,7 +344,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       // Keep 0 on error
     }
   }
-  
+
   /// Initialize driver's actual location using GPS and update backend
   Future<void> _initializeDriverLocation() async {
     try {
@@ -290,51 +353,58 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-      
-      if (permission == LocationPermission.denied || 
+
+      if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        debugPrint('⚠️ Location permission denied, using pickup-based location');
+        debugPrint(
+            '⚠️ Location permission denied, using pickup-based location');
         return;
       }
-      
+
       // Get current position
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
         timeLimit: const Duration(seconds: 10),
       );
-      
+
       if (mounted) {
         setState(() {
           _driverLocation = LatLng(position.latitude, position.longitude);
         });
-        
+
         // Update markers with new driver location
         _setupMapElements();
-        
+
         // Recalculate route from actual driver location
         _calculateRoute();
-        
+
         // Update driver location on backend for rider tracking
-        _updateDriverLocationOnBackend(position.latitude, position.longitude, heading: position.heading);
-        
-        debugPrint('📍 Driver actual location: ${position.latitude}, ${position.longitude}');
+        _updateDriverLocationOnBackend(position.latitude, position.longitude,
+            heading: position.heading);
+
+        debugPrint(
+            '📍 Driver actual location: ${position.latitude}, ${position.longitude}');
       }
     } catch (e) {
       debugPrint('⚠️ Could not get actual location: $e');
     }
   }
-  
+
   /// Update driver location on backend for rider tracking
-  Future<void> _updateDriverLocationOnBackend(double lat, double lng, {double? heading}) async {
+  Future<void> _updateDriverLocationOnBackend(double lat, double lng,
+      {double? heading}) async {
     try {
+      if (_driverRecordId == null || _driverRecordId!.isEmpty) {
+        await _hydrateDriverRecordId();
+      }
       final user = ref.read(currentUserProvider);
-      final driverId = user?.id ?? '';
-      
+      final driverId = _driverRecordId ?? user?.id ?? '';
+
       if (driverId.isEmpty) return;
-      
+
       // Store in database via REST
       apiClient.updateDriverLocation(driverId, lat, lng, heading: heading);
-      
+
       // Broadcast to rider via Socket.io (ride-specific, rider receives this)
       // Include ETA and distance so passenger shows same values as driver
       webSocketService.updateDriverLocation(RideLocationUpdate(
@@ -343,7 +413,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         longitude: lng,
         heading: heading,
         etaMinutes: _currentEtaMinutes > 0 ? _currentEtaMinutes : null,
-        distanceMeters: _currentDistanceMeters > 0 ? _currentDistanceMeters : null,
+        distanceMeters:
+            _currentDistanceMeters > 0 ? _currentDistanceMeters : null,
       ));
     } catch (e) {
       debugPrint('Failed to update driver location: $e');
@@ -368,10 +439,13 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   void _subscribeToNotificationChatOpens() {
-    _chatOpenSubscription = pushNotificationService.chatOpenStream.listen((payload) {
+    _chatOpenSubscription =
+        pushNotificationService.chatOpenStream.listen((payload) {
       final targetRideId = payload['rideId']?.toString() ?? '';
       final currentRideId = _activeRideIdForChat ?? widget.initialRideId ?? '';
-      if (targetRideId.isEmpty || currentRideId.isEmpty || targetRideId != currentRideId) {
+      if (targetRideId.isEmpty ||
+          currentRideId.isEmpty ||
+          targetRideId != currentRideId) {
         return;
       }
       if (!mounted || _chatSheetOpen) return;
@@ -388,15 +462,16 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       });
     });
   }
-  
+
   /// Subscribe to ride cancellation events from rider
   void _subscribeToRideCancellation() {
-    _unsubscribeRideCancelled = webSocketService.subscribe('ride_cancelled', (message) {
+    _unsubscribeRideCancelled =
+        webSocketService.subscribe('ride_cancelled', (message) {
       final data = message.data as Map<String, dynamic>?;
       if (data == null) return;
-      
+
       final cancelledRideId = data['rideId'] as String? ?? '';
-      
+
       // Check if this cancellation is for our current ride
       if (cancelledRideId == _rideId) {
         debugPrint('⚠️ Ride $_rideId was cancelled by rider');
@@ -404,16 +479,16 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       }
     });
   }
-  
+
   /// Handle when rider cancels the ride
   void _handleRideCancelledByRider(Map<String, dynamic> data) {
     if (!mounted) return;
-    
+
     final reason = data['reason'] as String? ?? 'Rider cancelled the ride';
-    
+
     // Clear the accepted ride from provider
     ref.read(driverRidesProvider.notifier).clearAcceptedRide();
-    
+
     // Show alert dialog to driver
     showDialog(
       context: context,
@@ -431,7 +506,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               child: const Icon(Icons.cancel, color: Colors.red, size: 28),
             ),
             const SizedBox(width: 12),
-            const Text('Ride Cancelled'),
+            Text(ref.tr('ride_cancelled')),
           ],
         ),
         content: Column(
@@ -449,14 +524,15 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                 color: const Color(0xFFFFF3E0),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Row(
+              child: Row(
                 children: [
-                  Icon(Icons.info_outline, color: Color(0xFFFF9800), size: 20),
-                  SizedBox(width: 8),
+                  const Icon(Icons.info_outline,
+                      color: Color(0xFFFF9800), size: 20),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'You will be available for new ride requests.',
-                      style: TextStyle(
+                      ref.tr('available_new_requests'),
+                      style: const TextStyle(
                         fontSize: 13,
                         color: Color(0xFF5D4037),
                       ),
@@ -502,10 +578,12 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       if (msgRideId != _rideId) return;
 
       _addChatMessage(data);
-      
+
       // Also forward to chat provider for the new chat UI
       try {
-        ref.read(chatProvider(_rideId).notifier).handleExternalChatMessage(data);
+        ref
+            .read(chatProvider(_rideId).notifier)
+            .handleExternalChatMessage(data);
       } catch (_) {}
     });
 
@@ -525,7 +603,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       // Sort by timestamp
       if (mounted) {
         setState(() {
-          _chatMessages.sort((a, b) => (a['ts'] as int? ?? 0).compareTo(b['ts'] as int? ?? 0));
+          _chatMessages.sort(
+              (a, b) => (a['ts'] as int? ?? 0).compareTo(b['ts'] as int? ?? 0));
         });
       }
       _chatUpdateNotifier.value++;
@@ -548,7 +627,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     if (msgId.isNotEmpty && _chatMessageIds.contains(msgId)) return;
     if (msgId.isNotEmpty) _chatMessageIds.add(msgId);
 
-    final ts = data['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
+    final ts =
+        data['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
 
     if (mounted) {
       setState(() {
@@ -585,8 +665,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         final localText = local['text'] as String? ?? '';
         final localSender = local['sender'] as String? ?? '';
         return serverMessages.any((srv) =>
-          (srv['message'] as String? ?? '') == localText &&
-          (srv['sender'] as String? ?? '') == localSender);
+            (srv['message'] as String? ?? '') == localText &&
+            (srv['sender'] as String? ?? '') == localSender);
       });
 
       // Add any server messages we don't already have
@@ -595,7 +675,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         if (msgId.isNotEmpty && _chatMessageIds.contains(msgId)) continue;
         if (msgId.isNotEmpty) _chatMessageIds.add(msgId);
 
-        final ts = msg['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
+        final ts =
+            msg['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
         _chatMessages.add({
           'id': msgId,
           'sender': msg['sender'] as String? ?? 'unknown',
@@ -605,7 +686,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         });
       }
 
-      _chatMessages.sort((a, b) => (a['ts'] as int? ?? 0).compareTo(b['ts'] as int? ?? 0));
+      _chatMessages.sort(
+          (a, b) => (a['ts'] as int? ?? 0).compareTo(b['ts'] as int? ?? 0));
     });
     _chatUpdateNotifier.value++;
   }
@@ -618,12 +700,14 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
 
   void _loadRideData() {
     final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
-    
+
     if (acceptedRide != null) {
       _rideId = acceptedRide.id;
       _activeRideIdForChat = _rideId;
-      _pickupLocation = acceptedRide.pickupLocation ?? const LatLng(28.5245, 77.1855);
-      _dropLocation = acceptedRide.destinationLocation ?? const LatLng(28.6507, 77.2334);
+      _pickupLocation =
+          acceptedRide.pickupLocation ?? const LatLng(28.5245, 77.1855);
+      _dropLocation =
+          acceptedRide.destinationLocation ?? const LatLng(28.6507, 77.2334);
       _riderName = acceptedRide.riderName ?? 'Rider';
       _riderPhone = _normalizePhone(acceptedRide.riderPhone);
       _passengerId = acceptedRide.riderId ?? '';
@@ -633,7 +717,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       // Backend will verify OTP when driver calls POST /api/rides/:id/start
       _earning = acceptedRide.earning;
       _paymentMethod = acceptedRide.paymentMethod;
-      
+
       debugPrint('📦 Loaded ride data:');
       debugPrint('   Ride ID: $_rideId');
       debugPrint('   Rider: $_riderName');
@@ -641,8 +725,10 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       debugPrint('   Pickup: $_pickupAddress');
       debugPrint('   Drop: $_dropAddress');
       debugPrint('   Payment Method: $_paymentMethod');
-      debugPrint('   Pickup LatLng: ${_pickupLocation.latitude}, ${_pickupLocation.longitude}');
-      debugPrint('   Drop LatLng: ${_dropLocation.latitude}, ${_dropLocation.longitude}');
+      debugPrint(
+          '   Pickup LatLng: ${_pickupLocation.latitude}, ${_pickupLocation.longitude}');
+      debugPrint(
+          '   Drop LatLng: ${_dropLocation.latitude}, ${_dropLocation.longitude}');
     } else if ((widget.initialRideId ?? '').isNotEmpty) {
       _rideId = widget.initialRideId!;
       _activeRideIdForChat = _rideId;
@@ -669,7 +755,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       _earning = 200.00;
       _paymentMethod = 'cash'; // Default to cash for demo
     }
-    
+
     // Driver location slightly before pickup
     _driverLocation = LatLng(
       _pickupLocation.latitude + 0.003,
@@ -707,7 +793,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       final backendPayment = _extractPaymentMethodFromPayload(data);
       if (!mounted) return;
       setState(() {
-        _passengerId = (data['passengerId']?.toString() ?? passenger?['id']?.toString() ?? _passengerId);
+        _passengerId = (data['passengerId']?.toString() ??
+            passenger?['id']?.toString() ??
+            _passengerId);
         final firstName = passenger?['firstName']?.toString() ?? '';
         final lastName = passenger?['lastName']?.toString() ?? '';
         final passengerName = '$firstName $lastName'.trim();
@@ -757,7 +845,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   void _setupMapElements() {
-    final driverIcon = _vehicleIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    final driverIcon = _vehicleIcon ??
+        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
     _markers = {
       Marker(
         markerId: const MarkerId('driver'),
@@ -785,7 +874,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   Future<void> _calculateRoute() async {
     if (!mounted) return;
     setState(() => _isLoadingRoute = true);
-    
+
     try {
       // Calculate route from pickup to drop (the main ride route)
       final rideRoute = await _directionsService.getRoute(
@@ -793,7 +882,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         destination: _dropLocation,
         mode: TravelMode.driving,
       );
-      
+
       // Calculate route from driver to pickup (if not picked up yet)
       RouteResult? driverRoute;
       if (!_isPickedUp) {
@@ -803,7 +892,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
           mode: TravelMode.driving,
         );
       }
-      
+
       if (!mounted) return;
       final tripDistanceText = _resolveDistanceText(
         rideRoute.distanceText,
@@ -821,13 +910,14 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         // Store trip distance (pickup to destination) - this is constant
         _tripDistanceText = tripDistanceText;
         _tripDurationText = _formatEtaMinutes((rideRoute.duration / 60).ceil());
-        
+
         // Store driver ETA to pickup (cap at 2 hours to avoid confusing "10+ hours" display)
         if (driverRoute != null) {
-          _driverEtaText = _formatEtaMinutes((driverRoute.duration / 60).ceil());
+          _driverEtaText =
+              _formatEtaMinutes((driverRoute.duration / 60).ceil());
           _driverDistanceText = driverDistanceText;
         }
-        
+
         // Show ETA based on current state
         if (_isPickedUp) {
           // After pickup: show distance/time to destination
@@ -840,14 +930,15 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               ? _formatEtaMinutes((driverRoute.duration / 60).ceil())
               : _formatEtaMinutes((rideRoute.duration / 60).ceil());
         }
-        
+
+        // Uber/Rapido-style: thin, clean polylines
         _polylines = {
           // Main ride route border (pickup → drop)
           Polyline(
             polylineId: const PolylineId('ride_route_border'),
             points: rideRoute.points,
             color: const Color(0xFF1A1A1A),
-            width: 7,
+            width: 5,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
@@ -857,13 +948,13 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             polylineId: const PolylineId('ride_route'),
             points: rideRoute.points,
             color: const Color(0xFF4285F4),
-            width: 5,
+            width: 3,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
           ),
         };
-        
+
         // Driver → Pickup: dashed orange (before pickup)
         if (!_isPickedUp && driverRoute != null) {
           _polylines.add(
@@ -871,11 +962,11 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               polylineId: const PolylineId('driver_route_border'),
               points: driverRoute.points,
               color: const Color(0xFF8B5E3C),
-              width: 7,
+              width: 5,
               startCap: Cap.roundCap,
               endCap: Cap.roundCap,
               jointType: JointType.round,
-              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+              patterns: [PatternItem.dash(12), PatternItem.gap(8)],
             ),
           );
           _polylines.add(
@@ -883,21 +974,20 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               polylineId: const PolylineId('driver_route'),
               points: driverRoute.points,
               color: const Color(0xFFD4956A),
-              width: 5,
+              width: 3,
               startCap: Cap.roundCap,
               endCap: Cap.roundCap,
               jointType: JointType.round,
-              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+              patterns: [PatternItem.dash(12), PatternItem.gap(8)],
             ),
           );
         }
-        
+
         _isLoadingRoute = false;
       });
-      
+
       // Fit bounds to show all points
       _fitAllBounds();
-      
     } catch (e) {
       debugPrint('Route calculation error: $e');
       setState(() => _isLoadingRoute = false);
@@ -913,7 +1003,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       target.longitude,
     );
     final avgKmph = _isPickedUp ? 24.0 : 20.0;
-    final etaMinutes = ((distanceMeters / 1000) / avgKmph * 60).ceil().clamp(1, 180);
+    final etaMinutes =
+        ((distanceMeters / 1000) / avgKmph * 60).ceil().clamp(1, 180);
 
     final distanceText = _formatDistanceMeters(distanceMeters);
     final etaText = _formatEtaMinutes(etaMinutes);
@@ -923,7 +1014,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       // Store numeric values for syncing with passenger
       _currentEtaMinutes = etaMinutes;
       _currentDistanceMeters = distanceMeters;
-      
+
       if (_isPickedUp) {
         _durationText = etaText;
         _distanceText = distanceText;
@@ -1020,41 +1111,46 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   String _extractPaymentMethodFromPayload(Map<String, dynamic> rideData) {
-    final value = (rideData['paymentMethod'] ?? rideData['payment_method'])?.toString();
+    final value =
+        (rideData['paymentMethod'] ?? rideData['payment_method'])?.toString();
     if (value == null || value.trim().isEmpty) return '';
     return value.trim().toLowerCase();
   }
-  
+
   Future<void> _fitAllBounds() async {
     try {
       final controller = await _mapController.future;
-      
+
       // Calculate bounds including all points
-      List<LatLng> allPoints = [_driverLocation, _pickupLocation, _dropLocation];
+      List<LatLng> allPoints = [
+        _driverLocation,
+        _pickupLocation,
+        _dropLocation
+      ];
       for (final polyline in _polylines) {
         allPoints.addAll(polyline.points);
       }
-      
+
       double minLat = allPoints.first.latitude;
       double maxLat = allPoints.first.latitude;
       double minLng = allPoints.first.longitude;
       double maxLng = allPoints.first.longitude;
-      
+
       for (final point in allPoints) {
         if (point.latitude < minLat) minLat = point.latitude;
         if (point.latitude > maxLat) maxLat = point.latitude;
         if (point.longitude < minLng) minLng = point.longitude;
         if (point.longitude > maxLng) maxLng = point.longitude;
       }
-      
+
       final latPadding = (maxLat - minLat) * 0.15;
       final lngPadding = (maxLng - minLng) * 0.15;
-      
+
       final bounds = LatLngBounds(
         southwest: LatLng(minLat - latPadding, minLng - lngPadding),
         northeast: LatLng(maxLat + latPadding, maxLng + lngPadding),
       );
-      
+
       await Future.delayed(const Duration(milliseconds: 200));
       controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 60));
     } catch (e) {
@@ -1073,51 +1169,39 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   Future<void> _verifyOtp() async {
     if (_otpLoading) return;
     final enteredOtp = _otpController.text.trim();
-    
+
     if (enteredOtp.isEmpty) {
       setState(() => _otpError = 'Please enter the OTP');
       return;
     }
-    
+
     if (enteredOtp.length != 4) {
       setState(() => _otpError = 'OTP must be 4 digits');
       return;
     }
-    
+
     // Clear stale error and show loading state
     setState(() {
       _otpError = '';
       _otpLoading = true;
     });
-    
+
     try {
       debugPrint('🚗 Verifying OTP with backend for ride: $_rideId');
-      
-      // Backend requires status sequence: DRIVER_ASSIGNED -> CONFIRMED -> DRIVER_ARRIVED -> RIDE_STARTED
-      // We must transition through these states before verifying OTP
-      try {
-        debugPrint('🚗 Transitioning ride status: CONFIRMED...');
-        await apiClient.updateRideStatus(_rideId, 'CONFIRMED');
-        debugPrint('✅ Status updated to CONFIRMED');
-      } catch (e) {
-        // May already be in CONFIRMED or later status
-        debugPrint('⚠️ CONFIRMED transition: $e (may already be past this status)');
+
+      if (!_hasArrivedAtPickup) {
+        setState(() {
+          _otpError = 'Please mark "I\'ve Arrived" first.';
+          _otpLoading = false;
+        });
+        return;
       }
-      
-      try {
-        debugPrint('🚗 Transitioning ride status: DRIVER_ARRIVED...');
-        await apiClient.updateRideStatus(_rideId, 'DRIVER_ARRIVED');
-        debugPrint('✅ Status updated to DRIVER_ARRIVED');
-      } catch (e) {
-        // May already be in DRIVER_ARRIVED status
-        debugPrint('⚠️ DRIVER_ARRIVED transition: $e (may already be at this status)');
-      }
-      
+
       // Now call the startRide endpoint with OTP
       final result = await apiClient.startRide(_rideId, enteredOtp);
-      
+
       if (!mounted) return;
-      
+
       if (result['success'] == true) {
         setState(() {
           _otpVerified = true;
@@ -1125,15 +1209,15 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
           _otpLoading = false;
         });
         debugPrint('✅ OTP verified and ride started via backend');
-        
+
         // Notify rider that ride has started via realtime service
         debugPrint('📡 Sending RIDE_STARTED notification to rider');
         realtimeService.updateRideStatus(_rideId, 'RIDE_STARTED');
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('OTP Verified! Ride started.'),
+            SnackBar(
+              content: Text(ref.tr('otp_verified_started')),
               backgroundColor: Colors.green,
             ),
           );
@@ -1141,7 +1225,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       } else {
         final code = result['code'] as String?;
         String errorMessage;
-        
+
         if (code == 'INVALID_OTP') {
           errorMessage = 'Incorrect OTP. Ask rider for correct OTP.';
         } else if (code == 'FORBIDDEN') {
@@ -1149,7 +1233,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         } else {
           errorMessage = result['message'] ?? 'Failed to verify OTP';
         }
-        
+
         if (mounted) {
           setState(() {
             _otpError = errorMessage;
@@ -1173,8 +1257,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         _otpLoading = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Network error. Please try again.'),
+        SnackBar(
+          content: Text(ref.tr('network_error_retry')),
           backgroundColor: Colors.red,
         ),
       );
@@ -1182,46 +1266,54 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   /// Driver taps "I've Arrived" when they reach the pickup location
-  /// Shows OTP entry dialog immediately
+  /// This should only update arrival state. OTP comes after "Confirm Pickup".
   Future<void> _markArrivedAtPickup() async {
     try {
       // Update status to DRIVER_ARRIVED
       await apiClient.updateRideStatus(_rideId, 'DRIVER_ARRIVED');
       debugPrint('✅ Status updated to DRIVER_ARRIVED');
-      
+
       // Notify rider via realtime
       realtimeService.updateRideStatus(_rideId, 'DRIVER_ARRIVED');
       debugPrint('📡 Notified rider: driver has arrived');
-      
+
       setState(() {
         _rideStatus = 'DRIVER_ARRIVED';
         _hasArrivedAtPickup = true;
+        _pickupConfirmed = false;
       });
-      
-      // Show OTP entry dialog immediately
-      if (mounted) {
-        _showOtpEntryDialog();
-      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Arrival confirmed. Please confirm pickup to continue.'),
+          backgroundColor: Color(0xFF2196F3),
+        ),
+      );
     } catch (e) {
       debugPrint('Error marking arrived: $e');
-      // May already be in DRIVER_ARRIVED status, mark as arrived anyway
-      setState(() {
-        _hasArrivedAtPickup = true;
-      });
-      // Still show OTP dialog
-      if (mounted) {
-        _showOtpEntryDialog();
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_extractErrorMessage(
+            e,
+            fallback:
+                'Unable to mark arrival. Move closer to pickup and try again.',
+          )),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
-  
+
   /// Show OTP entry dialog for driver to verify rider
   void _showOtpEntryDialog() {
     _otpController.clear();
     setState(() {
       _otpError = '';
     });
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1250,11 +1342,12 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-                
+
                 // Title
                 const Row(
                   children: [
-                    Icon(Icons.verified_user, color: Color(0xFF4CAF50), size: 28),
+                    Icon(Icons.verified_user,
+                        color: Color(0xFF4CAF50), size: 28),
                     SizedBox(width: 12),
                     Text(
                       'Enter Ride PIN',
@@ -1274,7 +1367,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                   ),
                 ),
                 const SizedBox(height: 24),
-                
+
                 // OTP Input Field
                 TextField(
                   controller: _otpController,
@@ -1286,12 +1379,13 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                     fontSize: 32,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 16,
+                    color: Color(0xFF1A1A1A), // Always black for visibility
                   ),
                   decoration: InputDecoration(
                     hintText: '• • • •',
                     hintStyle: TextStyle(
                       fontSize: 32,
-                      color: Colors.grey[300],
+                      color: Colors.grey[400],
                       letterSpacing: 16,
                     ),
                     counterText: '',
@@ -1303,7 +1397,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(16),
-                      borderSide: const BorderSide(color: Color(0xFF4CAF50), width: 2),
+                      borderSide:
+                          const BorderSide(color: Color(0xFF4CAF50), width: 2),
                     ),
                     errorText: _otpError.isNotEmpty ? _otpError : null,
                     errorStyle: const TextStyle(color: Colors.red),
@@ -1316,21 +1411,24 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                   },
                 ),
                 const SizedBox(height: 24),
-                
+
                 // Verify Button
                 SizedBox(
                   width: double.infinity,
                   height: 56,
                   child: ElevatedButton(
-                    onPressed: _otpLoading ? null : () {
-                      if (_otpController.text.length == 4) {
-                        _verifyOtpFromDialog(_otpController.text, setModalState);
-                      } else {
-                        setModalState(() {
-                          _otpError = 'Please enter 4-digit PIN';
-                        });
-                      }
-                    },
+                    onPressed: _otpLoading
+                        ? null
+                        : () {
+                            if (_otpController.text.length == 4) {
+                              _verifyOtpFromDialog(
+                                  _otpController.text, setModalState);
+                            } else {
+                              setModalState(() {
+                                _otpError = 'Please enter 4-digit PIN';
+                              });
+                            }
+                          },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF4CAF50),
                       foregroundColor: Colors.white,
@@ -1345,7 +1443,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                             height: 22,
                             child: CircularProgressIndicator(
                               strokeWidth: 2.5,
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
                             ),
                           )
                         : const Text(
@@ -1358,7 +1457,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                   ),
                 ),
                 const SizedBox(height: 12),
-                
+
                 // Cancel button
                 TextButton(
                   onPressed: () => Navigator.pop(context),
@@ -1377,9 +1476,10 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       ),
     );
   }
-  
+
   /// Verify OTP from dialog and start ride
-  Future<void> _verifyOtpFromDialog(String otp, StateSetter setModalState) async {
+  Future<void> _verifyOtpFromDialog(
+      String otp, StateSetter setModalState) async {
     if (_otpLoading) return;
     setModalState(() {
       _otpError = '';
@@ -1387,30 +1487,32 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     });
     try {
       debugPrint('🔐 Verifying OTP from dialog: $otp');
-      
-      // First transition to DRIVER_ARRIVED if not already
-      try {
-        await apiClient.updateRideStatus(_rideId, 'DRIVER_ARRIVED');
-      } catch (_) {
-        // May already be at this status
+
+      if (!_hasArrivedAtPickup) {
+        setModalState(() {
+          _otpError = 'Please mark "I\'ve Arrived" first.';
+          _otpLoading = false;
+        });
+        return;
       }
-      
+
       // Call backend to verify OTP and start ride
       final result = await apiClient.startRide(_rideId, otp);
-      
+
       if (result['success'] == true) {
         debugPrint('✅ OTP verified successfully!');
-        
+
         setState(() {
           _otpVerified = true;
           _otpError = '';
           _otpLoading = false;
+          _pickupConfirmed = true;
           _rideStatus = 'RIDE_STARTED';
         });
-        
+
         // Close dialog
         if (mounted) Navigator.pop(context);
-        
+
         // Auto-confirm pickup and start ride
         setState(() {
           _isPickedUp = true;
@@ -1418,14 +1520,14 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
         });
         _updateRealtimeEtaTexts();
         _calculateRoute();
-        
+
         // Notify rider
         realtimeService.updateRideStatus(_rideId, 'RIDE_STARTED');
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Ride started! Navigate to drop location.'),
+            SnackBar(
+              content: Text(ref.tr('ride_started_navigate')),
               backgroundColor: Colors.green,
             ),
           );
@@ -1444,38 +1546,24 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       });
     }
   }
-  
+
   void _confirmPickup() {
-    if (!_otpVerified) {
+    if (!_hasArrivedAtPickup) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please verify OTP first before starting the trip!'),
+          content: Text('Please mark "I\'ve Arrived" first.'),
           backgroundColor: Colors.orange,
         ),
       );
       return;
     }
-    
+
     setState(() {
-      _isPickedUp = true;
-      _rideStatus = 'RIDE_STARTED';
+      _pickupConfirmed = true;
     });
-    _updateRealtimeEtaTexts();
-    _calculateRoute();
-    
-    // OTP verification via _verifyOtp() already called POST /api/rides/:id/start
-    // which sets status to RIDE_STARTED. Send realtime notification to rider.
-    debugPrint('🚗 Ride $_rideId pickup confirmed — notifying rider via realtime');
-    realtimeService.updateRideStatus(_rideId, 'RIDE_STARTED');
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Rider picked up! Navigate to drop location.'),
-        backgroundColor: Colors.green,
-      ),
-    );
+    _showOtpEntryDialog();
   }
-  
+
   /// Update ride status through the required sequence.
   /// Backend requires: DRIVER_ASSIGNED -> CONFIRMED -> DRIVER_ARRIVED -> RIDE_STARTED
   Future<void> _updateRideStatusSequence() async {
@@ -1483,15 +1571,15 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       // Step 1: CONFIRMED (driver confirms they're heading to pickup)
       await apiClient.updateRideStatus(_rideId, 'CONFIRMED');
       debugPrint('✅ Status updated to CONFIRMED');
-      
+
       // Step 2: DRIVER_ARRIVED (driver has arrived at pickup)
       await apiClient.updateRideStatus(_rideId, 'DRIVER_ARRIVED');
       debugPrint('✅ Status updated to DRIVER_ARRIVED');
-      
+
       // Step 3: RIDE_STARTED (ride begins after OTP verification)
       await apiClient.updateRideStatus(_rideId, 'RIDE_STARTED');
       debugPrint('✅ Status updated to RIDE_STARTED');
-      
+
       // Notify rider via real-time service that ride is now in progress
       realtimeService.updateRideStatus(_rideId, 'in_progress');
     } catch (e) {
@@ -1501,16 +1589,21 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   void _completeRide() {
+    final trCompleteRide = ref.tr('complete_ride');
+    final trDroppedRider = ref.tr('dropped_rider_question');
+    final trNotYet = ref.tr('not_yet');
+    final trYesComplete = ref.tr('yes_complete');
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Complete Ride'),
-        content: const Text('Have you dropped the rider at the destination?'),
+        title: Text(trCompleteRide),
+        content: Text(trDroppedRider),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Not yet'),
+            child: Text(trNotYet),
           ),
           ElevatedButton(
             onPressed: () {
@@ -1526,13 +1619,14 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF4CAF50),
             ),
-            child: const Text('Yes, Complete', style: TextStyle(color: Colors.white)),
+            child: Text(trYesComplete,
+                style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),
     );
   }
-  
+
   void _showCashPaymentQR() {
     debugPrint('💰 Driver: Showing cash payment QR dialog');
     showModalBottomSheet(
@@ -1554,261 +1648,270 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             children: [
               // Header
               Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFD4956A).withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.payments_outlined,
-                    color: Color(0xFFD4956A),
-                    size: 28,
-                  ),
-                ),
-                const SizedBox(width: 16),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Collect Cash Payment',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF1A1A1A),
-                        ),
-                      ),
-                      Text(
-                        'Show QR to rider for payment',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFF888888),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            
-            // Amount to collect
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF1A1A1A), Color(0xFF333333)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Text(
-                    'Amount to Collect: ',
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.white70,
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD4956A).withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.payments_outlined,
+                      color: Color(0xFFD4956A),
+                      size: 28,
                     ),
                   ),
-                  Text(
-                    '₹${_earning.toStringAsFixed(0)}',
-                    style: const TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-            
-            // QR Code
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: const Color(0xFFE8E8E8), width: 2),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.05),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Column(
-                children: [
-                  // QR Image - UPI payment QR code
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.asset(
-                      'assets/images/c__Users_AnuragTripathi_AppData_Roaming_Cursor_User_workspaceStorage_7c681e920c35e6a597e37186e21d741a_images_image-5c6e3067-e898-41a3-bd66-2e24748c77e2.png',
-                      width: 200,
-                      height: 200,
-                      fit: BoxFit.contain,
-                      errorBuilder: (context, error, stackTrace) {
-                        // Fallback if image not found - show placeholder
-                        return Container(
-                          width: 200,
-                          height: 200,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF5F5F5),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.qr_code_2, size: 100, color: Color(0xFF1A1A1A)),
-                              SizedBox(height: 8),
-                              Text(
-                                'Scan to Pay',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: Color(0xFF888888),
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Scan QR code to pay',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Color(0xFF888888),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            
-            // Additional charges (optional)
-            ExpansionTile(
-              tilePadding: EdgeInsets.zero,
-              title: const Row(
-                children: [
-                  Icon(Icons.add_road, size: 20, color: Color(0xFF888888)),
-                  SizedBox(width: 8),
-                  Text('Add tolls, parking, extra stops', style: TextStyle(fontSize: 14, color: Color(0xFF666666))),
-                ],
-              ),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: _tollsController,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Tolls (₹)',
-                          hintText: '0',
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _parkingController,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Parking fees (₹)',
-                          hintText: '0',
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _extraStopsController,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Extra stops (count)',
-                          hintText: '0',
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            // Cash received option
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF5F5F5),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.info_outline, size: 20, color: Color(0xFF888888)),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 16),
                   const Expanded(
-                    child: Text(
-                      'You can also collect cash directly from the rider',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF666666),
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Collect Cash Payment',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1A1A1A),
+                          ),
+                        ),
+                        Text(
+                          'Show QR to rider for payment',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFF888888),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 24),
+              const SizedBox(height: 24),
 
-            // Confirm Payment Button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () {
-                  debugPrint('💰 Driver: Payment Received button clicked');
-                  Navigator.pop(context);
-                  _completeRideWithAdjustments();
-                  _showRideSummary();
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF4CAF50),
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+              // Amount to collect
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF1A1A1A), Color(0xFF333333)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
-                  elevation: 4,
+                  borderRadius: BorderRadius.circular(16),
                 ),
-                child: const Row(
+                child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.check_circle, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text(
-                      'Payment Received',
+                    const Text(
+                      'Amount to Collect: ',
                       style: TextStyle(
-                        color: Colors.white,
                         fontSize: 16,
-                        fontWeight: FontWeight.w600,
+                        color: Colors.white70,
+                      ),
+                    ),
+                    Text(
+                      '₹${_earning.toStringAsFixed(0)}',
+                      style: const TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
-          ],
-        ),
+              const SizedBox(height: 24),
+
+              // QR Code
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFE8E8E8), width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.05),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  children: [
+                    // QR Image - UPI payment QR code
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.asset(
+                        'assets/images/c__Users_AnuragTripathi_AppData_Roaming_Cursor_User_workspaceStorage_7c681e920c35e6a597e37186e21d741a_images_image-5c6e3067-e898-41a3-bd66-2e24748c77e2.png',
+                        width: 200,
+                        height: 200,
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) {
+                          // Fallback if image not found - show placeholder
+                          return Container(
+                            width: 200,
+                            height: 200,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF5F5F5),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.qr_code_2,
+                                    size: 100, color: Color(0xFF1A1A1A)),
+                                SizedBox(height: 8),
+                                Text(
+                                  'Scan to Pay',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Color(0xFF888888),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Scan QR code to pay',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Color(0xFF888888),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Additional charges (optional)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Row(
+                  children: [
+                    const Icon(Icons.add_road,
+                        size: 20, color: Color(0xFF888888)),
+                    const SizedBox(width: 8),
+                    Text(ref.tr('add_charges'),
+                        style: const TextStyle(
+                            fontSize: 14, color: Color(0xFF666666))),
+                  ],
+                ),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      children: [
+                        TextField(
+                          controller: _tollsController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Tolls (₹)',
+                            hintText: '0',
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _parkingController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Parking fees (₹)',
+                            hintText: '0',
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _extraStopsController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Extra stops (count)',
+                            hintText: '0',
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Cash received option
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF5F5F5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline,
+                        size: 20, color: Color(0xFF888888)),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'You can also collect cash directly from the rider',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF666666),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // Confirm Payment Button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    debugPrint('💰 Driver: Payment Received button clicked');
+                    Navigator.pop(context);
+                    _completeRideWithAdjustments();
+                    _showRideSummary();
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 4,
+                  ),
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.check_circle, color: Colors.white),
+                      SizedBox(width: 8),
+                      Text(
+                        'Payment Received',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
         ),
       ),
     );
@@ -1851,7 +1954,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       final balanceData = walletData['balance'] as Map<String, dynamic>? ?? {};
       final available = (balanceData['available'] as num?)?.toDouble();
       if (available != null) {
-        debugPrint('💰 Wallet refreshed after ride completion: available=₹${available.toStringAsFixed(2)}');
+        debugPrint(
+            '💰 Wallet refreshed after ride completion: available=₹${available.toStringAsFixed(2)}');
       }
     } catch (e) {
       debugPrint('⚠️ Wallet refresh after ride completion failed: $e');
@@ -1872,7 +1976,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
 
     final tolls = tollsStr.isEmpty ? null : double.tryParse(tollsStr);
     final parkingFees = parkingStr.isEmpty ? null : double.tryParse(parkingStr);
-    final extraStops = extraStopsStr.isEmpty ? null : int.tryParse(extraStopsStr);
+    final extraStops =
+        extraStopsStr.isEmpty ? null : int.tryParse(extraStopsStr);
 
     _completeRideOnBackend(
       tolls: tolls,
@@ -1884,7 +1989,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   void _showRideSummary() {
     // Clear the accepted ride from provider
     ref.read(driverRidesProvider.notifier).clearAcceptedRide();
-    
+
     showModalBottomSheet(
       context: context,
       isDismissible: false,
@@ -1971,7 +2076,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     if (phone.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Passenger phone number unavailable')),
+        SnackBar(content: Text(ref.tr('phone_unavailable'))),
       );
       return;
     }
@@ -1992,8 +2097,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
 
   Future<void> _openNavigation() async {
     final inProgressStatuses = ['RIDE_STARTED', 'IN_PROGRESS', 'STARTED'];
-    final shouldNavigateToDrop = _isPickedUp ||
-        inProgressStatuses.any((s) => _rideStatus.contains(s));
+    final shouldNavigateToDrop =
+        _isPickedUp || inProgressStatuses.any((s) => _rideStatus.contains(s));
     final destination = shouldNavigateToDrop ? _dropLocation : _pickupLocation;
     debugPrint(
       '🧭 Launch navigation '
@@ -2003,7 +2108,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     final url = Uri.parse(
       'google.navigation:q=${destination.latitude},${destination.longitude}&mode=d',
     );
-    
+
     if (await canLaunchUrl(url)) {
       await launchUrl(url);
     } else {
@@ -2016,28 +2121,33 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   void _cancelRide() {
+    final trCancelRide = ref.tr('cancel_ride_question');
+    final trCancelConfirm = ref.tr('cancel_ride_confirm');
+    final trNo = ref.tr('no');
+    final trYesCancel = ref.tr('yes_cancel');
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Cancel Ride?'),
-        content: const Text('Are you sure you want to cancel this ride? The rider will be notified.'),
+        title: Text(trCancelRide),
+        content: Text(trCancelConfirm),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('No'),
+            child: Text(trNo),
           ),
           TextButton(
             onPressed: () async {
               Navigator.pop(context);
               await _performCancelRide();
             },
-            child: const Text('Yes, Cancel', style: TextStyle(color: Colors.red)),
+            child: Text(trYesCancel, style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),
     );
   }
-  
+
   Future<void> _performCancelRide() async {
     debugPrint('🚫 Driver cancelling ride $_rideId');
 
@@ -2055,9 +2165,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     ref.read(driverRidesProvider.notifier).clearAcceptedRide();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Ride cancelled. You\'re available for new requests.'),
-          backgroundColor: Color(0xFFD4956A),
+        SnackBar(
+          content: Text(ref.tr('ride_cancelled_available')),
+          backgroundColor: const Color(0xFFD4956A),
         ),
       );
       context.go(AppRoutes.driverHome);
@@ -2076,20 +2186,12 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               child: Stack(
                 children: [
                   _buildMap(),
-                  
+
                   // Navigation controls (thumb-zone friendly, always above bottom panel)
                   Positioned(
                     right: 16,
                     bottom: 16,
                     child: _buildNavigationControls(),
-                  ),
-                  
-                  // Stop Riding button
-                  Positioned(
-                    top: MediaQuery.of(context).size.height * 0.15,
-                    left: 0,
-                    right: 0,
-                    child: Center(child: _buildStopRidingButton()),
                   ),
                 ],
               ),
@@ -2131,32 +2233,34 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             },
             itemBuilder: (context) => [
               if (!_otpVerified)
-                const PopupMenuItem(
+                PopupMenuItem(
                   value: 'cancel',
                   child: Row(
                     children: [
-                      Icon(Icons.cancel_outlined, color: Colors.red, size: 20),
-                      SizedBox(width: 12),
-                      Text('Cancel Ride', style: TextStyle(color: Colors.red)),
+                      const Icon(Icons.cancel_outlined,
+                          color: Colors.red, size: 20),
+                      const SizedBox(width: 12),
+                      Text(ref.tr('cancel_ride'),
+                          style: const TextStyle(color: Colors.red)),
                     ],
                   ),
                 ),
               if (_otpVerified)
-                const PopupMenuItem(
+                PopupMenuItem(
                   value: 'back',
                   child: Row(
                     children: [
-                      Icon(Icons.arrow_back, size: 20),
-                      SizedBox(width: 12),
-                      Text('Back to Home'),
+                      const Icon(Icons.arrow_back, size: 20),
+                      const SizedBox(width: 12),
+                      Text(ref.tr('back_to_home')),
                     ],
                   ),
                 ),
             ],
           ),
-          
+
           const Spacer(),
-          
+
           // Score badge
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -2188,9 +2292,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               ],
             ),
           ),
-          
+
           const SizedBox(width: 8),
-          
+
           // Earnings badge
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -2207,9 +2311,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               ),
             ),
           ),
-          
+
           const SizedBox(width: 8),
-          
+
           // Search
           const Icon(Icons.search, color: Color(0xFF1A1A1A)),
         ],
@@ -2218,6 +2322,13 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   Widget _buildMap() {
+    // Watch dark mode changes
+    final isDarkMode = ref.watch(settingsProvider).isDarkMode;
+    if (isDarkMode != _lastDarkMode) {
+      _lastDarkMode = isDarkMode;
+      _loadMapStyle();
+    }
+
     return Stack(
       children: [
         GoogleMap(
@@ -2231,9 +2342,15 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
           polylines: _polylines,
           onMapCreated: (controller) {
             _mapController.complete(controller);
+            _mapControllerInstance = controller;
+            // Apply map style
+            if (_mapStyle != null) {
+              controller.setMapStyle(_mapStyle);
+            }
           },
           onCameraMove: (_) {
-            if (_ignoreCameraMoveUntil == null || DateTime.now().isAfter(_ignoreCameraMoveUntil!)) {
+            if (_ignoreCameraMoveUntil == null ||
+                DateTime.now().isAfter(_ignoreCameraMoveUntil!)) {
               setState(() => _cameraFollowEnabled = false);
             }
           },
@@ -2242,7 +2359,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
           zoomControlsEnabled: false,
           mapToolbarEnabled: false,
         ),
-        
+
         // Date overlay
         Positioned(
           top: 8,
@@ -2265,7 +2382,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             ),
           ),
         ),
-        
+
         // Loading overlay
         if (_isLoadingRoute)
           Container(
@@ -2279,7 +2396,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
   }
 
   Widget _buildNavigationControls() {
-    final unreadCount = ref.watch(chatProvider(_rideId).select((s) => s.unreadCount));
+    final unreadCount =
+        ref.watch(chatProvider(_rideId).select((s) => s.unreadCount));
     return Column(
       children: [
         // Follow vehicle button (Uber/Rapido style - recenter on driver)
@@ -2292,9 +2410,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             width: 48,
             height: 48,
             decoration: BoxDecoration(
-              color: _cameraFollowEnabled
-                  ? const Color(0xFF4285F4)
-                  : Colors.white,
+              color:
+                  _cameraFollowEnabled ? const Color(0xFF4285F4) : Colors.white,
               borderRadius: BorderRadius.circular(24),
               boxShadow: [
                 BoxShadow(
@@ -2305,7 +2422,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             ),
             child: Icon(
               Icons.my_location,
-              color: _cameraFollowEnabled ? Colors.white : const Color(0xFF4285F4),
+              color:
+                  _cameraFollowEnabled ? Colors.white : const Color(0xFF4285F4),
             ),
           ),
         ),
@@ -2332,9 +2450,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
             ),
           ),
         ),
-        
+
         const SizedBox(height: 12),
-        
+
         // Message button
         GestureDetector(
           onTap: () {
@@ -2396,15 +2514,16 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
 
   Widget _buildStopRidingButton() {
     // Determine button state based on arrival, OTP verification, and pickup status
-    final bool canConfirmPickup = _otpVerified && !_isPickedUp;
-    final bool showArrivedButton = !_hasArrivedAtPickup && !_otpVerified && !_isPickedUp;
-    
+    final bool canConfirmPickup =
+        _hasArrivedAtPickup && !_pickupConfirmed && !_isPickedUp;
+    final bool showArrivedButton = !_hasArrivedAtPickup && !_isPickedUp;
+
     // Button configuration based on state
     Color buttonColor;
     String buttonText;
     IconData buttonIcon;
     VoidCallback? onTap;
-    
+
     if (_isPickedUp) {
       // Ride in progress - show Complete Ride
       buttonColor = const Color(0xFF4CAF50);
@@ -2412,7 +2531,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       buttonIcon = Icons.check_circle;
       onTap = _completeRide;
     } else if (canConfirmPickup) {
-      // OTP verified - show Confirm Pickup
+      // Arrived - show Confirm Pickup, then OTP dialog
       buttonColor = const Color(0xFF4CAF50);
       buttonText = 'Confirm Pickup';
       buttonIcon = Icons.person_pin_circle;
@@ -2430,7 +2549,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
       buttonIcon = Icons.lock_open;
       onTap = _showOtpEntryDialog;
     }
-    
+
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -2469,6 +2588,18 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
     );
   }
 
+  String _extractErrorMessage(Object error, {required String fallback}) {
+    final raw = error.toString();
+    if (raw.contains('ARRIVAL_RADIUS_NOT_REACHED')) {
+      return 'Move closer to pickup location (within 120m) before marking arrival.';
+    }
+    final match = RegExp(r'"message":"([^"]+)"').firstMatch(raw);
+    if (match != null && (match.group(1) ?? '').trim().isNotEmpty) {
+      return match.group(1)!;
+    }
+    return fallback;
+  }
+
   Widget _buildBottomSection() {
     return Container(
       decoration: BoxDecoration(
@@ -2496,7 +2627,8 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                     color: const Color(0xFFF5F5F5),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Icon(Icons.tune, color: Color(0xFF1A1A1A), size: 20),
+                  child: const Icon(Icons.tune,
+                      color: Color(0xFF1A1A1A), size: 20),
                 ),
                 const Spacer(),
                 Row(
@@ -2525,7 +2657,7 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
               ],
             ),
           ),
-          
+
           // Ride info
           Container(
             padding: const EdgeInsets.all(16),
@@ -2559,7 +2691,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                             ),
                           ),
                           Text(
-                            _isPickedUp ? 'Drop at destination' : 'Pick up rider',
+                            _isPickedUp
+                                ? 'Drop at destination'
+                                : 'Pick up rider',
                             style: const TextStyle(
                               fontSize: 12,
                               color: Color(0xFF888888),
@@ -2577,198 +2711,15 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                           color: const Color(0xFF4CAF50),
                           borderRadius: BorderRadius.circular(24),
                         ),
-                        child: const Icon(Icons.call, color: Colors.white, size: 20),
+                        child: const Icon(Icons.call,
+                            color: Colors.white, size: 20),
                       ),
                     ),
                   ],
                 ),
-                
+
                 const SizedBox(height: 16),
-                
-                // OTP Verification Box (show only before pickup and not verified)
-                if (!_isPickedUp)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 16),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: _otpVerified 
-                            ? [const Color(0xFF4CAF50), const Color(0xFF66BB6A)]
-                            : [const Color(0xFFD4956A), const Color(0xFFE5A77A)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: (_otpVerified ? const Color(0xFF4CAF50) : const Color(0xFFD4956A)).withOpacity(0.3),
-                          blurRadius: 8,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: _otpVerified 
-                        ? Row(
-                            children: [
-                              const Icon(
-                                Icons.check_circle,
-                                color: Colors.white,
-                                size: 32,
-                              ),
-                              const SizedBox(width: 16),
-                              const Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'OTP Verified ✓',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    SizedBox(height: 4),
-                                    Text(
-                                      'You can now start the trip',
-                                      style: TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          )
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  const Icon(
-                                    Icons.pin,
-                                    color: Colors.white,
-                                    size: 28,
-                                  ),
-                                  const SizedBox(width: 12),
-                                  const Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'Ask rider for OTP',
-                                          style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        Text(
-                                          'Enter the 4-digit code to verify',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              Row(
-                                children: [
-                                  // OTP Input Field
-                                  Expanded(
-                                    child: Container(
-                                      height: 50,
-                                      decoration: BoxDecoration(
-                                        color: Colors.white,
-                                        borderRadius: BorderRadius.circular(8),
-                                        border: _otpError.isNotEmpty 
-                                            ? Border.all(color: Colors.red, width: 2)
-                                            : null,
-                                      ),
-                                      child: TextField(
-                                        controller: _otpController,
-                                        keyboardType: TextInputType.number,
-                                        textAlign: TextAlign.center,
-                                        maxLength: 4,
-                                        style: const TextStyle(
-                                          fontSize: 24,
-                                          fontWeight: FontWeight.bold,
-                                          letterSpacing: 8,
-                                          color: Color(0xFF1A1A1A),
-                                        ),
-                                        decoration: const InputDecoration(
-                                          counterText: '',
-                                          hintText: '- - - -',
-                                          hintStyle: TextStyle(
-                                            color: Color(0xFFBDBDBD),
-                                            letterSpacing: 8,
-                                          ),
-                                          border: InputBorder.none,
-                                          contentPadding: EdgeInsets.symmetric(horizontal: 16),
-                                        ),
-                                        onChanged: (value) {
-                                          if (_otpError.isNotEmpty) {
-                                            setState(() => _otpError = '');
-                                          }
-                                        },
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  // Verify Button
-                                  GestureDetector(
-                                    onTap: _otpLoading ? null : _verifyOtp,
-                                    child: Container(
-                                      height: 50,
-                                      padding: const EdgeInsets.symmetric(horizontal: 20),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFF1A1A1A),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Center(
-                                        child: _otpLoading
-                                            ? const SizedBox(
-                                                width: 18,
-                                                height: 18,
-                                                child: CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                                ),
-                                              )
-                                            : const Text(
-                                                'Verify',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                              ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              if (_otpError.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 8),
-                                  child: Text(
-                                    _otpError,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                  ),
-                
+
                 // Distance and time info
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -2781,27 +2732,34 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                     children: [
                       // Show trip distance (pickup to destination)
                       _buildInfoItem(
-                        Icons.straighten, 
-                        _tripDistanceText.isNotEmpty ? _tripDistanceText : '...', 
-                        'Trip Distance'
-                      ),
-                      Container(width: 1, height: 40, color: const Color(0xFFE0E0E0)),
+                          Icons.straighten,
+                          _tripDistanceText.isNotEmpty
+                              ? _tripDistanceText
+                              : '...',
+                          'Trip Distance'),
+                      Container(
+                          width: 1, height: 40, color: const Color(0xFFE0E0E0)),
                       // Show driver ETA to pickup when not picked up, else trip ETA
                       _buildInfoItem(
-                        Icons.access_time, 
-                        !_isPickedUp 
-                          ? (_driverEtaText.isNotEmpty ? _driverEtaText : '...')
-                          : (_durationText.isNotEmpty ? _durationText : '...'), 
-                        !_isPickedUp ? 'Arriving in' : 'ETA'
-                      ),
-                      Container(width: 1, height: 40, color: const Color(0xFFE0E0E0)),
-                      _buildInfoItem(Icons.currency_rupee, _earning.toStringAsFixed(0), 'Fare'),
+                          Icons.access_time,
+                          !_isPickedUp
+                              ? (_driverEtaText.isNotEmpty
+                                  ? _driverEtaText
+                                  : '...')
+                              : (_durationText.isNotEmpty
+                                  ? _durationText
+                                  : '...'),
+                          !_isPickedUp ? 'Arriving in' : 'ETA'),
+                      Container(
+                          width: 1, height: 40, color: const Color(0xFFE0E0E0)),
+                      _buildInfoItem(Icons.currency_rupee,
+                          _earning.toStringAsFixed(0), 'Fare'),
                     ],
                   ),
                 ),
-                
+
                 const SizedBox(height: 16),
-                
+
                 // Address info
                 Row(
                   children: [
@@ -2811,7 +2769,9 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                           width: 10,
                           height: 10,
                           decoration: BoxDecoration(
-                            color: _isPickedUp ? const Color(0xFF4CAF50) : const Color(0xFFD4956A),
+                            color: _isPickedUp
+                                ? const Color(0xFF4CAF50)
+                                : const Color(0xFFD4956A),
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -2824,9 +2784,12 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                           width: 10,
                           height: 10,
                           decoration: BoxDecoration(
-                            color: _isPickedUp ? const Color(0xFFD4956A) : const Color(0xFF4CAF50),
+                            color: _isPickedUp
+                                ? const Color(0xFFD4956A)
+                                : const Color(0xFF4CAF50),
                             shape: BoxShape.circle,
-                            border: Border.all(color: const Color(0xFFE0E0E0), width: 2),
+                            border: Border.all(
+                                color: const Color(0xFFE0E0E0), width: 2),
                           ),
                         ),
                       ],
@@ -2840,8 +2803,12 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                             _pickupAddress,
                             style: TextStyle(
                               fontSize: 13,
-                              fontWeight: _isPickedUp ? FontWeight.normal : FontWeight.w600,
-                              color: _isPickedUp ? const Color(0xFF888888) : const Color(0xFF1A1A1A),
+                              fontWeight: _isPickedUp
+                                  ? FontWeight.normal
+                                  : FontWeight.w600,
+                              color: _isPickedUp
+                                  ? const Color(0xFF888888)
+                                  : const Color(0xFF1A1A1A),
                             ),
                           ),
                           const SizedBox(height: 20),
@@ -2849,8 +2816,12 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                             _dropAddress,
                             style: TextStyle(
                               fontSize: 13,
-                              fontWeight: _isPickedUp ? FontWeight.w600 : FontWeight.normal,
-                              color: _isPickedUp ? const Color(0xFF1A1A1A) : const Color(0xFF888888),
+                              fontWeight: _isPickedUp
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
+                              color: _isPickedUp
+                                  ? const Color(0xFF1A1A1A)
+                                  : const Color(0xFF888888),
                             ),
                           ),
                         ],
@@ -2858,12 +2829,58 @@ class _DriverActiveRideScreenState extends ConsumerState<DriverActiveRideScreen>
                     ),
                   ],
                 ),
+                
+                const SizedBox(height: 20),
+                
+                // Slideable action button
+                _buildSlideableActionButton(),
               ],
             ),
           ),
         ],
       ),
     );
+  }
+  
+  Widget _buildSlideableActionButton() {
+    // Determine button state based on arrival, OTP verification, and pickup status
+    final bool canConfirmPickup =
+        _hasArrivedAtPickup && !_pickupConfirmed && !_isPickedUp;
+    final bool showArrivedButton = !_hasArrivedAtPickup && !_isPickedUp;
+
+    if (_isPickedUp) {
+      // Ride in progress - show Complete Ride
+      return SlideToActionButton(
+        text: 'Slide to Complete Ride',
+        icon: Icons.check_circle,
+        backgroundColor: const Color(0xFF4CAF50),
+        onSlideComplete: _completeRide,
+      );
+    } else if (canConfirmPickup) {
+      // Arrived - show Confirm Pickup
+      return SlideToActionButton(
+        text: 'Slide to Confirm Pickup',
+        icon: Icons.person_pin_circle,
+        backgroundColor: const Color(0xFF4CAF50),
+        onSlideComplete: _confirmPickup,
+      );
+    } else if (showArrivedButton) {
+      // Not arrived yet - show I've Arrived
+      return SlideToActionButton(
+        text: "Slide when Arrived",
+        icon: Icons.location_on,
+        backgroundColor: const Color(0xFF2196F3),
+        onSlideComplete: _markArrivedAtPickup,
+      );
+    } else {
+      // Arrived but OTP not verified - show Enter OTP prompt
+      return SlideToActionButton(
+        text: 'Slide to Enter Ride PIN',
+        icon: Icons.lock_open,
+        backgroundColor: const Color(0xFFFF9800),
+        onSlideComplete: _showOtpEntryDialog,
+      );
+    }
   }
 
   Widget _buildInfoItem(IconData icon, String value, String label) {
@@ -2974,127 +2991,174 @@ class _DriverChatSheetState extends State<_DriverChatSheet> {
             children: [
               // Header
               Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey[100],
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  backgroundColor: Colors.green[100],
-                  child: Text(
-                    widget.riderName.isNotEmpty ? widget.riderName[0].toUpperCase() : 'R',
-                    style: TextStyle(color: Colors.green[800], fontWeight: FontWeight.bold),
-                  ),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(20)),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(widget.riderName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                      Text('Rider', style: TextStyle(color: Colors.grey[600], fontSize: 12)),
-                    ],
-                  ),
-                ),
-                IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
-              ],
-            ),
-          ),
-
-          // Messages
-          Expanded(
-            child: widget.chatMessages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.chat_bubble_outline, size: 48, color: Colors.grey[300]),
-                        const SizedBox(height: 8),
-                        Text('No messages yet', style: TextStyle(color: Colors.grey[400], fontSize: 14)),
-                        const SizedBox(height: 4),
-                        Text('Send a message to the rider', style: TextStyle(color: Colors.grey[400], fontSize: 12)),
-                      ],
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: Colors.green[100],
+                      child: Text(
+                        widget.riderName.isNotEmpty
+                            ? widget.riderName[0].toUpperCase()
+                            : 'R',
+                        style: TextStyle(
+                            color: Colors.green[800],
+                            fontWeight: FontWeight.bold),
+                      ),
                     ),
-                  )
-                : ListView.builder(
-                    controller: widget.chatScrollController,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: widget.chatMessages.length,
-                    itemBuilder: (context, index) {
-                      final msg = widget.chatMessages[index];
-                      final isDriver = msg['sender'] == 'driver';
-                      return Align(
-                        alignment: isDriver ? Alignment.centerRight : Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.7),
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: isDriver ? Colors.green[500] : Colors.grey[200],
-                            borderRadius: BorderRadius.only(
-                              topLeft: const Radius.circular(16),
-                              topRight: const Radius.circular(16),
-                              bottomLeft: isDriver ? const Radius.circular(16) : Radius.zero,
-                              bottomRight: isDriver ? Radius.zero : const Radius.circular(16),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: isDriver ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                            children: [
-                              Text(msg['text'] ?? '', style: TextStyle(color: isDriver ? Colors.white : Colors.black)),
-                              const SizedBox(height: 4),
-                              Text(msg['time'] ?? '', style: TextStyle(fontSize: 10, color: isDriver ? Colors.white70 : Colors.grey[600])),
-                            ],
-                          ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(widget.riderName,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 16)),
+                          Text('Rider',
+                              style: TextStyle(
+                                  color: Colors.grey[600], fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close)),
+                  ],
+                ),
+              ),
+
+              // Messages
+              Expanded(
+                child: widget.chatMessages.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.chat_bubble_outline,
+                                size: 48, color: Colors.grey[300]),
+                            const SizedBox(height: 8),
+                            Text('No messages yet',
+                                style: TextStyle(
+                                    color: Colors.grey[400], fontSize: 14)),
+                            const SizedBox(height: 4),
+                            Text('Send a message to the rider',
+                                style: TextStyle(
+                                    color: Colors.grey[400], fontSize: 12)),
+                          ],
                         ),
-                      );
-                    },
-                  ),
-          ),
+                      )
+                    : ListView.builder(
+                        controller: widget.chatScrollController,
+                        padding: const EdgeInsets.all(16),
+                        itemCount: widget.chatMessages.length,
+                        itemBuilder: (context, index) {
+                          final msg = widget.chatMessages[index];
+                          final isDriver = msg['sender'] == 'driver';
+                          return Align(
+                            alignment: isDriver
+                                ? Alignment.centerRight
+                                : Alignment.centerLeft,
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              constraints: BoxConstraints(
+                                  maxWidth:
+                                      MediaQuery.of(context).size.width * 0.7),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: isDriver
+                                    ? Colors.green[500]
+                                    : Colors.grey[200],
+                                borderRadius: BorderRadius.only(
+                                  topLeft: const Radius.circular(16),
+                                  topRight: const Radius.circular(16),
+                                  bottomLeft: isDriver
+                                      ? const Radius.circular(16)
+                                      : Radius.zero,
+                                  bottomRight: isDriver
+                                      ? Radius.zero
+                                      : const Radius.circular(16),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: isDriver
+                                    ? CrossAxisAlignment.end
+                                    : CrossAxisAlignment.start,
+                                children: [
+                                  Text(msg['text'] ?? '',
+                                      style: TextStyle(
+                                          color: isDriver
+                                              ? Colors.white
+                                              : Colors.black)),
+                                  const SizedBox(height: 4),
+                                  Text(msg['time'] ?? '',
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: isDriver
+                                              ? Colors.white70
+                                              : Colors.grey[600])),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
 
-          // Input
-          Container(
-            padding: EdgeInsets.only(
-              left: 16,
-              right: 16,
-              bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-              top: 8,
-            ),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [BoxShadow(color: Colors.black.withAlpha(12), blurRadius: 10, offset: const Offset(0, -5))],
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: widget.chatController,
-                    decoration: InputDecoration(
-                      hintText: 'Type a message...',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
-                      filled: true,
-                      fillColor: Colors.grey[100],
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              // Input
+              Container(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+                  top: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withAlpha(12),
+                        blurRadius: 10,
+                        offset: const Offset(0, -5))
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: widget.chatController,
+                        decoration: InputDecoration(
+                          hintText: 'Type a message...',
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none),
+                          filled: true,
+                          fillColor: Colors.grey[100],
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 8),
+                        ),
+                        onSubmitted: (_) => _handleSend(),
+                      ),
                     ),
-                    onSubmitted: (_) => _handleSend(),
-                  ),
+                    const SizedBox(width: 8),
+                    CircleAvatar(
+                      backgroundColor: Colors.green[500],
+                      child: IconButton(
+                        onPressed: _handleSend,
+                        icon: const Icon(Icons.send,
+                            color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                CircleAvatar(
-                  backgroundColor: Colors.green[500],
-                  child: IconButton(
-                    onPressed: _handleSend,
-                    icon: const Icon(Icons.send, color: Colors.white, size: 20),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
-      ),
-    );
+        );
       },
     );
   }

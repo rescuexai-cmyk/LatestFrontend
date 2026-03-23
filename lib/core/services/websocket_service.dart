@@ -21,7 +21,8 @@ class WebSocketMessage {
     return WebSocketMessage(
       type: json['type'] as String? ?? '',
       data: json['data'],
-      timestamp: json['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+      timestamp:
+          json['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch,
     );
   }
 
@@ -78,21 +79,22 @@ class WebSocketService {
   final Map<String, List<WebSocketListener>> _listeners = {};
   bool _intentionalDisconnect = false;
   String? _authToken;
-  
+
   // Track rooms to rejoin on reconnect (CRITICAL for real device reliability)
   String? _pendingDriverId;
   final Set<String> _joinedRideRooms = {};
-  
+
   // CRITICAL: Track registration state for guaranteed delivery
   bool _isRegistered = false;
   Completer<bool>? _registrationCompleter;
+
   /// Last error message from backend 'registration-error' (cleared when read).
   String? _lastRegistrationErrorMessage;
 
   // Connection status stream
   final _connectionStatusController = StreamController<bool>.broadcast();
   Stream<bool> get connectionStatus => _connectionStatusController.stream;
-  
+
   // Registration status stream for UI blocking
   final _registrationStatusController = StreamController<bool>.broadcast();
   Stream<bool> get registrationStatus => _registrationStatusController.stream;
@@ -110,14 +112,14 @@ class WebSocketService {
   /// Called on connect/reconnect to rejoin rooms
   void _onReconnect() {
     debugPrint('🔄 Socket reconnected - rejoining rooms...');
-    
+
     // Rejoin driver room if we were online
     if (_pendingDriverId != null && _pendingDriverId!.isNotEmpty) {
       debugPrint('🔄 Rejoining driver room for: $_pendingDriverId');
       _socket?.emit('join-driver', _pendingDriverId);
       _socket?.emit('driver-online', _pendingDriverId);
     }
-    
+
     // Rejoin any ride tracking rooms
     for (final rideId in _joinedRideRooms) {
       debugPrint('🔄 Rejoining ride room: $rideId');
@@ -139,13 +141,13 @@ class WebSocketService {
       debugPrint('🔌 SOCKET CONNECTION ATTEMPT');
       debugPrint('   API URL: $apiUrl');
       debugPrint('   Socket.io URL: $wsUrl');
-      debugPrint('   Expected: http://139.59.34.68/realtime');
+      debugPrint('   Expected: https://api.raahionrescue.com/realtime');
       debugPrint('   (socket_io_client uses HTTP, not ws://)');
       debugPrint('═══════════════════════════════════════════');
 
       // Use polling first as it's more reliable, then upgrade to websocket
       // This helps with firewalls and proxies that might block websocket
-      
+
       // Determine socket.io path based on URL structure
       // If URL ends with /realtime, use /realtime/socket.io/ as path
       String socketPath = '/socket.io/';
@@ -155,14 +157,15 @@ class WebSocketService {
         // Remove /realtime from base URL since it's now in the path
         baseUrl = wsUrl.replaceAll('/realtime', '');
       }
-      
+
       debugPrint('   Socket.io base URL: $baseUrl');
       debugPrint('   Socket.io path: $socketPath');
-      
+
       _socket = IO.io(
         baseUrl,
         IO.OptionBuilder()
-            .setTransports(['polling', 'websocket']) // Polling first: mobile-friendly
+            .setTransports(
+                ['polling', 'websocket']) // Polling first: mobile-friendly
             .setPath(socketPath)
             .disableAutoConnect()
             .enableReconnection()
@@ -186,7 +189,7 @@ class WebSocketService {
         debugPrint('❌ Socket.io disconnected: $reason');
         _connectionStatusController.add(false);
       });
-      
+
       _socket!.on('reconnect', (_) {
         debugPrint('🔄 Socket.io reconnected');
         _connectionStatusController.add(true);
@@ -206,7 +209,7 @@ class WebSocketService {
       _socket!.onError((error) {
         debugPrint('❌ Socket.io error: $error');
       });
-      
+
       // Listen for registration confirmation from backend - CRITICAL for guaranteed delivery
       _socket!.on('registration-success', (data) {
         debugPrint('✅ Driver registration confirmed: $data');
@@ -215,7 +218,7 @@ class WebSocketService {
         _registrationCompleter?.complete(true);
         _registrationCompleter = null;
       });
-      
+
       _socket!.on('registration-error', (data) {
         debugPrint('❌ Driver registration FAILED: $data');
         String? errorMessage;
@@ -224,14 +227,14 @@ class WebSocketService {
         } else {
           errorMessage = 'Registration rejected by server';
         }
-        
+
         _lastRegistrationErrorMessage = errorMessage;
         _isRegistered = false;
         _registrationStatusController.add(false);
         _registrationCompleter?.complete(false);
         _registrationCompleter = null;
       });
-      
+
       // Listen for state warnings from backend
       _socket!.on('state-warning', (data) {
         debugPrint('⚠️ Backend state warning: $data');
@@ -245,7 +248,8 @@ class WebSocketService {
 
       // Wait a bit for connection to establish
       await Future.delayed(const Duration(milliseconds: 500));
-      debugPrint('🔌 Socket.io connection status after 500ms: ${_socket?.connected}');
+      debugPrint(
+          '🔌 Socket.io connection status after 500ms: ${_socket?.connected}');
     } catch (e) {
       debugPrint('❌ Socket.io connect failed: $e');
       _connectionStatusController.add(false);
@@ -258,22 +262,22 @@ class WebSocketService {
 
     // Events emitted by the backend realtime-service:
     final events = [
-      'new-ride-request',      // New ride offer for drivers
-      'ride-status-update',    // Ride status changed
-      'driver-location-update',// Driver location updated
-      'driver-assigned',       // Driver was assigned to ride
-      'ride-cancelled',        // Ride was cancelled
-      'ride-accepted',         // Ride was accepted by a driver
-      'ride-taken',            // Ride was taken (broadcast to other drivers)
-      'driver-arrived',        // Driver has arrived at pickup
-      'ride-message',          // Chat message (single)
-      'ride-chat-message',     // Alternative chat event name
-      'chat-history',          // Chat history (bulk)
-      'message-delivered',     // Message delivered receipt
-      'message-read',          // Message read receipt
-      'chat-read',             // Conversation-level read cursor update
-      'typing-start',          // Typing start
-      'typing-stop',           // Typing stop
+      'new-ride-request', // New ride offer for drivers
+      'ride-status-update', // Ride status changed
+      'driver-location-update', // Driver location updated
+      'driver-assigned', // Driver was assigned to ride
+      'ride-cancelled', // Ride was cancelled
+      'ride-accepted', // Ride was accepted by a driver
+      'ride-taken', // Ride was taken (broadcast to other drivers)
+      'driver-arrived', // Driver has arrived at pickup
+      'ride-message', // Chat message (single)
+      'ride-chat-message', // Alternative chat event name
+      'chat-history', // Chat history (bulk)
+      'message-delivered', // Message delivered receipt
+      'message-read', // Message read receipt
+      'chat-read', // Conversation-level read cursor update
+      'typing-start', // Typing start
+      'typing-stop', // Typing stop
     ];
 
     for (final event in events) {
@@ -384,18 +388,20 @@ class WebSocketService {
     _intentionalDisconnect = false;
     await connect(token: _authToken);
   }
-  
+
   /// CRITICAL: Wait for socket connection with timeout.
   /// Returns true if connected, false if timeout or error.
-  Future<bool> waitForConnection({Duration timeout = const Duration(seconds: 10)}) async {
+  Future<bool> waitForConnection(
+      {Duration timeout = const Duration(seconds: 10)}) async {
     if (_socket?.connected == true) return true;
-    
-    debugPrint('⏳ Waiting for socket connection (timeout: ${timeout.inSeconds}s)...');
-    
+
+    debugPrint(
+        '⏳ Waiting for socket connection (timeout: ${timeout.inSeconds}s)...');
+
     final completer = Completer<bool>();
     Timer? timeoutTimer;
     StreamSubscription<bool>? subscription;
-    
+
     timeoutTimer = Timer(timeout, () {
       if (!completer.isCompleted) {
         debugPrint('═══════════════════════════════════════════');
@@ -406,43 +412,44 @@ class WebSocketService {
         completer.complete(false);
       }
     });
-    
+
     subscription = connectionStatus.listen((connected) {
       if (connected && !completer.isCompleted) {
         debugPrint('✅ Socket connected within timeout');
         completer.complete(true);
       }
     });
-    
+
     // Check if already connected
     if (_socket?.connected == true) {
       completer.complete(true);
     }
-    
+
     final result = await completer.future;
     timeoutTimer.cancel();
     subscription.cancel();
     return result;
   }
-  
+
   /// CRITICAL: Connect and register driver for ride offers.
   /// Returns true if connected and registered successfully, false otherwise.
-  /// 
+  ///
   /// NOTE: Backend may or may not send 'registration-success' event.
   /// We consider registration successful if:
   /// 1. Socket is connected, AND
   /// 2. Events were emitted successfully
-  /// 
+  ///
   /// If backend sends 'registration-success', we use it. Otherwise, we
   /// assume success after a short delay to allow the events to be processed.
-  Future<bool> connectAndRegister(String driverId, {String? token, Duration timeout = const Duration(seconds: 15)}) async {
+  Future<bool> connectAndRegister(String driverId,
+      {String? token, Duration timeout = const Duration(seconds: 15)}) async {
     debugPrint('🔐 connectAndRegister: Starting for driver $driverId');
-    
+
     if (driverId.isEmpty || driverId == 'unknown') {
       debugPrint('❌ connectAndRegister: Invalid driver ID');
       return false;
     }
-    
+
     // Step 1: Connect if not connected
     _lastRegistrationErrorMessage = null;
     if (_socket?.connected != true) {
@@ -453,57 +460,61 @@ class WebSocketService {
         return false;
       }
     }
-    
+
     // Verify socket is actually connected
     if (_socket?.connected != true) {
       debugPrint('❌ connectAndRegister: Socket not connected after wait');
       return false;
     }
-    
+
     // Step 2: Set up registration completer BEFORE emitting
     _registrationCompleter = Completer<bool>();
     _pendingDriverId = driverId;
     _isRegistered = false;
-    
+
     // Step 3: Emit join events
     debugPrint('📤 connectAndRegister: Emitting join-driver and driver-online');
     _socket?.emit('join-driver', driverId);
     _socket?.emit('driver-online', driverId);
-    
+
     // Step 4: Wait for registration confirmation OR timeout with success
     // Backend may not send 'registration-success', so we have two paths:
     // - If backend confirms within 3s, use that
     // - Otherwise, assume success if socket is still connected
-    
+
     bool registered = false;
-    
+
     // Timeout to wait for backend confirmation (5s for mobile)
     Timer? confirmTimer;
     confirmTimer = Timer(const Duration(seconds: 5), () {
-      if (_registrationCompleter != null && !_registrationCompleter!.isCompleted) {
+      if (_registrationCompleter != null &&
+          !_registrationCompleter!.isCompleted) {
         // Backend didn't confirm, but if socket is connected, consider it success
         if (_socket?.connected == true) {
-          debugPrint('⚠️ connectAndRegister: No backend confirmation, but socket connected - assuming success');
+          debugPrint(
+              '⚠️ connectAndRegister: No backend confirmation, but socket connected - assuming success');
           _isRegistered = true;
           _registrationStatusController.add(true);
           _registrationCompleter!.complete(true);
         } else {
-          debugPrint('❌ connectAndRegister: No confirmation and socket disconnected');
+          debugPrint(
+              '❌ connectAndRegister: No confirmation and socket disconnected');
           _registrationCompleter!.complete(false);
         }
       }
     });
-    
+
     registered = await _registrationCompleter!.future;
     confirmTimer.cancel();
-    
+
     if (registered) {
-      debugPrint('✅ connectAndRegister: Driver $driverId registered successfully');
+      debugPrint(
+          '✅ connectAndRegister: Driver $driverId registered successfully');
     } else {
       debugPrint('❌ connectAndRegister: Driver $driverId registration failed');
       _pendingDriverId = null;
     }
-    
+
     return registered;
   }
 
@@ -550,23 +561,25 @@ class WebSocketService {
     _socket?.emit('leave-driver', driverId);
     debugPrint('Left driver room: driver-$driverId');
   }
-  
+
   /// Join available-drivers room to receive new ride requests.
   /// Must be called when driver goes online.
   /// CRITICAL: Backend requires driverId/userId to join the room.
   void joinAvailableDriversRoom(String driverId) {
     if (_socket?.connected != true) {
-      debugPrint('⚠️ Cannot join available-drivers room - socket not connected');
+      debugPrint(
+          '⚠️ Cannot join available-drivers room - socket not connected');
       return;
     }
     if (driverId.isEmpty || driverId == 'unknown') {
-      debugPrint('⚠️ Cannot join available-drivers room - invalid driverId: $driverId');
+      debugPrint(
+          '⚠️ Cannot join available-drivers room - invalid driverId: $driverId');
       return;
     }
     _socket?.emit('driver-online', driverId);
     debugPrint('✅ Emitted driver-online with driverId: $driverId');
   }
-  
+
   /// Leave available-drivers room when driver goes offline.
   void leaveAvailableDriversRoom(String driverId) {
     if (driverId.isEmpty || driverId == 'unknown') {
@@ -599,7 +612,8 @@ class WebSocketService {
   }
 
   /// Send ride status update via Socket.io.
-  void updateRideStatus(String rideId, String status, {String? driverId, int? estimatedArrival}) {
+  void updateRideStatus(String rideId, String status,
+      {String? driverId, int? estimatedArrival}) {
     _socket?.emit('ride-status-update', {
       'rideId': rideId,
       'status': status,
@@ -617,7 +631,8 @@ class WebSocketService {
   }
 
   /// Send chat message via Socket.io.
-  void sendRideMessage(String rideId, String message, {required String sender, String? senderName}) {
+  void sendRideMessage(String rideId, String message,
+      {required String sender, String? senderName}) {
     _socket?.emit('ride-message', {
       'rideId': rideId,
       'message': message,
@@ -643,7 +658,8 @@ class WebSocketService {
       'message': message,
       'sender': sender,
       'senderName': senderName ?? sender,
-      if (clientMessageId != null && clientMessageId.isNotEmpty) 'clientMessageId': clientMessageId,
+      if (clientMessageId != null && clientMessageId.isNotEmpty)
+        'clientMessageId': clientMessageId,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     };
 
@@ -773,27 +789,31 @@ class WebSocketService {
   }
 
   /// Subscribe to ride-specific events (status updates, location, messages, cancellation).
-  VoidCallback subscribeToRideUpdates(String rideId, void Function(Map<String, dynamic> data) callback) {
+  VoidCallback subscribeToRideUpdates(
+      String rideId, void Function(Map<String, dynamic> data) callback) {
     final unsubscribers = <VoidCallback>[];
 
     unsubscribers.add(subscribe('ride_status_update', (message) {
       final msgData = message.data;
       if (msgData is Map && msgData['rideId'] == rideId) {
-        callback({'type': 'status_update', ...Map<String, dynamic>.from(msgData)});
+        callback(
+            {'type': 'status_update', ...Map<String, dynamic>.from(msgData)});
       }
     }));
 
     unsubscribers.add(subscribe('driver_location_update', (message) {
       final msgData = message.data;
       if (msgData is Map) {
-        callback({'type': 'location_update', ...Map<String, dynamic>.from(msgData)});
+        callback(
+            {'type': 'location_update', ...Map<String, dynamic>.from(msgData)});
       }
     }));
 
     unsubscribers.add(subscribe('driver_assigned', (message) {
       final msgData = message.data;
       if (msgData is Map && msgData['rideId'] == rideId) {
-        callback({'type': 'driver_assigned', ...Map<String, dynamic>.from(msgData)});
+        callback(
+            {'type': 'driver_assigned', ...Map<String, dynamic>.from(msgData)});
       }
     }));
 
@@ -807,7 +827,8 @@ class WebSocketService {
     unsubscribers.add(subscribe('driver_arrived', (message) {
       final msgData = message.data;
       if (msgData is Map && msgData['rideId'] == rideId) {
-        callback({'type': 'driver_arrived', ...Map<String, dynamic>.from(msgData)});
+        callback(
+            {'type': 'driver_arrived', ...Map<String, dynamic>.from(msgData)});
       }
     }));
 
@@ -819,7 +840,8 @@ class WebSocketService {
   }
 
   /// Subscribe to driver-specific events (new ride offers, ride taken).
-  VoidCallback subscribeToDriverEvents(void Function(Map<String, dynamic> data) callback) {
+  VoidCallback subscribeToDriverEvents(
+      void Function(Map<String, dynamic> data) callback) {
     final unsubscribers = <VoidCallback>[];
 
     unsubscribers.add(subscribe('new_ride_offer', (message) {

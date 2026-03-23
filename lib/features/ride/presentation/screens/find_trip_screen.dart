@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -10,8 +13,10 @@ import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/places_service.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/models/pricing_v2.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 
@@ -20,8 +25,8 @@ class FindTripScreen extends ConsumerStatefulWidget {
   final String? initialServiceType;
   final DateTime? scheduledTime;
   const FindTripScreen({
-    super.key, 
-    this.autoOpenSearch = false, 
+    super.key,
+    this.autoOpenSearch = false,
     this.initialServiceType,
     this.scheduledTime,
   });
@@ -108,17 +113,18 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final TextEditingController _pickupController = TextEditingController();
   final TextEditingController _destinationController = TextEditingController();
-  
+
   // Intermediate stops (Ola/Uber/Rapido style)
   List<RideStop> _stops = [];
-  
-  late String _selectedCabType; // Will be set from initialServiceType or default
+
+  late String
+      _selectedCabType; // Will be set from initialServiceType or default
   bool _needExtraDrivers = false;
   int _driverCount = 1;
-  
+
   // Scheduled ride time (null = ride now)
   DateTime? _scheduledTime;
-  
+
   // Cab types fetched from backend
   List<CabType> _cabTypes = [];
   bool _isLoadingPricing = false;
@@ -126,40 +132,62 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   double _surgeMultiplier = 1.0;
   String _distanceKmFromBackend = '';
   int _durationMinFromBackend = 0;
-  
+
   // Store calculated fares for each cab type (from backend)
   Map<String, double> _cabFares = {};
-  
+
+  // Pricing v2 features
+  EcoPickup? _ecoPickup;
+  RiderSubsidy? _riderSubsidy;
+  ZoneHealth? _zoneHealth;
+  MarketplaceMode _marketplaceMode = MarketplaceMode.scale;
+  bool _showEcoPickup = false;
+  double _savingsAmount = 0;
+
   // Google Maps controller
   Completer<GoogleMapController> _mapController = Completer();
   GoogleMapController? _controller;
-  
+
   // Directions service
   final DirectionsService _directionsService = DirectionsService();
+
+  // Locations - initialized to null, will be set from GPS or provider
+  // CRITICAL: Do NOT use hardcoded defaults - causes wrong route calculations
+  LatLng? _pickupLocation;
+  LatLng? _destinationLocation;
   
-  // Default location (Bangalore)
-  LatLng _pickupLocation = const LatLng(12.9716, 77.5946);
-  LatLng _destinationLocation = const LatLng(12.9816, 77.6046);
-  
+  // Flag to track if pickup location has been properly initialized
+  bool _pickupLocationReady = false;
+
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
-  
+
   // Nearby drivers
   List<Map<String, dynamic>> _nearbyDrivers = [];
+  Set<Marker> _driverClusterMarkers = {};
+  final Map<String, BitmapDescriptor> _clusterIconCache = {};
+  Timer? _clusterPulseTimer;
+  bool _clusterPulsePhase = false;
+  double _currentZoomLevel = 12.0;
   BitmapDescriptor? _carIcon;
   BitmapDescriptor? _bikeIcon;
   BitmapDescriptor? _autoIcon;
   BitmapDescriptor? _cabPremiumIcon;
-  
+
   // Route info
   String _distanceText = '';
   String _durationText = '';
   double _estimatedFare = 0;
   bool _isLoadingRoute = false;
 
+  // Map style for dark mode
+  String? _mapStyle;
+  bool _lastDarkMode = false;
+
   @override
   void initState() {
     super.initState();
+    _startClusterPulseTicker();
     // Set selected cab type from parameter or use default
     _selectedCabType = widget.initialServiceType ?? 'bike_rescue';
     // Set scheduled time from parameter
@@ -167,6 +195,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     // Sync from provider if we have saved booking (e.g. returning after driver cancel)
     _loadFromProvider();
     _loadCustomMarkers();
+    _loadMapStyle();
     _getCurrentLocationForPickup();
     // Auto-open the destination search sheet if navigated from service card
     if (widget.autoOpenSearch) {
@@ -179,65 +208,100 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   /// Load pickup/destination/stops from provider so polyline uses correct coordinates
   void _loadFromProvider() {
     final booking = ref.read(rideBookingProvider);
-    if (booking.pickupLocation != null && booking.pickupAddress != null && booking.pickupAddress!.isNotEmpty) {
+    if (booking.pickupLocation != null &&
+        booking.pickupAddress != null &&
+        booking.pickupAddress!.isNotEmpty &&
+        booking.pickupAddress != 'Getting location...') {
       _pickupLocation = booking.pickupLocation!;
       _pickupController.text = booking.pickupAddress!;
+      _pickupLocationReady = true;
+      debugPrint('📍 Loaded pickup from provider: ${booking.pickupAddress}');
     }
-    if (booking.destinationLocation != null && booking.destinationAddress != null && booking.destinationAddress!.isNotEmpty) {
+    if (booking.destinationLocation != null &&
+        booking.destinationAddress != null &&
+        booking.destinationAddress!.isNotEmpty) {
       _destinationLocation = booking.destinationLocation!;
       _destinationController.text = booking.destinationAddress!;
+      debugPrint('📍 Loaded destination from provider: ${booking.destinationAddress}');
     }
     if (booking.stops.isNotEmpty) {
       _stops = List.from(booking.stops);
     }
   }
-  
+
   // Helper to format scheduled time for display
   String get _scheduledTimeDisplay {
     if (_scheduledTime == null) return 'Now';
     final now = DateTime.now();
     final scheduled = _scheduledTime!;
-    
-    if (scheduled.day == now.day && scheduled.month == now.month && scheduled.year == now.year) {
+
+    if (scheduled.day == now.day &&
+        scheduled.month == now.month &&
+        scheduled.year == now.year) {
       return 'Today, ${TimeOfDay.fromDateTime(scheduled).format(context)}';
     }
     final tomorrow = now.add(const Duration(days: 1));
-    if (scheduled.day == tomorrow.day && scheduled.month == tomorrow.month && scheduled.year == tomorrow.year) {
+    if (scheduled.day == tomorrow.day &&
+        scheduled.month == tomorrow.month &&
+        scheduled.year == tomorrow.year) {
       return 'Tomorrow, ${TimeOfDay.fromDateTime(scheduled).format(context)}';
     }
     return '${scheduled.day}/${scheduled.month}, ${TimeOfDay.fromDateTime(scheduled).format(context)}';
   }
-  
+
   bool get _isScheduledRide => _scheduledTime != null;
-  
+
   /// Load custom vehicle icons from assets (bike, auto, cab, cab premium)
-  /// 78x78 px for Uber/Ola-style visibility, transparent background
+  /// Uber/Rapido style: ~40-50 logical pixels with device pixel ratio for crisp rendering
   Future<void> _loadCustomMarkers() async {
     try {
-      const size = Size(78, 78);
-      final config = ImageConfiguration(size: size, devicePixelRatio: 2.0);
-      _bikeIcon = await BitmapDescriptor.fromAssetImage(
+      // Uber/Rapido style icons - compact but visible
+      const config =
+          ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5);
+      _bikeIcon = await BitmapDescriptor.asset(
         config,
         'assets/map_icons/icon_bike.png',
       );
-      _autoIcon = await BitmapDescriptor.fromAssetImage(
+      _autoIcon = await BitmapDescriptor.asset(
         config,
         'assets/map_icons/icon_auto.png',
       );
-      _carIcon = await BitmapDescriptor.fromAssetImage(
+      _carIcon = await BitmapDescriptor.asset(
         config,
         'assets/map_icons/icon_cab.png',
       );
-      _cabPremiumIcon = await BitmapDescriptor.fromAssetImage(
+      _cabPremiumIcon = await BitmapDescriptor.asset(
         config,
         'assets/map_icons/icon_cab_premium.png',
       );
     } catch (e) {
       debugPrint('Map icons load failed, using fallback: $e');
-      _carIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
-      _bikeIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet);
-      _autoIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan);
+      _carIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+      _bikeIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet);
+      _autoIcon =
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan);
       _cabPremiumIcon = _carIcon;
+    }
+  }
+
+  /// Load map style based on dark mode setting
+  Future<void> _loadMapStyle() async {
+    try {
+      final isDarkMode = ref.read(settingsProvider).isDarkMode;
+      _lastDarkMode = isDarkMode;
+      final stylePath = isDarkMode
+          ? 'assets/map_styles/raahi_dark.json'
+          : 'assets/map_styles/raahi_light.json';
+      _mapStyle = await rootBundle.loadString(stylePath);
+      if (_controller != null && _mapStyle != null) {
+        _controller!.setMapStyle(_mapStyle);
+      }
+      debugPrint(
+          '🗺️ Find trip map style loaded: ${isDarkMode ? "dark" : "light"}');
+    } catch (e) {
+      debugPrint('Failed to load map style: $e');
     }
   }
 
@@ -253,7 +317,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         return 'car';
     }
   }
-  
+
   /// Get vehicle image asset path for cab type
   String _getVehicleImage(String cabTypeId) {
     switch (cabTypeId) {
@@ -271,18 +335,193 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         return 'assets/vehicles/cab_mini.png';
     }
   }
-  
+
+  Set<Marker> _mergeMapMarkers(
+      Set<Marker> coreMarkers, Set<Marker> driverMarkers) {
+    return {...coreMarkers, ...driverMarkers};
+  }
+
+  void _startClusterPulseTicker() {
+    _clusterPulseTimer?.cancel();
+    _clusterPulseTimer = Timer.periodic(const Duration(milliseconds: 850), (_) {
+      if (!mounted) return;
+      _clusterPulsePhase = !_clusterPulsePhase;
+      _clusterIconCache.removeWhere((key, _) => key.startsWith('lg-'));
+      _updateDriverMarkers();
+    });
+  }
+
+  Future<BitmapDescriptor> _getClusterIcon(int count) async {
+    final bucket = count < 5 ? 'sm' : (count <= 15 ? 'md' : 'lg');
+    final cacheKey =
+        '$bucket-$count-${bucket == 'lg' ? _clusterPulsePhase : false}';
+    final cached = _clusterIconCache[cacheKey];
+    if (cached != null) return cached;
+
+    final double size = count < 5 ? 54 : (count <= 15 ? 68 : 82);
+    final Color baseColor = count < 5
+        ? const Color(0xFFEAB88F)
+        : (count <= 15 ? const Color(0xFFD4956A) : const Color(0xFFB46D36));
+    final Color strokeColor = const Color(0xFFFFF1E4);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final center = Offset(size / 2, size / 2);
+    final radius = size / 2;
+
+    if (count > 15) {
+      final pulseScale = _clusterPulsePhase ? 1.12 : 0.98;
+      final glowPaint = Paint()
+        ..color = baseColor.withOpacity(_clusterPulsePhase ? 0.24 : 0.16);
+      canvas.drawCircle(center, radius * pulseScale, glowPaint);
+    }
+
+    final shadowPaint = Paint()
+      ..color = Colors.black.withOpacity(0.18)
+      ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 8);
+    canvas.drawCircle(center.translate(0, 2), radius * 0.72, shadowPaint);
+
+    final fillPaint = Paint()..color = baseColor;
+    canvas.drawCircle(center, radius * 0.68, fillPaint);
+
+    final ringPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..color = strokeColor.withOpacity(0.90);
+    canvas.drawCircle(center, radius * 0.68, ringPaint);
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: count.toString(),
+        style: TextStyle(
+          fontSize: count > 99 ? 18 : 20,
+          fontWeight: FontWeight.w700,
+          color: Colors.white,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        center.dx - textPainter.width / 2,
+        center.dy - textPainter.height / 2,
+      ),
+    );
+
+    final image =
+        await recorder.endRecording().toImage(size.toInt(), size.toInt());
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    final bitmap = BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
+    _clusterIconCache[cacheKey] = bitmap;
+    return bitmap;
+  }
+
+  Offset _latLngToWorldPoint(LatLng p, double zoom) {
+    final scale = 256.0 * math.pow(2.0, zoom).toDouble();
+    final x = (p.longitude + 180.0) / 360.0 * scale;
+    final sinLat =
+        math.sin(p.latitude * math.pi / 180.0).clamp(-0.9999, 0.9999);
+    final y =
+        (0.5 - (math.log((1 + sinLat) / (1 - sinLat)) / (4 * math.pi))) * scale;
+    return Offset(x, y);
+  }
+
+  List<_DriverVisualCluster> _buildVisualClusters(
+      List<_NearbyDriver> drivers, double zoom) {
+    if (drivers.isEmpty) return const [];
+    if (zoom >= 16.5) {
+      return drivers
+          .map(
+            (d) => _DriverVisualCluster(
+              center: d.position,
+              drivers: [d],
+            ),
+          )
+          .toList();
+    }
+
+    final gridSizePx =
+        zoom >= 15 ? 64.0 : (zoom >= 13 ? 76.0 : (zoom >= 11 ? 90.0 : 104.0));
+
+    final clusters = <_DriverVisualCluster>[];
+    final clusterCentersWorld = <Offset>[];
+
+    for (final driver in drivers) {
+      final point = _latLngToWorldPoint(driver.position, zoom);
+      int matchedIndex = -1;
+
+      for (int i = 0; i < clusterCentersWorld.length; i++) {
+        if ((point - clusterCentersWorld[i]).distance <= gridSizePx) {
+          matchedIndex = i;
+          break;
+        }
+      }
+
+      if (matchedIndex == -1) {
+        clusters.add(
+          _DriverVisualCluster(
+            center: driver.position,
+            drivers: [driver],
+          ),
+        );
+        clusterCentersWorld.add(point);
+      } else {
+        final existing = clusters[matchedIndex];
+        final combined = [...existing.drivers, driver];
+        final avgLat =
+            combined.map((d) => d.position.latitude).reduce((a, b) => a + b) /
+                combined.length;
+        final avgLng =
+            combined.map((d) => d.position.longitude).reduce((a, b) => a + b) /
+                combined.length;
+        clusters[matchedIndex] = _DriverVisualCluster(
+          center: LatLng(avgLat, avgLng),
+          drivers: combined,
+        );
+        clusterCentersWorld[matchedIndex] =
+            _latLngToWorldPoint(clusters[matchedIndex].center, zoom);
+      }
+    }
+
+    return clusters;
+  }
+
+  BitmapDescriptor _iconForDriverType(String type) {
+    switch (type) {
+      case 'bike':
+        return _bikeIcon ??
+            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet);
+      case 'auto':
+        return _autoIcon ??
+            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan);
+      case 'car':
+      default:
+        return (_selectedCabType == 'cab_premium'
+                ? _cabPremiumIcon
+                : _carIcon) ??
+            BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
+    }
+  }
+
   /// Fetch nearby drivers from backend and show on map
   Future<void> _fetchNearbyDrivers() async {
+    // Skip if pickup location not ready
+    if (_pickupLocation == null) {
+      debugPrint('⏳ Skipping driver fetch - pickup location not ready');
+      return;
+    }
+    
     try {
       final data = await apiClient.getNearbyDrivers(
-        _pickupLocation.latitude,
-        _pickupLocation.longitude,
+        _pickupLocation!.latitude,
+        _pickupLocation!.longitude,
         radius: 5,
       );
-      
+
       if (!mounted) return;
-      
+
       // Backend returns: { success, data: { drivers: [...], count, radius } }
       final innerData = data['data'] as Map<String, dynamic>?;
       final driversList = innerData?['drivers'] as List<dynamic>? ?? [];
@@ -290,15 +529,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         final drivers = driversList.map((d) {
           return {
             'id': d['id'] ?? 'driver_${DateTime.now().millisecondsSinceEpoch}',
-            'lat': d['currentLatitude'] ?? _pickupLocation.latitude + 0.005,
-            'lng': d['currentLongitude'] ?? _pickupLocation.longitude + 0.005,
+            'lat': d['currentLatitude'] ?? _pickupLocation!.latitude + 0.005,
+            'lng': d['currentLongitude'] ?? _pickupLocation!.longitude + 0.005,
             'type': d['vehicleType'] ?? 'car',
             'name': d['user']?['firstName'] ?? 'Driver',
             'rating': d['rating'] ?? 4.5,
             'heading': (DateTime.now().millisecondsSinceEpoch % 360),
           };
         }).toList();
-        
+
         setState(() {
           _nearbyDrivers = List<Map<String, dynamic>>.from(drivers);
         });
@@ -309,14 +548,17 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     } catch (e) {
       debugPrint('Error fetching nearby drivers: $e');
     }
-    
+
     // Generate simulated drivers if API fails or returns empty
     debugPrint('📍 Using simulated drivers');
     _generateSimulatedDrivers();
   }
-  
+
   /// Generate simulated nearby drivers for demo — ensures each type has several
   void _generateSimulatedDrivers() {
+    // Skip if pickup location not ready
+    if (_pickupLocation == null) return;
+    
     final random = DateTime.now().millisecondsSinceEpoch;
     final drivers = <Map<String, dynamic>>[];
     const types = ['car', 'bike', 'auto'];
@@ -329,8 +571,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         final lngOffset = ((seed * 3 % 80) - 40) / 10000.0;
         drivers.add({
           'id': '${type}_$i',
-          'lat': _pickupLocation.latitude + latOffset,
-          'lng': _pickupLocation.longitude + lngOffset,
+          'lat': _pickupLocation!.latitude + latOffset,
+          'lng': _pickupLocation!.longitude + lngOffset,
           'type': type,
           'name': '${type[0].toUpperCase()}${type.substring(1)} ${i + 1}',
           'rating': 4.5 + (i % 5) / 10,
@@ -344,11 +586,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     });
     _updateDriverMarkers();
   }
-  
+
   /// Update markers to include nearby drivers, filtered to match selected vehicle category
-  void _updateDriverMarkers() {
-    final driverMarkers = <Marker>{};
+  Future<void> _updateDriverMarkers() async {
     final activeCategory = _vehicleCategoryForCabType(_selectedCabType);
+    final visibleDrivers = <_NearbyDriver>[];
 
     for (final driver in _nearbyDrivers) {
       final type = driver['type'] ?? 'car';
@@ -356,91 +598,138 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       // Only show drivers matching the currently selected vehicle category
       if (type != activeCategory) continue;
 
-      BitmapDescriptor icon;
-      switch (type) {
-        case 'bike':
-          icon = _bikeIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet);
-          break;
-        case 'auto':
-          icon = _autoIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan);
-          break;
-        case 'car':
-        default:
-          icon = (_selectedCabType == 'cab_premium' ? _cabPremiumIcon : _carIcon) ??
-              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue);
-      }
-      
-      driverMarkers.add(
-        Marker(
-          markerId: MarkerId('driver_${driver['id']}'),
-          position: LatLng(driver['lat'], driver['lng']),
-          icon: icon,
-          anchor: const Offset(0.5, 0.5),
-          rotation: (driver['heading'] ?? 0).toDouble(),
-          infoWindow: InfoWindow(
-            title: driver['name'] ?? 'Driver',
-            snippet: '${driver['rating']?.toStringAsFixed(1) ?? '4.5'} ★ • ${type.toUpperCase()}',
-          ),
-        ),
+      final lat = (driver['lat'] as num?)?.toDouble();
+      final lng = (driver['lng'] as num?)?.toDouble();
+      if (lat == null || lng == null) continue;
+
+      final nearbyDriver = _NearbyDriver(
+        id: '${driver['id']}',
+        position: LatLng(lat, lng),
+        type: '$type',
+        name: '${driver['name'] ?? 'Driver'}',
+        rating: ((driver['rating'] as num?)?.toDouble() ?? 4.5),
+        heading: ((driver['heading'] as num?)?.toDouble() ?? 0),
       );
+      visibleDrivers.add(nearbyDriver);
     }
-    
-    // Combine with existing pickup/destination markers
-    final existingMarkers = _markers.where((m) => 
-      m.markerId.value == 'pickup' || m.markerId.value == 'destination'
-    ).toSet();
-    
+
+    final clusters = _buildVisualClusters(visibleDrivers, _currentZoomLevel);
+    final driverMarkers = <Marker>{};
+
+    for (final cluster in clusters) {
+      if (cluster.count == 1) {
+        final nearbyDriver = cluster.drivers.first;
+        driverMarkers.add(
+          Marker(
+            markerId: MarkerId('driver_${nearbyDriver.id}'),
+            position: nearbyDriver.position,
+            icon: _iconForDriverType(nearbyDriver.type),
+            anchor: const Offset(0.5, 0.5),
+            rotation: nearbyDriver.heading,
+            infoWindow: InfoWindow(
+              title: nearbyDriver.name,
+              snippet:
+                  '${nearbyDriver.rating.toStringAsFixed(1)} ★ • ${nearbyDriver.type.toUpperCase()}',
+            ),
+          ),
+        );
+      } else {
+        final icon = await _getClusterIcon(cluster.count);
+        driverMarkers.add(
+          Marker(
+            markerId: MarkerId('cluster_${cluster.clusterId}'),
+            position: cluster.center,
+            icon: icon,
+            anchor: const Offset(0.5, 0.5),
+            onTap: () async {
+              final map = _controller;
+              if (map == null) return;
+              final currentZoom = await map.getZoomLevel();
+              await map.animateCamera(
+                CameraUpdate.newCameraPosition(
+                  CameraPosition(
+                    target: cluster.center,
+                    zoom: (currentZoom + 1.8).clamp(10.0, 18.0),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      }
+    }
+
+    if (!mounted) return;
     setState(() {
-      _markers = {...existingMarkers, ...driverMarkers};
+      _driverClusterMarkers = driverMarkers;
+      _markers = _mergeMapMarkers(_buildCoreMarkers(), _driverClusterMarkers);
     });
   }
-  
+
   /// Get current location and set as pickup
+  /// CRITICAL: This MUST complete before any route calculation
   Future<void> _getCurrentLocationForPickup() async {
+    debugPrint('🔄 _getCurrentLocationForPickup: Starting...');
+    
     try {
-      // Skip if we already have pickup from provider (e.g. returning with saved booking)
+      // Skip if we already have valid pickup from provider (e.g. returning with saved booking)
       final booking = ref.read(rideBookingProvider);
-      if (booking.pickupLocation != null && 
-          booking.pickupAddress != null && 
+      if (booking.pickupLocation != null &&
+          booking.pickupAddress != null &&
           booking.pickupAddress!.isNotEmpty &&
           booking.pickupAddress != 'Getting location...') {
         debugPrint('📍 Using pickup from provider: ${booking.pickupAddress}');
         if (mounted) {
+          setState(() {
+            _pickupLocation = booking.pickupLocation;
+            _pickupLocationReady = true;
+          });
           _setupMapElements();
           _fetchNearbyDrivers();
-          if (booking.destinationLocation != null) _calculateRoute();
+          // Only calculate route if destination is also valid
+          _tryCalculateRoute();
         }
         return;
       }
 
+      // Show loading state while getting location
+      if (mounted) {
+        setState(() {
+          _pickupController.text = 'Getting your location...';
+        });
+      }
+
       // Check location permission
       LocationPermission permission = await Geolocator.checkPermission();
+      debugPrint('📍 Location permission status: $permission');
+      
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          // Use default location if permission denied
-          _setDefaultPickup();
+          debugPrint('⚠️ Location permission denied by user');
+          _handleLocationPermissionDenied();
           return;
         }
       }
-      
+
       if (permission == LocationPermission.deniedForever) {
-        _setDefaultPickup();
+        debugPrint('⚠️ Location permission denied forever');
+        _handleLocationPermissionDenied();
         return;
       }
-      
-      // Get current position
+
+      // Get current position - this is the REAL user location
+      debugPrint('📍 Fetching current GPS position...');
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 15),
       );
-      
+
       if (!mounted) return;
-      
+
       final pickupLatLng = LatLng(position.latitude, position.longitude);
-      setState(() {
-        _pickupLocation = pickupLatLng;
-      });
-      
+      debugPrint('✅ GPS location obtained: ${pickupLatLng.latitude}, ${pickupLatLng.longitude}');
+
       // Get address from coordinates
       String pickupAddress = 'Current Location';
       try {
@@ -448,9 +737,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           position.latitude,
           position.longitude,
         );
-        
+
         if (!mounted) return;
-        
+
         if (placemarks.isNotEmpty) {
           final place = placemarks.first;
           final address = [
@@ -458,89 +747,177 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             place.subLocality,
             place.locality,
           ].where((s) => s != null && s.isNotEmpty).join(', ');
-          
+
           pickupAddress = address.isNotEmpty ? address : 'Current Location';
-          setState(() {
-            _pickupController.text = pickupAddress;
-          });
-        } else {
-          setState(() {
-            _pickupController.text = 'Current Location';
-          });
         }
       } catch (e) {
-        if (mounted) {
-          setState(() {
-            _pickupController.text = 'Current Location';
-          });
-        }
+        debugPrint('⚠️ Geocoding failed: $e');
       }
-      
-      // CRITICAL: Update the provider with pickup location so it's available when creating ride
-      ref.read(rideBookingProvider.notifier).setPickupLocation(pickupAddress, pickupLatLng);
-      debugPrint('📍 Pickup location set in provider: $pickupAddress (${pickupLatLng.latitude}, ${pickupLatLng.longitude})');
-      
+
+      if (!mounted) return;
+
+      // CRITICAL: Set pickup location and mark as ready
+      setState(() {
+        _pickupLocation = pickupLatLng;
+        _pickupController.text = pickupAddress;
+        _pickupLocationReady = true;
+      });
+
+      // Update provider with real GPS location
+      ref
+          .read(rideBookingProvider.notifier)
+          .setPickupLocation(pickupAddress, pickupLatLng);
+      debugPrint(
+          '✅ Pickup location set from GPS: $pickupAddress (${pickupLatLng.latitude}, ${pickupLatLng.longitude})');
+
       _setupMapElements();
-      // Fetch nearby drivers
       _fetchNearbyDrivers();
-      // Don't calculate route until destination is set
+      
+      // Try to calculate route if destination is already set
+      _tryCalculateRoute();
       
     } catch (e) {
-      debugPrint('Error getting current location: $e');
-      _setDefaultPickup();
+      debugPrint('❌ Error getting current location: $e');
+      _handleLocationPermissionDenied();
     }
   }
-  
-  void _setDefaultPickup() {
-    const defaultLatLng = LatLng(28.4595, 77.0266); // Default Gurgaon
-    const defaultAddress = 'Getting location...';
+
+  /// Handle case when location permission is denied or location fetch fails
+  /// CRITICAL: Do NOT set a fake fallback location that would cause wrong routes
+  void _handleLocationPermissionDenied() {
+    if (!mounted) return;
+    
     setState(() {
-      _pickupLocation = defaultLatLng;
-      _pickupController.text = defaultAddress;
+      _pickupController.text = 'Tap to set pickup location';
+      _pickupLocationReady = false;
+      // Keep _pickupLocation as null - do NOT set a default
     });
-    // CRITICAL: Update the provider with default pickup location
-    ref.read(rideBookingProvider.notifier).setPickupLocation(defaultAddress, defaultLatLng);
-    debugPrint('📍 Default pickup location set in provider: $defaultAddress (${defaultLatLng.latitude}, ${defaultLatLng.longitude})');
-    _setupMapElements();
-    _fetchNearbyDrivers();
+    
+    debugPrint('⚠️ Location unavailable - user must manually select pickup');
+    
+    // Show a message to the user
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Please enable location or tap to select pickup location'),
+        duration: Duration(seconds: 3),
+      ),
+    );
+  }
+
+  /// Safely attempt route calculation - only if both locations are valid
+  void _tryCalculateRoute() {
+    debugPrint('🔄 _tryCalculateRoute: Checking conditions...');
+    debugPrint('   Pickup ready: $_pickupLocationReady');
+    debugPrint('   Pickup location: $_pickupLocation');
+    debugPrint('   Destination location: $_destinationLocation');
+    
+    // STRICT GUARD: Only calculate if BOTH locations are valid
+    if (!_pickupLocationReady || _pickupLocation == null || _destinationLocation == null) {
+      debugPrint('⏳ Route calculation skipped - waiting for valid locations');
+      return;
+    }
+    
+    // SAFETY CHECK: Validate coordinates are reasonable
+    if (!_isValidCoordinate(_pickupLocation!) || !_isValidCoordinate(_destinationLocation!)) {
+      debugPrint('⚠️ Invalid coordinates detected - skipping route calculation');
+      return;
+    }
+    
+    debugPrint('✅ Both locations valid - calculating route');
+    _calculateRoute();
+  }
+  
+  /// Validate that coordinates are reasonable (not 0,0 or obviously wrong)
+  bool _isValidCoordinate(LatLng coord) {
+    // Check for null island (0,0)
+    if (coord.latitude == 0 && coord.longitude == 0) return false;
+    // Check for valid lat/lng ranges
+    if (coord.latitude < -90 || coord.latitude > 90) return false;
+    if (coord.longitude < -180 || coord.longitude > 180) return false;
+    return true;
   }
 
   @override
   void dispose() {
     _pickupController.dispose();
     _destinationController.dispose();
+    _clusterPulseTimer?.cancel();
     super.dispose();
   }
 
-  void _setupMapElements() {
-    // Add markers — only show destination marker once the user has set one
-    _markers = {
-      Marker(
-        markerId: const MarkerId('pickup'),
-        position: _pickupLocation,
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-        infoWindow: InfoWindow(title: 'Pickup', snippet: _pickupController.text),
-        draggable: true,
-        onDragEnd: (newPosition) async {
-          setState(() => _pickupLocation = newPosition);
-          await _reverseGeocodeAndUpdatePickup(newPosition);
-          if (_destinationController.text.isNotEmpty) _calculateRoute();
-        },
-      ),
-      if (_destinationController.text.isNotEmpty)
+  Set<Marker> _buildCoreMarkers() {
+    final stopMarkers = <Marker>{};
+    for (int i = 0; i < _stops.length; i++) {
+      final stop = _stops[i];
+      stopMarkers.add(
+        Marker(
+          markerId: MarkerId('stop_$i'),
+          position: stop.location,
+          icon:
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          infoWindow: InfoWindow(title: 'Stop ${i + 1}', snippet: stop.address),
+          draggable: true,
+          onDragEnd: (newPosition) {
+            setState(() {
+              _stops[i] =
+                  RideStop(address: stop.address, location: newPosition);
+            });
+            _tryCalculateRoute();
+          },
+        ),
+      );
+    }
+
+    final markers = <Marker>{...stopMarkers};
+    
+    // Only add pickup marker if location is set
+    if (_pickupLocation != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('pickup'),
+          position: _pickupLocation!,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+          infoWindow:
+              InfoWindow(title: 'Pickup', snippet: _pickupController.text),
+          draggable: true,
+          onDragEnd: (newPosition) async {
+            setState(() {
+              _pickupLocation = newPosition;
+              _pickupLocationReady = true;
+            });
+            await _reverseGeocodeAndUpdatePickup(newPosition);
+            _tryCalculateRoute();
+          },
+        ),
+      );
+    }
+    
+    // Only add destination marker if location is set and has address
+    if (_destinationLocation != null && _destinationController.text.isNotEmpty) {
+      markers.add(
         Marker(
           markerId: const MarkerId('destination'),
-          position: _destinationLocation,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-          infoWindow: InfoWindow(title: 'Destination', snippet: _destinationController.text),
+          position: _destinationLocation!,
+          icon:
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+          infoWindow: InfoWindow(
+              title: 'Destination', snippet: _destinationController.text),
           draggable: true,
           onDragEnd: (newPosition) async {
             setState(() => _destinationLocation = newPosition);
             await _reverseGeocodeAndUpdateDestination(newPosition);
-            _calculateRoute();
+            _tryCalculateRoute();
           },
         ),
-    };
+      );
+    }
+    
+    return markers;
+  }
+
+  void _setupMapElements() {
+    final core = _buildCoreMarkers();
+    _markers = _mergeMapMarkers(core, _driverClusterMarkers);
   }
 
   /// Reverse geocode and update pickup address after dragging pin
@@ -557,13 +934,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           place.subLocality,
           place.locality,
         ].where((e) => e != null && e.isNotEmpty).join(', ');
-        
+
         setState(() {
           _pickupController.text = address.isNotEmpty ? address : 'Dropped Pin';
         });
-        
+
         // Update provider
-        ref.read(rideBookingProvider.notifier).setPickupLocation(address, position);
+        ref
+            .read(rideBookingProvider.notifier)
+            .setPickupLocation(address, position);
       }
     } catch (e) {
       debugPrint('Reverse geocode error: $e');
@@ -587,13 +966,16 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           place.subLocality,
           place.locality,
         ].where((e) => e != null && e.isNotEmpty).join(', ');
-        
+
         setState(() {
-          _destinationController.text = address.isNotEmpty ? address : 'Dropped Pin';
+          _destinationController.text =
+              address.isNotEmpty ? address : 'Dropped Pin';
         });
-        
+
         // Update provider
-        ref.read(rideBookingProvider.notifier).setDestinationLocation(address, position);
+        ref
+            .read(rideBookingProvider.notifier)
+            .setDestinationLocation(address, position);
       }
     } catch (e) {
       debugPrint('Reverse geocode error: $e');
@@ -604,38 +986,58 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
 
   /// Calculate route using Dijkstra's algorithm via DirectionsService
+  /// CRITICAL: This should ONLY be called via _tryCalculateRoute() which validates locations
   Future<void> _calculateRoute() async {
     if (!mounted) return;
+    
+    // STRICT GUARD: Double-check locations are valid before proceeding
+    if (_pickupLocation == null || _destinationLocation == null) {
+      debugPrint('⚠️ _calculateRoute called with null locations - aborting');
+      return;
+    }
+    
+    // Clear old route data before calculating new
     setState(() {
+      _polylines = {};
       _isLoadingRoute = true;
       _isLoadingPricing = true;
     });
-    
+
     try {
-      debugPrint('🗺️ Calculating route using Dijkstra algorithm...');
-      debugPrint('   From: ${_pickupLocation.latitude}, ${_pickupLocation.longitude}');
-      debugPrint('   To: ${_destinationLocation.latitude}, ${_destinationLocation.longitude}');
-      
-      final waypoints = _stops.isNotEmpty
-          ? _stops.map((s) => s.location).toList()
-          : null;
+      // DEBUG LOGGING - verify coordinates before route call
+      debugPrint('========================================');
+      debugPrint('🗺️ ROUTE DEBUG - Calculating route:');
+      debugPrint('   Pickup: ${_pickupLocation!.latitude}, ${_pickupLocation!.longitude}');
+      debugPrint('   Drop: ${_destinationLocation!.latitude}, ${_destinationLocation!.longitude}');
+      debugPrint('========================================');
+
+      final waypoints =
+          _stops.isNotEmpty ? _stops.map((s) => s.location).toList() : null;
       final route = await _directionsService.getRoute(
-        origin: _pickupLocation,
-        destination: _destinationLocation,
+        origin: _pickupLocation!,
+        destination: _destinationLocation!,
         waypoints: waypoints,
         mode: TravelMode.driving,
       );
       
+      // SAFETY CHECK: If route distance is absurdly large (>200km), warn and potentially skip
+      final distanceKm = route.distance / 1000;
+      if (distanceKm > 200) {
+        debugPrint('⚠️ WARNING: Route distance is ${distanceKm.toStringAsFixed(1)} km - unusually large!');
+        debugPrint('   This may indicate incorrect coordinates');
+      }
+
       if (!mounted) return;
-      
-      debugPrint('✅ Route calculated: ${route.distanceText}, ${route.durationText}');
+
+      debugPrint(
+          '✅ Route calculated: ${route.distanceText}, ${route.durationText}');
       debugPrint('   Path points: ${route.points.length}');
-      
+
       // Fetch pricing from backend
       await _fetchPricingFromBackend(route.distance, route.duration.toInt());
-      
+
       if (!mounted) return;
-      
+
       // Use selected cab type fare for the provider
       double fare = 0;
       if (_cabTypes.isNotEmpty) {
@@ -645,32 +1047,32 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         );
         fare = selectedCab.fare;
       }
-      
+
       // Save route info and stops to provider
       ref.read(rideBookingProvider.notifier).setStops(_stops);
       ref.read(rideBookingProvider.notifier).updateRouteInfo(
-        pickupLocation: _pickupLocation,
-        pickupAddress: _pickupController.text,
-        destinationLocation: _destinationLocation,
-        destinationAddress: _destinationController.text,
-        distance: route.distance,
-        duration: route.duration.toInt(),
-        fare: fare,
-        polylinePoints: route.points,
-      );
-      
+            pickupLocation: _pickupLocation!,
+            pickupAddress: _pickupController.text,
+            destinationLocation: _destinationLocation!,
+            destinationAddress: _destinationController.text,
+            distance: route.distance,
+            duration: route.duration.toInt(),
+            fare: fare,
+            polylinePoints: route.points,
+          );
+
       setState(() {
         _distanceText = route.distanceText;
         _durationText = route.durationText;
         _estimatedFare = fare;
-        
-        // Uber/Rapido-style polylines: border + fill + rounded caps
+
+        // Uber/Rapido-style polylines: thin, clean lines
         _polylines = {
           Polyline(
             polylineId: const PolylineId('route_border'),
             points: route.points,
             color: const Color(0xFF1A1A1A),
-            width: 7,
+            width: 5,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
@@ -679,80 +1081,23 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             polylineId: const PolylineId('route'),
             points: route.points,
             color: const Color(0xFF4285F4),
-            width: 5,
+            width: 3,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
           ),
         };
-        
+
         debugPrint('📍 Polyline created with ${route.points.length} points');
-        
-        // Keep driver markers and update pickup/destination/stops
-        final driverMarkers = _markers.where((m) => 
-          m.markerId.value.startsWith('driver_')
-        ).toSet();
-        
-        final stopMarkers = <Marker>{};
-        for (int i = 0; i < _stops.length; i++) {
-          final stop = _stops[i];
-          stopMarkers.add(
-            Marker(
-              markerId: MarkerId('stop_$i'),
-              position: stop.location,
-              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-              infoWindow: InfoWindow(title: 'Stop ${i + 1}', snippet: stop.address),
-              draggable: true,
-              onDragEnd: (newPosition) {
-                setState(() {
-                  _stops[i] = RideStop(address: stop.address, location: newPosition);
-                });
-                _calculateRoute();
-              },
-            ),
-          );
-        }
-        
-        _markers = {
-          ...driverMarkers,
-          ...stopMarkers,
-          Marker(
-            markerId: const MarkerId('pickup'),
-            position: _pickupLocation,
-            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-            infoWindow: InfoWindow(
-              title: 'Pickup',
-              snippet: _pickupController.text,
-            ),
-            draggable: true,
-            onDragEnd: (newPosition) {
-              setState(() => _pickupLocation = newPosition);
-              _calculateRoute();
-            },
-          ),
-          Marker(
-            markerId: const MarkerId('destination'),
-            position: _destinationLocation,
-            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-            infoWindow: InfoWindow(
-              title: 'Destination',
-              snippet: _destinationController.text,
-            ),
-            draggable: true,
-            onDragEnd: (newPosition) {
-              setState(() => _destinationLocation = newPosition);
-              _calculateRoute();
-            },
-          ),
-        };
-        
+
+        _markers = _mergeMapMarkers(_buildCoreMarkers(), _driverClusterMarkers);
+
         _isLoadingRoute = false;
       });
-      
+
       // Animate camera to fit the entire route with all polyline points
       await Future.delayed(const Duration(milliseconds: 200));
       await _fitRouteBounds(route.bounds);
-      
     } catch (e) {
       debugPrint('❌ Route calculation error: $e');
       setState(() {
@@ -762,60 +1107,257 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
   }
 
-  /// Fetch ride pricing from backend
+  /// Fetch ride pricing from backend (v2 with subsidy, eco pickup, zone health)
   Future<void> _fetchPricingFromBackend(double distance, int duration) async {
+    // Guard: ensure both locations are valid
+    if (_pickupLocation == null || _destinationLocation == null) {
+      debugPrint('⚠️ Cannot fetch pricing - locations not ready');
+      return;
+    }
+    
     try {
-      debugPrint('💰 Fetching pricing from backend...');
+      debugPrint('💰 Fetching pricing v2 from backend...');
       debugPrint('   Distance: ${distance}m, Duration: ${duration}s');
-      
+
       // Backend: POST /api/pricing/calculate (with waypoints for multi-stop)
       final waypointsForPricing = _stops.isNotEmpty
-          ? _stops.map((s) => {'lat': s.location.latitude, 'lng': s.location.longitude}).toList()
+          ? _stops
+              .map((s) =>
+                  {'lat': s.location.latitude, 'lng': s.location.longitude})
+              .toList()
           : null;
       final data = await apiClient.getRidePricing(
-        pickupLat: _pickupLocation.latitude,
-        pickupLng: _pickupLocation.longitude,
-        dropLat: _destinationLocation.latitude,
-        dropLng: _destinationLocation.longitude,
+        pickupLat: _pickupLocation!.latitude,
+        pickupLng: _pickupLocation!.longitude,
+        dropLat: _destinationLocation!.latitude,
+        dropLng: _destinationLocation!.longitude,
         waypoints: waypointsForPricing,
         distanceKm: distance / 1000,
         durationMin: (duration / 60).ceil(),
       );
 
-      // Backend returns: { success, data: { baseFare, distanceFare, timeFare, totalFare, distance, estimatedDuration, ... } }
+      // Backend returns v2 pricing with subsidy, eco pickup, zone health
       if (data['success'] == true) {
         final pricingData = data['data'] as Map<String, dynamic>? ?? {};
-        final totalFare = (pricingData['totalFare'] as num?)?.toDouble() ?? 0;
-        final baseFare = (pricingData['baseFare'] as num?)?.toDouble() ?? 0;
-        
-        // Generate cab type options from the base pricing
-        final options = [
-          CabType(id: 'bike_rescue', name: 'Bike Rescue', description: 'Quick bike rescue', iconName: 'two_wheeler', capacity: 1, fare: totalFare * 0.6, eta: '3 min'),
-          CabType(id: 'auto', name: 'Auto', description: 'Auto rickshaw', iconName: 'electric_rickshaw', capacity: 3, fare: totalFare * 0.8, eta: '5 min'),
-          CabType(id: 'cab_mini', name: 'Cab Mini', description: 'Compact car', iconName: 'directions_car', capacity: 4, fare: totalFare, eta: '7 min', isPopular: true),
-          CabType(id: 'cab_xl', name: 'Cab XL', description: 'Spacious ride', iconName: 'airport_shuttle', capacity: 6, fare: totalFare * 1.3, eta: '10 min'),
-          CabType(id: 'cab_premium', name: 'Premium', description: 'Luxury ride', iconName: 'diamond', capacity: 4, fare: totalFare * 1.8, eta: '12 min'),
-        ];
-        
+
+        // Parse v2 pricing features
+        RiderSubsidy? subsidy;
+        EcoPickup? ecoPickup;
+        ZoneHealth? zoneHealth;
+        MarketplaceMode mode = MarketplaceMode.scale;
+        double totalSavings = 0;
+
+        // Parse rider subsidy (launch mode feature)
+        if (pricingData['rider_subsidy'] != null ||
+            pricingData['riderSubsidy'] != null) {
+          subsidy = RiderSubsidy.fromJson(
+              pricingData['rider_subsidy'] ?? pricingData['riderSubsidy']);
+        }
+
+        // Parse eco pickup option
+        if (pricingData['eco_pickup'] != null ||
+            pricingData['ecoPickup'] != null) {
+          ecoPickup = EcoPickup.fromJson(
+              pricingData['eco_pickup'] ?? pricingData['ecoPickup']);
+        }
+
+        // Parse zone health
+        if (pricingData['zone_health'] != null ||
+            pricingData['zoneHealth'] != null) {
+          zoneHealth = ZoneHealth.fromJson(
+              pricingData['zone_health'] ?? pricingData['zoneHealth']);
+        }
+
+        // Parse marketplace mode
+        final modeStr = pricingData['marketplace_mode'] ??
+            pricingData['marketplaceMode'] ??
+            'scale';
+        if (modeStr == 'launch') {
+          mode = MarketplaceMode.launch;
+        }
+
+        // Parse cab options from backend (v2 returns per-category pricing)
+        final List<CabType> options = [];
+        final cabOptionsData = pricingData['cab_options'] ??
+            pricingData['cabOptions'] ??
+            pricingData['options'];
+
+        if (cabOptionsData != null && cabOptionsData is List) {
+          // Backend provides cab options directly
+          for (final opt in cabOptionsData) {
+            final cabData = opt as Map<String, dynamic>;
+            final originalFare = (cabData['original_fare'] ??
+                    cabData['originalFare'] ??
+                    cabData['fare'] ??
+                    0)
+                .toDouble();
+            final effectiveFare = (cabData['effective_fare'] ??
+                    cabData['effectiveFare'] ??
+                    cabData['fare'] ??
+                    0)
+                .toDouble();
+            final cabSavings = originalFare - effectiveFare;
+
+            options.add(CabType(
+              id: cabData['id'] ?? cabData['vehicle_type'] ?? '',
+              name: cabData['name'] ?? '',
+              description: cabData['description'] ?? '',
+              iconName:
+                  _getIconName(cabData['id'] ?? cabData['vehicle_type'] ?? ''),
+              capacity: cabData['capacity'] ?? 4,
+              fare: effectiveFare,
+              baseFare:
+                  (cabData['base_fare'] ?? cabData['baseFare'] ?? 0).toDouble(),
+              perKmRate: (cabData['per_km_rate'] ?? cabData['perKmRate'] ?? 0)
+                  .toDouble(),
+              perMinRate:
+                  (cabData['per_min_rate'] ?? cabData['perMinRate'] ?? 0)
+                      .toDouble(),
+              eta: cabData['eta'] ?? '5 min',
+              isPopular: cabData['is_popular'] ?? cabData['isPopular'] ?? false,
+              badge: cabData['badge'],
+              surgeMultiplier: (cabData['surge_multiplier'] ??
+                      cabData['surgeMultiplier'] ??
+                      1.0)
+                  .toDouble(),
+              isSurge: cabData['is_surge'] ?? cabData['isSurge'] ?? false,
+            ));
+
+            if (cabSavings > totalSavings) totalSavings = cabSavings;
+          }
+        } else {
+          // Fallback: Generate from base fare if backend doesn't provide options
+          final totalFare =
+              (pricingData['totalFare'] ?? pricingData['total_fare'] ?? 0)
+                  .toDouble();
+          final subsidyMultiplier =
+              subsidy?.isActive == true ? (1 - subsidy!.subsidyPct) : 1.0;
+
+          options.addAll([
+            CabType(
+                id: 'bike_rescue',
+                name: 'Bike Rescue',
+                description: 'Quick bike rescue',
+                iconName: 'two_wheeler',
+                capacity: 1,
+                fare: (totalFare * 0.6 * subsidyMultiplier)
+                    .clamp(20.0, double.infinity),
+                eta: '3 min'),
+            CabType(
+                id: 'auto',
+                name: 'Auto',
+                description: 'Auto rickshaw',
+                iconName: 'electric_rickshaw',
+                capacity: 3,
+                fare: (totalFare * 0.8 * subsidyMultiplier)
+                    .clamp(25.0, double.infinity),
+                eta: '5 min'),
+            CabType(
+                id: 'cab_mini',
+                name: 'Cab Mini',
+                description: 'Compact car',
+                iconName: 'directions_car',
+                capacity: 4,
+                fare: (totalFare * subsidyMultiplier)
+                    .clamp(40.0, double.infinity),
+                eta: '7 min',
+                isPopular: true),
+            CabType(
+                id: 'cab_xl',
+                name: 'Cab XL',
+                description: 'Spacious ride',
+                iconName: 'airport_shuttle',
+                capacity: 6,
+                fare: (totalFare * 1.3 * subsidyMultiplier)
+                    .clamp(80.0, double.infinity),
+                eta: '10 min'),
+            CabType(
+                id: 'cab_premium',
+                name: 'Premium',
+                description: 'Luxury ride',
+                iconName: 'diamond',
+                capacity: 4,
+                fare: (totalFare * 1.8 * subsidyMultiplier)
+                    .clamp(100.0, double.infinity),
+                eta: '12 min'),
+          ]);
+
+          if (subsidy?.isActive == true) {
+            totalSavings = totalFare * subsidy!.subsidyPct;
+            if (totalSavings > subsidy.maxSubsidyCap)
+              totalSavings = subsidy.maxSubsidyCap;
+          }
+        }
+
+        // Add eco pickup option if available
+        if (ecoPickup != null && ecoPickup.isAvailable) {
+          final baseFare = options.isNotEmpty ? options.first.fare : 100.0;
+          final ecoFare = (baseFare * (1 - ecoPickup.discountPct))
+              .clamp(15.0, double.infinity);
+          options.insert(
+              0,
+              CabType(
+                id: 'eco_pickup',
+                name: 'Eco Pickup',
+                description:
+                    'Walk ${ecoPickup.walkDistanceMeters.round()}m, save ₹${ecoPickup.calculateSavings(baseFare).round()}',
+                iconName: 'directions_walk',
+                capacity: 1,
+                fare: ecoFare.toDouble(),
+                eta: '2 min',
+                badge: 'Save ${(ecoPickup.discountPct * 100).round()}%',
+              ));
+        }
+
         final fares = <String, double>{};
         for (final cab in options) {
           fares[cab.id] = cab.fare;
         }
-        
+
+        // Parse surge info
+        final isSurge = pricingData['surge_active'] ??
+            pricingData['surgeActive'] ??
+            pricingData['is_surge'] ??
+            false;
+        final surgeMultiplier = (pricingData['surge_multiplier'] ??
+                pricingData['surgeMultiplier'] ??
+                1.0)
+            .toDouble();
+
         setState(() {
           _cabTypes = options;
           _cabFares = fares;
-          _isSurgeActive = data['surge_active'] ?? false;
-          _surgeMultiplier = (data['surge_multiplier'] ?? 1.0).toDouble();
-          _distanceKmFromBackend = data['distance_km'] ?? '';
-          _durationMinFromBackend = data['duration_min'] ?? 0;
+          _isSurgeActive = isSurge;
+          _surgeMultiplier = surgeMultiplier;
+          _distanceKmFromBackend =
+              (pricingData['distance_km'] ?? pricingData['distanceKm'] ?? '')
+                  .toString();
+          _durationMinFromBackend = (pricingData['duration_min'] ??
+                  pricingData['durationMin'] ??
+                  pricingData['estimatedDuration'] ??
+                  0)
+              .toInt();
           _isLoadingPricing = false;
+
+          // v2 features
+          _riderSubsidy = subsidy;
+          _ecoPickup = ecoPickup;
+          _zoneHealth = zoneHealth;
+          _marketplaceMode = mode;
+          _savingsAmount = totalSavings;
+          _showEcoPickup = ecoPickup?.isAvailable ?? false;
         });
-        
-        debugPrint('✅ Pricing fetched: ${options.length} options');
-        debugPrint('   Surge active: $_isSurgeActive (${_surgeMultiplier}x)');
+
+        debugPrint('✅ Pricing v2 fetched: ${options.length} options');
+        debugPrint(
+            '   Mode: ${mode.name}, Surge: $_isSurgeActive (${_surgeMultiplier}x)');
+        debugPrint(
+            '   Subsidy active: ${subsidy?.isActive ?? false}, Savings: ₹${totalSavings.round()}');
+        debugPrint('   Eco pickup: ${ecoPickup?.isAvailable ?? false}');
+        debugPrint('   Zone health: ${zoneHealth?.status.name ?? 'unknown'}');
       } else {
-        debugPrint('❌ Pricing API returned unsuccessful');
+        debugPrint(
+            '❌ Pricing API returned unsuccessful: ${data['message'] ?? 'Unknown error'}');
         _loadFallbackPricing(distance, duration);
       }
     } catch (e) {
@@ -824,41 +1366,127 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
   }
 
+  /// Get icon name for vehicle type
+  String _getIconName(String vehicleType) {
+    switch (vehicleType.toLowerCase()) {
+      case 'bike':
+      case 'bike_rescue':
+        return 'two_wheeler';
+      case 'auto':
+        return 'electric_rickshaw';
+      case 'cab_mini':
+      case 'mini':
+        return 'directions_car';
+      case 'cab_xl':
+      case 'xl':
+        return 'airport_shuttle';
+      case 'cab_premium':
+      case 'premium':
+        return 'diamond';
+      case 'eco_pickup':
+        return 'directions_walk';
+      default:
+        return 'directions_car';
+    }
+  }
+
   /// Fallback pricing calculation if backend is unavailable
   void _loadFallbackPricing(double distance, int duration) {
     final distanceKm = distance / 1000;
     final durationMin = duration / 60;
-    
+
     // Fallback cab types
     final fallbackTypes = [
-      {'id': 'bike_rescue', 'name': 'Rescue Service', 'description': 'Quick rescue on two-wheeler — pickup and drop anywhere', 'icon': 'two_wheeler', 'base_fare': 20, 'per_km_rate': 6, 'per_min_rate': 1, 'capacity': 1, 'badge': 'Rescue', 'is_popular': true},
-      {'id': 'auto', 'name': 'Auto', 'description': 'Budget-friendly auto rickshaw', 'icon': 'electric_rickshaw', 'base_fare': 25, 'per_km_rate': 8, 'per_min_rate': 1.5, 'capacity': 3, 'badge': 'Cheapest'},
-      {'id': 'cab_mini', 'name': 'Cab Mini', 'description': 'Compact cars for city rides', 'icon': 'directions_car', 'base_fare': 40, 'per_km_rate': 12, 'per_min_rate': 2, 'capacity': 4},
-      {'id': 'cab_xl', 'name': 'Cab XL', 'description': 'Spacious SUVs for groups', 'icon': 'airport_shuttle', 'base_fare': 80, 'per_km_rate': 18, 'per_min_rate': 3, 'capacity': 6, 'badge': 'Family'},
-      {'id': 'cab_premium', 'name': 'Cab Premium', 'description': 'Luxury sedans with top drivers', 'icon': 'diamond', 'base_fare': 100, 'per_km_rate': 25, 'per_min_rate': 4, 'capacity': 4, 'badge': 'Premium'},
-      {'id': 'personal_driver', 'name': 'Personal Driver', 'description': 'Hire a driver for your own car', 'icon': 'person', 'base_fare': 150, 'per_km_rate': 0, 'per_min_rate': 3.5, 'capacity': 4, 'badge': 'Hourly'},
+      {
+        'id': 'bike_rescue',
+        'name': 'Rescue Service',
+        'description': 'Quick rescue on two-wheeler — pickup and drop anywhere',
+        'icon': 'two_wheeler',
+        'base_fare': 20,
+        'per_km_rate': 6,
+        'per_min_rate': 1,
+        'capacity': 1,
+        'badge': 'Rescue',
+        'is_popular': true
+      },
+      {
+        'id': 'auto',
+        'name': 'Auto',
+        'description': 'Budget-friendly auto rickshaw',
+        'icon': 'electric_rickshaw',
+        'base_fare': 25,
+        'per_km_rate': 8,
+        'per_min_rate': 1.5,
+        'capacity': 3,
+        'badge': 'Cheapest'
+      },
+      {
+        'id': 'cab_mini',
+        'name': 'Cab Mini',
+        'description': 'Compact cars for city rides',
+        'icon': 'directions_car',
+        'base_fare': 40,
+        'per_km_rate': 12,
+        'per_min_rate': 2,
+        'capacity': 4
+      },
+      {
+        'id': 'cab_xl',
+        'name': 'Cab XL',
+        'description': 'Spacious SUVs for groups',
+        'icon': 'airport_shuttle',
+        'base_fare': 80,
+        'per_km_rate': 18,
+        'per_min_rate': 3,
+        'capacity': 6,
+        'badge': 'Family'
+      },
+      {
+        'id': 'cab_premium',
+        'name': 'Cab Premium',
+        'description': 'Luxury sedans with top drivers',
+        'icon': 'diamond',
+        'base_fare': 100,
+        'per_km_rate': 25,
+        'per_min_rate': 4,
+        'capacity': 4,
+        'badge': 'Premium'
+      },
+      {
+        'id': 'personal_driver',
+        'name': 'Personal Driver',
+        'description': 'Hire a driver for your own car',
+        'icon': 'person',
+        'base_fare': 150,
+        'per_km_rate': 0,
+        'per_min_rate': 3.5,
+        'capacity': 4,
+        'badge': 'Hourly'
+      },
     ];
-    
+
     final options = fallbackTypes.map((type) {
-      final fare = (type['base_fare'] as num) + (distanceKm * (type['per_km_rate'] as num)) + (durationMin * (type['per_min_rate'] as num));
+      final fare = (type['base_fare'] as num) +
+          (distanceKm * (type['per_km_rate'] as num)) +
+          (durationMin * (type['per_min_rate'] as num));
       return CabType.fromJson({
         ...type,
         'fare': fare.round(),
         'eta': '3-5 min',
       });
     }).toList();
-    
+
     final fares = <String, double>{};
     for (final cab in options) {
       fares[cab.id] = cab.fare;
     }
-    
+
     setState(() {
       _cabTypes = options;
       _cabFares = fares;
       _isLoadingPricing = false;
     });
-    
+
     debugPrint('⚠️ Using fallback pricing');
   }
 
@@ -873,35 +1501,45 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           _controller = await _mapController.future;
         }
       }
-      
+
       // Calculate bounds from all points (polyline points + markers + stops)
-      List<LatLng> allPoints = [_pickupLocation, _destinationLocation, ..._stops.map((s) => s.location)];
+      // Guard: ensure both locations are valid
+      if (_pickupLocation == null || _destinationLocation == null) {
+        debugPrint('⚠️ Cannot fit bounds - locations not ready');
+        return;
+      }
       
+      List<LatLng> allPoints = [
+        _pickupLocation!,
+        _destinationLocation!,
+        ..._stops.map((s) => s.location)
+      ];
+
       // Add all polyline points if available
       if (_polylines.isNotEmpty) {
         for (final polyline in _polylines) {
           allPoints.addAll(polyline.points);
         }
       }
-      
+
       // Find min/max from all points
       double minLat = allPoints.first.latitude;
       double maxLat = allPoints.first.latitude;
       double minLng = allPoints.first.longitude;
       double maxLng = allPoints.first.longitude;
-      
+
       for (final point in allPoints) {
         if (point.latitude < minLat) minLat = point.latitude;
         if (point.latitude > maxLat) maxLat = point.latitude;
         if (point.longitude < minLng) minLng = point.longitude;
         if (point.longitude > maxLng) maxLng = point.longitude;
       }
-      
+
       // Add padding to bounds (more padding for better visibility)
       final latPadding = (maxLat - minLat) * 0.15; // 15% padding
       final lngPadding = (maxLng - minLng) * 0.15;
       final minPadding = 0.002; // Minimum padding
-      
+
       final bounds = LatLngBounds(
         southwest: LatLng(
           minLat - (latPadding > minPadding ? latPadding : minPadding),
@@ -912,35 +1550,42 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           maxLng + (lngPadding > minPadding ? lngPadding : minPadding),
         ),
       );
-      
+
       debugPrint('📍 Fitting map to bounds with ${allPoints.length} points');
-      debugPrint('   SW: (${bounds.southwest.latitude.toStringAsFixed(4)}, ${bounds.southwest.longitude.toStringAsFixed(4)})');
-      debugPrint('   NE: (${bounds.northeast.latitude.toStringAsFixed(4)}, ${bounds.northeast.longitude.toStringAsFixed(4)})');
-      
+      debugPrint(
+          '   SW: (${bounds.southwest.latitude.toStringAsFixed(4)}, ${bounds.southwest.longitude.toStringAsFixed(4)})');
+      debugPrint(
+          '   NE: (${bounds.northeast.latitude.toStringAsFixed(4)}, ${bounds.northeast.longitude.toStringAsFixed(4)})');
+
       await Future.delayed(const Duration(milliseconds: 100));
-      
+
       // Animate camera with padding for UI elements at top
       await _controller?.animateCamera(
         CameraUpdate.newLatLngBounds(bounds, 50), // 50 pixel padding from edges
       );
-      
+
       debugPrint('✅ Map camera animated to show full route');
     } catch (e) {
       debugPrint('❌ Error fitting bounds: $e');
       // Fallback: center between pickup and destination
-      try {
-        final centerLat = (_pickupLocation.latitude + _destinationLocation.latitude) / 2;
-        final centerLng = (_pickupLocation.longitude + _destinationLocation.longitude) / 2;
-        await _controller?.animateCamera(
-          CameraUpdate.newLatLngZoom(LatLng(centerLat, centerLng), 12),
-        );
-      } catch (_) {}
+      if (_pickupLocation != null && _destinationLocation != null) {
+        try {
+          final centerLat =
+              (_pickupLocation!.latitude + _destinationLocation!.latitude) / 2;
+          final centerLng =
+              (_pickupLocation!.longitude + _destinationLocation!.longitude) / 2;
+          await _controller?.animateCamera(
+            CameraUpdate.newLatLngZoom(LatLng(centerLat, centerLng), 12),
+          );
+        } catch (_) {}
+      }
     }
   }
 
   bool _locationWasSelected = false;
 
-  void _showLocationSearchSheet({required bool isPickup, int? addStopAt, int? editStopAt}) {
+  void _showLocationSearchSheet(
+      {required bool isPickup, int? addStopAt, int? editStopAt}) {
     _locationWasSelected = false;
     final isStop = addStopAt != null || editStopAt != null;
     final initialVal = isPickup
@@ -964,7 +1609,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           if (latLng == null) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text('Could not get coordinates. Please try a different search.'),
+                content: Text(
+                    'Could not get coordinates. Please try a different search.'),
                 backgroundColor: Colors.orange,
               ),
             );
@@ -974,28 +1620,37 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             if (isPickup) {
               _pickupController.text = address;
               _pickupLocation = latLng;
-              ref.read(rideBookingProvider.notifier).setPickupLocation(address, latLng);
+              _pickupLocationReady = true; // Mark pickup as ready
+              ref
+                  .read(rideBookingProvider.notifier)
+                  .setPickupLocation(address, latLng);
+              debugPrint('📍 Pickup set from search: $address');
             } else if (editStopAt != null) {
               if (editStopAt < _stops.length) {
-                _stops[editStopAt] = RideStop(address: address, location: latLng);
+                _stops[editStopAt] =
+                    RideStop(address: address, location: latLng);
                 ref.read(rideBookingProvider.notifier).setStops(_stops);
               }
             } else if (addStopAt != null) {
-              _stops.insert(addStopAt, RideStop(address: address, location: latLng));
+              _stops.insert(
+                  addStopAt, RideStop(address: address, location: latLng));
               ref.read(rideBookingProvider.notifier).setStops(_stops);
             } else {
               _destinationController.text = address;
               _destinationLocation = latLng;
-              ref.read(rideBookingProvider.notifier).setDestinationLocation(address, latLng);
+              ref
+                  .read(rideBookingProvider.notifier)
+                  .setDestinationLocation(address, latLng);
+              debugPrint('📍 Destination set from search: $address');
             }
           });
           _setupMapElements();
           _updateDriverMarkers();
-          if (_destinationController.text.isNotEmpty) {
-            _calculateRoute().then((_) {
-              Future.delayed(const Duration(milliseconds: 300), () {
-                _fitRouteBounds(null);
-              });
+          // Use safe route calculation that checks both locations
+          _tryCalculateRoute();
+          if (_destinationLocation != null) {
+            Future.delayed(const Duration(milliseconds: 300), () {
+              _fitRouteBounds(null);
             });
           }
         },
@@ -1003,7 +1658,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     ).then((_) {
       // If sheet was dismissed without selecting a location AND we came via auto-open,
       // pop back to the home screen
-      if (!_locationWasSelected && widget.autoOpenSearch && _destinationController.text.isEmpty) {
+      if (!_locationWasSelected &&
+          widget.autoOpenSearch &&
+          _destinationController.text.isEmpty) {
         if (mounted && context.canPop()) {
           context.pop();
         }
@@ -1017,37 +1674,52 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       key: _scaffoldKey,
       backgroundColor: Colors.white,
       endDrawer: _buildDrawer(),
-      body: SafeArea(
-        child: Stack(
-          children: [
-            // Full-height map with header
-            Column(
-              children: [
-                _buildHeader(),
-                Expanded(child: _buildMapSection()),
-              ],
+      body: Stack(
+        children: [
+          // Full-bleed map base layer
+          Positioned.fill(child: _buildMapSection()),
+
+          // Top controls floating over map
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: Column(
+                  children: [
+                    _buildHeader(),
+                    const SizedBox(height: 8),
+                    _buildLocationInputs(),
+                  ],
+                ),
+              ),
             ),
-            // Draggable bottom sheet (Uber/Ola style - drag up/down)
-            DraggableScrollableSheet(
-              initialChildSize: 0.40,
-              minChildSize: 0.25,
-              maxChildSize: 0.90,
-              snap: true,
-              snapSizes: const [0.25, 0.40, 0.65, 0.90],
-              builder: (context, scrollController) => _buildBottomSheet(scrollController),
-            ),
-            const Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: ActiveRideBanner(),
-            ),
-          ],
-        ),
+          ),
+
+          // Draggable bottom sheet (Uber/Ola style - drag up/down)
+          DraggableScrollableSheet(
+            initialChildSize: 0.40,
+            minChildSize: 0.25,
+            maxChildSize: 0.90,
+            snap: true,
+            snapSizes: const [0.25, 0.40, 0.65, 0.90],
+            builder: (context, scrollController) =>
+                _buildBottomSheet(scrollController),
+          ),
+          const Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: ActiveRideBanner(),
+          ),
+        ],
       ),
     );
   }
-  
+
   Widget _buildDrawer() {
     return Drawer(
       child: SafeArea(
@@ -1063,7 +1735,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 builder: (context) {
                   final user = ref.watch(currentUserProvider);
                   final displayName = user?.name ?? user?.email ?? 'Rider';
-                  final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : 'R';
+                  final initial = displayName.isNotEmpty
+                      ? displayName[0].toUpperCase()
+                      : 'R';
                   return Row(
                     children: [
                       Container(
@@ -1074,15 +1748,23 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                           borderRadius: BorderRadius.circular(25),
                         ),
                         child: Center(
-                          child: Text(initial, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                          child: Text(initial,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold)),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(displayName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-                          const Text('View Profile', style: TextStyle(color: Color(0xFF888888), fontSize: 12)),
+                          Text(displayName,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600, fontSize: 16)),
+                          const Text('View Profile',
+                              style: TextStyle(
+                                  color: Color(0xFF888888), fontSize: 12)),
                         ],
                       ),
                     ],
@@ -1090,7 +1772,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 },
               ),
             ),
-            
+
             // Menu items
             ListTile(
               leading: const Icon(Icons.home),
@@ -1142,19 +1824,20 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 context.push(AppRoutes.profile);
               },
             ),
-            
+
             const Spacer(),
-            
+
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Raahi v1.0.0', style: TextStyle(color: Color(0xFF888888), fontSize: 12)),
+              child: Text('Raahi v1.0.0',
+                  style: TextStyle(color: Color(0xFF888888), fontSize: 12)),
             ),
           ],
         ),
       ),
     );
   }
-  
+
   void _showHelpSupport() {
     showModalBottomSheet(
       context: context,
@@ -1166,7 +1849,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Help & Support', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            const Text('Help & Support',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             const SizedBox(height: 20),
             ListTile(
               leading: const Icon(Icons.phone, color: Color(0xFFD4956A)),
@@ -1283,7 +1967,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     Row(
                       children: [
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(4),
@@ -1359,7 +2044,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       onTap: () {
                         Navigator.pop(context);
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Card payment selected')),
+                          const SnackBar(
+                              content: Text('Card payment selected')),
                         );
                       },
                     ),
@@ -1453,7 +2139,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
 
   void _showUpiLinkDialog(String upiMethod) {
     final controller = TextEditingController();
-    
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -1467,7 +2153,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 color: const Color(0xFFD4956A).withOpacity(0.1),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.account_balance, color: Color(0xFFD4956A)),
+              child:
+                  const Icon(Icons.account_balance, color: Color(0xFFD4956A)),
             ),
             const SizedBox(width: 12),
             Text(upiMethod, style: const TextStyle(fontSize: 18)),
@@ -1519,7 +2206,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFD4956A),
             ),
-            child: const Text('Link UPI', style: TextStyle(color: Colors.white)),
+            child:
+                const Text('Link UPI', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -1549,8 +2237,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ),
             ),
           ),
-          // Spacer to maintain layout balance
-          const SizedBox(width: 120),
+          // Zone health indicator (pricing v2)
+          if (_zoneHealth != null) _buildZoneHealthIndicator(),
           // Menu button
           GestureDetector(
             onTap: () {
@@ -1559,171 +2247,251 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             child: const Icon(
               Icons.menu,
               color: Color(0xFF1A1A1A),
-            ),  
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildMapSection() {
+  /// Build zone health indicator (pricing v2 feature)
+  Widget _buildZoneHealthIndicator() {
+    if (_zoneHealth == null) return const SizedBox.shrink();
+
+    Color statusColor;
+    String statusText;
+    IconData statusIcon;
+
+    switch (_zoneHealth!.status) {
+      case ZoneHealthStatus.critical:
+        statusColor = Colors.red;
+        statusText = 'High Demand';
+        statusIcon = Icons.local_fire_department;
+        break;
+      case ZoneHealthStatus.moderate:
+        statusColor = Colors.orange;
+        statusText = 'Moderate';
+        statusIcon = Icons.trending_up;
+        break;
+      case ZoneHealthStatus.healthy:
+        statusColor = Colors.green;
+        statusText = 'Normal';
+        statusIcon = Icons.check_circle;
+        break;
+    }
+
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      child: Stack(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: statusColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: statusColor.withOpacity(0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // Google Map
-          ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: GoogleMap(
-              initialCameraPosition: CameraPosition(
-                target: LatLng(
-                  (_pickupLocation.latitude + _destinationLocation.latitude) / 2,
-                  (_pickupLocation.longitude + _destinationLocation.longitude) / 2,
-                ),
-                zoom: 12,
-              ),
-              markers: _markers,
-              polylines: _polylines,
-              onMapCreated: (GoogleMapController controller) {
-                _controller = controller;
-                if (!_mapController.isCompleted) {
-                  _mapController.complete(controller);
-                }
-                // Fit bounds after map is created and route is calculated
-                Future.delayed(const Duration(milliseconds: 500), () {
-                  if (_polylines.isNotEmpty) {
-                    _fitRouteBounds(null);
-                  }
-                });
-              },
-              myLocationEnabled: true,
-              myLocationButtonEnabled: false,
-              zoomControlsEnabled: false,
-              mapToolbarEnabled: false,
-              padding: const EdgeInsets.only(top: 120), // Padding for location inputs overlay
+          Icon(statusIcon, size: 14, color: statusColor),
+          const SizedBox(width: 4),
+          Text(
+            statusText,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: statusColor,
             ),
           ),
-          
-          // Loading indicator for route calculation
-          if (_isLoadingRoute)
-            Positioned.fill(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius: BorderRadius.circular(16),
+          if (_zoneHealth!.status == ZoneHealthStatus.critical) ...[
+            const SizedBox(width: 4),
+            Text(
+              '~${_zoneHealth!.etaP90.round()}min',
+              style: TextStyle(
+                fontSize: 10,
+                color: statusColor.withOpacity(0.8),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMapSection() {
+    final screenHeight = MediaQuery.of(context).size.height;
+    final initialSheetHeight = screenHeight * 0.40;
+
+    return Stack(
+      children: [
+        // Google Map (full-bleed)
+        Positioned.fill(
+          child: Builder(
+            builder: (context) {
+              // Watch dark mode changes and reload style if needed
+              final isDarkMode = ref.watch(settingsProvider).isDarkMode;
+              if (isDarkMode != _lastDarkMode) {
+                _lastDarkMode = isDarkMode;
+                _loadMapStyle();
+              }
+              // Calculate initial camera position - use pickup if available, else default
+              final initialTarget = _pickupLocation != null && _destinationLocation != null
+                  ? LatLng(
+                      (_pickupLocation!.latitude + _destinationLocation!.latitude) / 2,
+                      (_pickupLocation!.longitude + _destinationLocation!.longitude) / 2,
+                    )
+                  : _pickupLocation ?? const LatLng(28.4595, 77.0266); // Gurgaon default for initial map view only
+              
+              return GoogleMap(
+                initialCameraPosition: CameraPosition(
+                  target: initialTarget,
+                  zoom: 12,
                 ),
-                child: const Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(
-                        valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFD4956A)),
-                      ),
-                      SizedBox(height: 12),
-                      Text(
-                        'Calculating best route...',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
+                markers: _markers,
+                polylines: _polylines,
+                onMapCreated: (GoogleMapController controller) {
+                  _controller = controller;
+                  if (!_mapController.isCompleted) {
+                    _mapController.complete(controller);
+                  }
+                  _currentZoomLevel = 12.0;
+                  // Apply map style
+                  if (_mapStyle != null) {
+                    controller.setMapStyle(_mapStyle);
+                  }
+                  _updateDriverMarkers();
+                  // Fit bounds after map is created and route is calculated
+                  Future.delayed(const Duration(milliseconds: 500), () {
+                    if (_polylines.isNotEmpty) {
+                      _fitRouteBounds(null);
+                    }
+                  });
+                },
+                onCameraMove: (position) {
+                  _currentZoomLevel = position.zoom;
+                },
+                onCameraIdle: _updateDriverMarkers,
+                myLocationEnabled: true,
+                myLocationButtonEnabled: false,
+                zoomControlsEnabled: false,
+                mapToolbarEnabled: false,
+                // Keep route/map labels visible below top overlays and above bottom sheet.
+                padding: EdgeInsets.only(top: 220, bottom: initialSheetHeight),
+              );
+            },
+          ),
+        ),
+
+        // Loading indicator for route calculation
+        if (_isLoadingRoute)
+          Positioned.fill(
+            child: Container(
+              color: Colors.black26,
+              child: Center(
+                child: Container(
+                  width: 220,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.95),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const UberShimmer(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        UberShimmerBox(width: 160, height: 14),
+                        SizedBox(height: 10),
+                        UberShimmerBox(width: 120, height: 12),
+                        SizedBox(height: 10),
+                        UberShimmerBox(width: 180, height: 10),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          
-          // Location inputs overlay at top
-          Positioned(
-            top: 12,
-            left: 12,
-            right: 12,
-            child: _buildLocationInputs(),
           ),
-          
-          // Center on route button
-          Positioned(
-            bottom: 50,
-            right: 12,
-            child: GestureDetector(
-              onTap: () => _fitRouteBounds(null),
-              child: Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.15),
-                      blurRadius: 8,
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.center_focus_strong,
-                  size: 22,
-                  color: Color(0xFF4285F4),
-                ),
+
+        // Center on route button (kept above bottom sheet initial state)
+        Positioned(
+          bottom: initialSheetHeight + 20,
+          right: 16,
+          child: GestureDetector(
+            onTap: () => _fitRouteBounds(null),
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.15),
+                    blurRadius: 8,
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.center_focus_strong,
+                size: 22,
+                color: Color(0xFF4285F4),
               ),
             ),
           ),
-          
-          // Route info badge
-          if (_distanceText.isNotEmpty && !_isLoadingRoute)
-            Positioned(
-              bottom: 12,
-              left: 12,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
-                      blurRadius: 8,
+        ),
+
+        // Route info badge (kept above bottom sheet initial state)
+        if (_distanceText.isNotEmpty && !_isLoadingRoute)
+          Positioned(
+            bottom: initialSheetHeight + 20,
+            left: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.route, size: 16, color: Color(0xFF4285F4)),
+                  const SizedBox(width: 6),
+                  Text(
+                    _distanceText,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                      color: Color(0xFF1A1A1A),
                     ),
-                  ],
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.route, size: 16, color: Color(0xFF4285F4)),
-                    const SizedBox(width: 6),
-                    Text(
-                      _distanceText,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                        color: Color(0xFF1A1A1A),
-                      ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    width: 4,
+                    height: 4,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF888888),
+                      shape: BoxShape.circle,
                     ),
-                    const SizedBox(width: 8),
-                    Container(
-                      width: 4,
-                      height: 4,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF888888),
-                        shape: BoxShape.circle,
-                      ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.access_time,
+                      size: 16, color: Color(0xFF4285F4)),
+                  const SizedBox(width: 4),
+                  Text(
+                    _durationText,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                      color: Color(0xFF1A1A1A),
                     ),
-                    const SizedBox(width: 8),
-                    const Icon(Icons.access_time, size: 16, color: Color(0xFF4285F4)),
-                    const SizedBox(width: 4),
-                    Text(
-                      _durationText,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                        color: Color(0xFF1A1A1A),
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 
@@ -1756,7 +2524,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          
+
           // Pickup location - Tappable
           GestureDetector(
             onTap: () => _showLocationSearchSheet(isPickup: true),
@@ -1775,13 +2543,13 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      _pickupController.text.isEmpty 
-                          ? ref.tr('enter_pickup') 
+                      _pickupController.text.isEmpty
+                          ? ref.tr('enter_pickup')
                           : _pickupController.text,
                       style: TextStyle(
                         fontSize: 14,
-                        color: _pickupController.text.isEmpty 
-                            ? const Color(0xFFBDBDBD) 
+                        color: _pickupController.text.isEmpty
+                            ? const Color(0xFFBDBDBD)
                             : const Color(0xFF1A1A1A),
                       ),
                       overflow: TextOverflow.ellipsis,
@@ -1796,7 +2564,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ),
             ),
           ),
-          
+
           // Stops (Ola/Uber/Rapido style)
           ..._stops.asMap().entries.map((e) {
             final i = e.key;
@@ -1806,13 +2574,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 Row(
                   children: [
                     const SizedBox(width: 4),
-                    Container(width: 2, height: 12, color: const Color(0xFFE0E0E0)),
+                    Container(
+                        width: 2, height: 12, color: const Color(0xFFE0E0E0)),
                     const SizedBox(width: 18),
                     const Expanded(child: Divider(color: Color(0xFFE0E0E0))),
                   ],
                 ),
                 GestureDetector(
-                  onTap: () => _showLocationSearchSheet(isPickup: false, editStopAt: i),
+                  onTap: () =>
+                      _showLocationSearchSheet(isPickup: false, editStopAt: i),
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     child: Row(
@@ -1830,7 +2600,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                         Expanded(
                           child: Text(
                             stop.address,
-                            style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A1A)),
+                            style: const TextStyle(
+                                fontSize: 14, color: Color(0xFF1A1A1A)),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -1838,11 +2609,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                           onTap: () {
                             setState(() {
                               _stops.removeAt(i);
-                              ref.read(rideBookingProvider.notifier).setStops(_stops);
+                              ref
+                                  .read(rideBookingProvider.notifier)
+                                  .setStops(_stops);
                             });
-                            if (_destinationController.text.isNotEmpty) _calculateRoute();
+                            _tryCalculateRoute();
                           },
-                          child: const Icon(Icons.close, size: 18, color: Color(0xFFBDBDBD)),
+                          child: const Icon(Icons.close,
+                              size: 18, color: Color(0xFFBDBDBD)),
                         ),
                       ],
                     ),
@@ -1854,25 +2628,30 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           // Add stop button (max 3 stops like Uber/Ola)
           if (_stops.length < 3)
             GestureDetector(
-              onTap: () => _showLocationSearchSheet(isPickup: false, addStopAt: _stops.length),
+              onTap: () => _showLocationSearchSheet(
+                  isPickup: false, addStopAt: _stops.length),
               child: Container(
                 padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Row(
                   children: [
                     const SizedBox(width: 4),
-                    Container(width: 2, height: 12, color: const Color(0xFFE0E0E0)),
+                    Container(
+                        width: 2, height: 12, color: const Color(0xFFE0E0E0)),
                     const SizedBox(width: 18),
-                    const Icon(Icons.add_circle_outline, size: 18, color: Color(0xFF4285F4)),
+                    const Icon(Icons.add_circle_outline,
+                        size: 18, color: Color(0xFF4285F4)),
                     const SizedBox(width: 8),
                     Text(
                       'Add stop',
-                      style: TextStyle(fontSize: 14, color: const Color(0xFF4285F4).withOpacity(0.9)),
+                      style: TextStyle(
+                          fontSize: 14,
+                          color: const Color(0xFF4285F4).withOpacity(0.9)),
                     ),
                   ],
                 ),
               ),
             ),
-          
+
           // Divider with connecting line (before destination)
           Row(
             children: [
@@ -1888,7 +2667,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ),
             ],
           ),
-          
+
           // Destination - Tappable
           GestureDetector(
             onTap: () => _showLocationSearchSheet(isPickup: false),
@@ -1904,13 +2683,13 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      _destinationController.text.isEmpty 
-                          ? ref.tr('enter_destination') 
+                      _destinationController.text.isEmpty
+                          ? ref.tr('enter_destination')
                           : _destinationController.text,
                       style: TextStyle(
                         fontSize: 14,
-                        color: _destinationController.text.isEmpty 
-                            ? const Color(0xFFBDBDBD) 
+                        color: _destinationController.text.isEmpty
+                            ? const Color(0xFFBDBDBD)
                             : const Color(0xFF1A1A1A),
                       ),
                       overflow: TextOverflow.ellipsis,
@@ -1931,8 +2710,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
 
   Widget _buildBottomSheet(ScrollController scrollController) {
-    final bool showBookButton = _cabTypes.isNotEmpty && _destinationController.text.isNotEmpty;
-    
+    final bool showBookButton =
+        _cabTypes.isNotEmpty && _destinationController.text.isNotEmpty;
+
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -1951,161 +2731,255 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           Expanded(
             child: ListView(
               controller: scrollController,
-              padding: EdgeInsets.fromLTRB(20, 12, 20, showBookButton ? 10 : 24),
+              padding:
+                  EdgeInsets.fromLTRB(20, 12, 20, showBookButton ? 10 : 24),
               physics: const ClampingScrollPhysics(),
               children: [
                 // Handle
                 Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE0E0E0),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE0E0E0),
+                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  
-                  // Select Ride header with route info
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          const Text(
-                            'Services',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF1A1A1A),
+                ),
+                const SizedBox(height: 16),
+
+                // Select Ride header with route info
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          'Services',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF1A1A1A),
+                          ),
+                        ),
+                        if (_isLoadingPricing)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 8),
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             ),
                           ),
-                          if (_isLoadingPricing)
-                            const Padding(
-                              padding: EdgeInsets.only(left: 8),
-                              child: SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                            ),
-                        ],
-                      ),
-                      if (_distanceText.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF5F0EA),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.route, size: 12, color: const Color(0xFFD4956A)),
-                              const SizedBox(width: 4),
-                              Text(
-                                _distanceText,
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: Color(0xFFD4956A),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _durationText.isNotEmpty 
-                              ? 'Estimated arrival: $_durationText'
-                              : 'Select a service to get started',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF888888),
-                          ),
-                        ),
-                      ),
-                      // Surge pricing indicator
-                      if (_isSurgeActive)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: Colors.orange.shade100,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.orange.shade300),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.bolt, size: 12, color: Colors.orange.shade700),
-                              const SizedBox(width: 2),
-                              Text(
-                                '${_surgeMultiplier}x',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.orange.shade700,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  // Show destination prompt when no destination is set
-                  if (_destinationController.text.isEmpty)
-                    GestureDetector(
-                      onTap: () => _showLocationSearchSheet(isPickup: false),
-                      child: Container(
-                        padding: const EdgeInsets.all(24),
+                      ],
+                    ),
+                    if (_distanceText.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
                           color: const Color(0xFFF5F0EA),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: const Color(0xFFD4956A).withOpacity(0.3)),
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        child: Column(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.add_location_alt, size: 48, color: const Color(0xFFD4956A).withOpacity(0.7)),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'Where do you want to go?',
-                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              'Tap to enter your destination',
-                              style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                            Icon(Icons.route,
+                                size: 12, color: const Color(0xFFD4956A)),
+                            const SizedBox(width: 4),
+                            Text(
+                              _distanceText,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                color: Color(0xFFD4956A),
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ],
                         ),
                       ),
-                    )
-                  // Loading state
-                  else if (_isLoadingPricing && _cabTypes.isEmpty)
-                    const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(40),
-                        child: Column(
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _durationText.isNotEmpty
+                            ? 'Estimated arrival: $_durationText'
+                            : 'Select a service to get started',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF888888),
+                        ),
+                      ),
+                    ),
+                    // Surge pricing indicator
+                    if (_isSurgeActive)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.shade100,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.orange.shade300),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            CircularProgressIndicator(),
-                            SizedBox(height: 16),
-                            Text('Loading services...', style: TextStyle(color: Color(0xFF888888))),
+                            Icon(Icons.bolt,
+                                size: 12, color: Colors.orange.shade700),
+                            const SizedBox(width: 2),
+                            Text(
+                              '${_surgeMultiplier}x',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.orange.shade700,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ],
                         ),
                       ),
-                    )
-                  else
-                    // Cab options list
-                    ..._cabTypes.map((cab) => _buildCabOption(cab)),
-                  
+                    // Launch mode savings indicator
+                    if (_riderSubsidy?.isActive == true && _savingsAmount > 0)
+                      Container(
+                        margin: const EdgeInsets.only(left: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade100,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.green.shade300),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.local_offer,
+                                size: 12, color: Colors.green.shade700),
+                            const SizedBox(width: 2),
+                            Text(
+                              'Save ₹${_savingsAmount.round()}',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.green.shade700,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+
+                // Launch mode promotional banner
+                if (_marketplaceMode == MarketplaceMode.launch &&
+                    _riderSubsidy?.isActive == true)
+                  Container(
+                    margin: const EdgeInsets.only(top: 12),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Colors.green.shade50, Colors.green.shade100],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.green.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.green.shade400,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.celebration,
+                              color: Colors.white, size: 20),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Launch Offer Active!',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.green.shade800,
+                                ),
+                              ),
+                              Text(
+                                '${(_riderSubsidy!.subsidyPct * 100).round()}% off on all rides (up to ₹${_riderSubsidy!.maxSubsidyCap.round()})',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.green.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 16),
+
+                // Show destination prompt when no destination is set
+                if (_destinationController.text.isEmpty)
+                  GestureDetector(
+                    onTap: () => _showLocationSearchSheet(isPickup: false),
+                    child: Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F0EA),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                            color: const Color(0xFFD4956A).withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(Icons.add_location_alt,
+                              size: 48,
+                              color: const Color(0xFFD4956A).withOpacity(0.7)),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Where do you want to go?',
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF1A1A1A)),
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Tap to enter your destination',
+                            style: TextStyle(
+                                fontSize: 12, color: Color(0xFF888888)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                // Loading state
+                else if (_isLoadingPricing && _cabTypes.isEmpty)
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(40),
+                      child: Column(
+                        children: [
+                          CircularProgressIndicator(),
+                          SizedBox(height: 16),
+                          Text('Loading services...',
+                              style: TextStyle(color: Color(0xFF888888))),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  // Cab options list
+                  ..._cabTypes.map((cab) => _buildCabOption(cab)),
+
                 if (showBookButton) ...[
                   const SizedBox(height: 12),
                   _buildDriverCountSelector(),
@@ -2115,7 +2989,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ],
             ),
           ),
-          
+
           // Fixed Book Ride button at bottom
           if (showBookButton)
             Container(
@@ -2136,16 +3010,52 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       ),
     );
   }
-  
+
   // Service cards shown before destination is set
   List<Widget> _buildServiceCards() {
     final services = [
-      {'id': 'bike_rescue', 'name': 'Rescue Service', 'desc': 'Quick two-wheeler pickup & drop', 'icon': Icons.two_wheeler, 'color': const Color(0xFFD4956A)},
-      {'id': 'auto', 'name': 'Auto', 'desc': 'Budget-friendly auto rickshaw', 'icon': Icons.electric_rickshaw, 'color': const Color(0xFF4CAF50)},
-      {'id': 'cab_mini', 'name': 'Cab Mini', 'desc': 'Compact cars for city rides', 'icon': Icons.directions_car, 'color': const Color(0xFF2196F3)},
-      {'id': 'cab_xl', 'name': 'Cab XL', 'desc': 'Spacious SUVs for groups', 'icon': Icons.airport_shuttle, 'color': const Color(0xFF7B1FA2)},
-      {'id': 'cab_premium', 'name': 'Cab Premium', 'desc': 'Luxury sedans with top drivers', 'icon': Icons.diamond, 'color': const Color(0xFFFF9800)},
-      {'id': 'personal_driver', 'name': 'Personal Driver', 'desc': 'Hire a driver for your car', 'icon': Icons.person, 'color': const Color(0xFF455A64)},
+      {
+        'id': 'bike_rescue',
+        'name': 'Rescue Service',
+        'desc': 'Quick two-wheeler pickup & drop',
+        'icon': Icons.two_wheeler,
+        'color': const Color(0xFFD4956A)
+      },
+      {
+        'id': 'auto',
+        'name': 'Auto',
+        'desc': 'Budget-friendly auto rickshaw',
+        'icon': Icons.electric_rickshaw,
+        'color': const Color(0xFF4CAF50)
+      },
+      {
+        'id': 'cab_mini',
+        'name': 'Cab Mini',
+        'desc': 'Compact cars for city rides',
+        'icon': Icons.directions_car,
+        'color': const Color(0xFF2196F3)
+      },
+      {
+        'id': 'cab_xl',
+        'name': 'Cab XL',
+        'desc': 'Spacious SUVs for groups',
+        'icon': Icons.airport_shuttle,
+        'color': const Color(0xFF7B1FA2)
+      },
+      {
+        'id': 'cab_premium',
+        'name': 'Cab Premium',
+        'desc': 'Luxury sedans with top drivers',
+        'icon': Icons.diamond,
+        'color': const Color(0xFFFF9800)
+      },
+      {
+        'id': 'personal_driver',
+        'name': 'Personal Driver',
+        'desc': 'Hire a driver for your car',
+        'icon': Icons.person,
+        'color': const Color(0xFF455A64)
+      },
     ];
 
     return services.map((svc) {
@@ -2161,10 +3071,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
-              color: isSelected ? (svc['color'] as Color).withOpacity(0.08) : Colors.white,
+              color: isSelected
+                  ? (svc['color'] as Color).withOpacity(0.08)
+                  : Colors.white,
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
-                color: isSelected ? (svc['color'] as Color) : const Color(0xFFE8E0D4),
+                color: isSelected
+                    ? (svc['color'] as Color)
+                    : const Color(0xFFE8E0D4),
                 width: isSelected ? 1.5 : 1,
               ),
             ),
@@ -2177,7 +3091,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     color: (svc['color'] as Color).withOpacity(0.12),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Icon(svc['icon'] as IconData, color: svc['color'] as Color, size: 24),
+                  child: Icon(svc['icon'] as IconData,
+                      color: svc['color'] as Color, size: 24),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -2186,17 +3101,22 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     children: [
                       Text(
                         svc['name'] as String,
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF1A1A1A)),
                       ),
                       const SizedBox(height: 2),
                       Text(
                         svc['desc'] as String,
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                        style: const TextStyle(
+                            fontSize: 12, color: Color(0xFF888888)),
                       ),
                     ],
                   ),
                 ),
-                Icon(Icons.arrow_forward_ios, size: 14, color: const Color(0xFFBDBDBD)),
+                Icon(Icons.arrow_forward_ios,
+                    size: 14, color: const Color(0xFFBDBDBD)),
               ],
             ),
           ),
@@ -2208,7 +3128,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   Widget _buildCabOption(CabType cab) {
     final isSelected = _selectedCabType == cab.id;
     final fare = _cabFares[cab.id];
-    
+
     return GestureDetector(
       onTap: () {
         setState(() => _selectedCabType = cab.id);
@@ -2221,7 +3141,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           color: isSelected ? const Color(0xFFFAF8F5) : Colors.white,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: isSelected ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
+            color:
+                isSelected ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
             width: isSelected ? 2 : 1,
           ),
           boxShadow: isSelected
@@ -2241,7 +3162,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               width: 70,
               height: 56,
               decoration: BoxDecoration(
-                color: isSelected 
+                color: isSelected
                     ? const Color(0xFFD4956A).withOpacity(0.08)
                     : const Color(0xFFF8F8F8),
                 borderRadius: BorderRadius.circular(12),
@@ -2253,14 +3174,16 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   fit: BoxFit.contain,
                   errorBuilder: (context, error, stackTrace) => Icon(
                     cab.icon,
-                    color: isSelected ? const Color(0xFFD4956A) : const Color(0xFF666666),
+                    color: isSelected
+                        ? const Color(0xFFD4956A)
+                        : const Color(0xFF666666),
                     size: 28,
                   ),
                 ),
               ),
             ),
             const SizedBox(width: 12),
-            
+
             // Cab details
             Expanded(
               child: Column(
@@ -2273,15 +3196,18 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w600,
-                          color: isSelected ? const Color(0xFFD4956A) : const Color(0xFF1A1A1A),
+                          color: isSelected
+                              ? const Color(0xFFD4956A)
+                              : const Color(0xFF1A1A1A),
                         ),
                       ),
                       if (cab.badge != null) ...[
                         const SizedBox(width: 8),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: cab.id == 'auto' 
+                            color: cab.id == 'auto'
                                 ? const Color(0xFFE8F5E9)
                                 : cab.id == 'cab_premium'
                                     ? const Color(0xFFFFF3E0)
@@ -2293,7 +3219,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                             style: TextStyle(
                               fontSize: 9,
                               fontWeight: FontWeight.w600,
-                              color: cab.id == 'auto' 
+                              color: cab.id == 'auto'
                                   ? const Color(0xFF4CAF50)
                                   : cab.id == 'cab_premium'
                                       ? const Color(0xFFFF9800)
@@ -2347,7 +3273,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 ],
               ),
             ),
-            
+
             // Price
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -2358,7 +3284,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w700,
-                      color: isSelected ? const Color(0xFFD4956A) : const Color(0xFF1A1A1A),
+                      color: isSelected
+                          ? const Color(0xFFD4956A)
+                          : const Color(0xFF1A1A1A),
                     ),
                   )
                 else
@@ -2383,13 +3311,17 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       ),
     );
   }
-  
+
   Widget _buildFareBreakdown() {
     final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType);
     final fare = _cabFares[_selectedCabType] ?? 0;
-    final distanceKm = _distanceText.isNotEmpty ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0 : 0;
-    final durationMin = _durationText.isNotEmpty ? double.tryParse(_durationText.replaceAll(' min', '')) ?? 0 : 0;
-    
+    final distanceKm = _distanceText.isNotEmpty
+        ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0
+        : 0;
+    final durationMin = _durationText.isNotEmpty
+        ? double.tryParse(_durationText.replaceAll(' min', '')) ?? 0
+        : 0;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -2429,10 +3361,13 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          _buildFareRow('Base Fare', '₹${selectedCab.baseFare.toStringAsFixed(0)}'),
-          _buildFareRow('Distance (${distanceKm.toStringAsFixed(1)} km × ₹${selectedCab.perKmRate.toStringAsFixed(0)})', 
+          _buildFareRow(
+              'Base Fare', '₹${selectedCab.baseFare.toStringAsFixed(0)}'),
+          _buildFareRow(
+              'Distance (${distanceKm.toStringAsFixed(1)} km × ₹${selectedCab.perKmRate.toStringAsFixed(0)})',
               '₹${(distanceKm * selectedCab.perKmRate).toStringAsFixed(0)}'),
-          _buildFareRow('Time (${durationMin.toStringAsFixed(0)} min × ₹${selectedCab.perMinRate.toStringAsFixed(0)})', 
+          _buildFareRow(
+              'Time (${durationMin.toStringAsFixed(0)} min × ₹${selectedCab.perMinRate.toStringAsFixed(0)})',
               '₹${(durationMin * selectedCab.perMinRate).toStringAsFixed(0)}'),
           const Divider(height: 16),
           Row(
@@ -2460,7 +3395,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       ),
     );
   }
-  
+
   Widget _buildFareRow(String label, String value) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -2486,7 +3421,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       ),
     );
   }
-  
+
   static const double _intercityThresholdKm = 50;
 
   Widget _buildBookRideButton() {
@@ -2502,7 +3437,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           showDialog(
             context: context,
             builder: (ctx) => AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
               title: Row(
                 children: const [
                   Icon(Icons.info_outline, color: Color(0xFFD4956A), size: 28),
@@ -2525,12 +3461,24 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           return;
         }
 
-        // Update provider with selected cab type
+        // Update provider with selected cab type (including pricing v2 data)
+        final isEcoPickup = selectedCab.id == 'eco_pickup';
         ref.read(rideBookingProvider.notifier).setCabType(
-          id: selectedCab.id,
-          name: selectedCab.name,
-          fare: fare,
-        );
+              id: selectedCab.id,
+              name: selectedCab.name,
+              fare: fare,
+              originalFare: _riderSubsidy?.isActive == true
+                  ? fare / (1 - _riderSubsidy!.subsidyPct)
+                  : fare,
+              subsidyAmount: _savingsAmount,
+              isSubsidyApplied: _riderSubsidy?.isActive ?? false,
+              isEcoPickup: isEcoPickup,
+              ecoPickupAddress:
+                  isEcoPickup ? _ecoPickup?.suggestedPickupAddress : null,
+              ecoPickupLocation: isEcoPickup && _ecoPickup != null
+                  ? LatLng(_ecoPickup!.suggestedLat, _ecoPickup!.suggestedLng)
+                  : null,
+            );
         // Set driver count
         ref.read(rideBookingProvider.notifier).setDriverCount(_driverCount);
         // Navigate to payment screen
@@ -2564,7 +3512,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             ),
             const SizedBox(width: 10),
             Text(
-              fare != null 
+              fare != null
                   ? '${ref.tr('book')} ${selectedCab.name} • ₹${fare.toStringAsFixed(0)}'
                   : '${ref.tr('book')} ${selectedCab.name}',
               style: const TextStyle(
@@ -2619,20 +3567,27 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                           ? () => setState(() => _driverCount--)
                           : null,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
-                          color: _needExtraDrivers && _driverCount > 1 ? const Color(0xFFD4956A) : const Color(0xFFE0E0E0),
-                          borderRadius: const BorderRadius.horizontal(left: Radius.circular(7)),
+                          color: _needExtraDrivers && _driverCount > 1
+                              ? const Color(0xFFD4956A)
+                              : const Color(0xFFE0E0E0),
+                          borderRadius: const BorderRadius.horizontal(
+                              left: Radius.circular(7)),
                         ),
                         child: Icon(
                           Icons.remove,
                           size: 18,
-                          color: _needExtraDrivers && _driverCount > 1 ? Colors.white : Colors.grey,
+                          color: _needExtraDrivers && _driverCount > 1
+                              ? Colors.white
+                              : Colors.grey,
                         ),
                       ),
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 6),
                       color: Colors.white,
                       child: Text(
                         '$_driverCount',
@@ -2647,10 +3602,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                           ? () => setState(() => _driverCount++)
                           : null,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
-                          color: _needExtraDrivers ? const Color(0xFFD4956A) : const Color(0xFFE0E0E0),
-                          borderRadius: const BorderRadius.horizontal(right: Radius.circular(7)),
+                          color: _needExtraDrivers
+                              ? const Color(0xFFD4956A)
+                              : const Color(0xFFE0E0E0),
+                          borderRadius: const BorderRadius.horizontal(
+                              right: Radius.circular(7)),
                         ),
                         child: Icon(
                           Icons.add,
@@ -2713,7 +3672,8 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<_LocationSearchSheet> createState() => _LocationSearchSheetState();
+  ConsumerState<_LocationSearchSheet> createState() =>
+      _LocationSearchSheetState();
 }
 
 class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
@@ -2734,7 +3694,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   void _loadInitialSuggestions() {
     final savedLocationsState = ref.read(savedLocationsProvider);
     final suggestions = <_LocationSuggestion>[];
-    
+
     // Add "Current Location" option at top
     suggestions.add(_LocationSuggestion(
       name: 'Current Location',
@@ -2742,7 +3702,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       latLng: null,
       icon: Icons.my_location,
     ));
-    
+
     // Add Home if saved
     if (savedLocationsState.homeLocation != null) {
       final home = savedLocationsState.homeLocation!;
@@ -2754,7 +3714,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         icon: Icons.home_rounded,
       ));
     }
-    
+
     // Add Work if saved
     if (savedLocationsState.workLocation != null) {
       final work = savedLocationsState.workLocation!;
@@ -2766,7 +3726,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         icon: Icons.work_rounded,
       ));
     }
-    
+
     // Add favorites
     for (final fav in savedLocationsState.favorites) {
       suggestions.add(_LocationSuggestion(
@@ -2777,15 +3737,14 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         icon: Icons.favorite_rounded,
       ));
     }
-    
+
     // Add recent locations (up to 5)
     for (final recent in savedLocationsState.recentLocations.take(5)) {
       // Skip if already in suggestions (Home/Work/Favorites)
-      final alreadyAdded = suggestions.any((s) => 
-        s.latLng != null && 
-        recent.latLng.latitude == s.latLng!.latitude && 
-        recent.latLng.longitude == s.latLng!.longitude
-      );
+      final alreadyAdded = suggestions.any((s) =>
+          s.latLng != null &&
+          recent.latLng.latitude == s.latLng!.latitude &&
+          recent.latLng.longitude == s.latLng!.longitude);
       if (!alreadyAdded) {
         suggestions.add(_LocationSuggestion(
           name: recent.name,
@@ -2796,7 +3755,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         ));
       }
     }
-    
+
     // Fallback: if no saved locations, show some defaults
     if (suggestions.length <= 1) {
       suggestions.addAll([
@@ -2812,7 +3771,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         ),
       ]);
     }
-    
+
     setState(() => _suggestions = suggestions);
   }
 
@@ -2828,7 +3787,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   void _onSearchChanged(String query) {
     // Cancel previous debounce timer
     _debounce?.cancel();
-    
+
     if (query.isEmpty) {
       _loadInitialSuggestions();
       setState(() => _isLoading = false);
@@ -2837,7 +3796,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
     // Show loading
     setState(() => _isLoading = true);
-    
+
     // Debounce the search - reduced to 300ms for faster response
     _debounce = Timer(const Duration(milliseconds: 300), () {
       _searchLocation(query);
@@ -2847,7 +3806,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   Future<void> _searchLocation(String query) async {
     try {
       debugPrint('🔍 Searching for: "$query" (length: ${query.length})');
-      
+
       // Use device location for search bias (critical for relevant suggestions in user's city)
       // Fallback: widget.biasLocation (parent's pickup/destination) -> ride booking -> India center
       LatLng? searchBiasLocation;
@@ -2857,7 +3816,8 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           timeLimit: const Duration(seconds: 3),
         );
         searchBiasLocation = LatLng(position.latitude, position.longitude);
-        debugPrint('📍 Using device location for search bias: $searchBiasLocation');
+        debugPrint(
+            '📍 Using device location for search bias: $searchBiasLocation');
       } catch (e) {
         debugPrint('📍 Geolocator failed, using fallback for search bias: $e');
         searchBiasLocation = widget.biasLocation;
@@ -2868,46 +3828,50 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               : booking.pickupLocation;
         }
         if (searchBiasLocation == null) {
-          searchBiasLocation = const LatLng(25.45, 81.85); // Prayagraj/Allahabad as India fallback
+          searchBiasLocation = const LatLng(
+              25.45, 81.85); // Prayagraj/Allahabad as India fallback
           debugPrint('📍 Using India fallback for search bias');
         }
       }
 
-      final placesResults = await _placesService.searchPlacesWithFallback(query, location: searchBiasLocation);
+      final placesResults = await _placesService.searchPlacesWithFallback(query,
+          location: searchBiasLocation);
       debugPrint('🔍 Places API returned ${placesResults.length} results');
-      
+
       if (placesResults.isNotEmpty) {
         setState(() {
-          _suggestions = placesResults.map((place) => _LocationSuggestion(
-            name: place.name,
-            address: place.address,
-            latLng: place.latLng,
-            placeId: place.placeId,
-          )).toList();
+          _suggestions = placesResults
+              .map((place) => _LocationSuggestion(
+                    name: place.name,
+                    address: place.address,
+                    latLng: place.latLng,
+                    placeId: place.placeId,
+                  ))
+              .toList();
           _isLoading = false;
         });
         return;
       }
-      
+
       // Fallback to geocoding if Places API returns nothing
       debugPrint('📍 Places API empty, falling back to geocoding...');
-      
+
       try {
         final List<Location> locations = await locationFromAddress(
           query,
           localeIdentifier: 'en_IN',
         );
-        
+
         if (locations.isNotEmpty) {
           final suggestions = <_LocationSuggestion>[];
-          
+
           for (final location in locations.take(5)) {
             try {
               final placemarks = await placemarkFromCoordinates(
                 location.latitude,
                 location.longitude,
               );
-              
+
               if (placemarks.isNotEmpty) {
                 final place = placemarks.first;
                 final name = place.name ?? place.street ?? query;
@@ -2916,7 +3880,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                   place.locality,
                   place.administrativeArea,
                 ].where((e) => e != null && e.isNotEmpty).join(', ');
-                
+
                 suggestions.add(_LocationSuggestion(
                   name: name,
                   address: address.isNotEmpty ? address : 'India',
@@ -2926,12 +3890,13 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             } catch (_) {
               suggestions.add(_LocationSuggestion(
                 name: query,
-                address: '${location.latitude.toStringAsFixed(4)}, ${location.longitude.toStringAsFixed(4)}',
+                address:
+                    '${location.latitude.toStringAsFixed(4)}, ${location.longitude.toStringAsFixed(4)}',
                 latLng: LatLng(location.latitude, location.longitude),
               ));
             }
           }
-          
+
           if (suggestions.isNotEmpty) {
             setState(() {
               _suggestions = suggestions;
@@ -2943,7 +3908,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       } catch (e) {
         debugPrint('Geocoding fallback error: $e');
       }
-      
+
       // No results found
       setState(() {
         _suggestions = [
@@ -2956,7 +3921,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         ];
         _isLoading = false;
       });
-      
     } catch (e) {
       debugPrint('Search error: $e');
       setState(() {
@@ -2975,15 +3939,15 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
   Future<void> _getCurrentLocation() async {
     setState(() => _isLoading = true);
-    
+
     try {
       // Check permission
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-      
-      if (permission == LocationPermission.denied || 
+
+      if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -2993,18 +3957,18 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         setState(() => _isLoading = false);
         return;
       }
-      
+
       // Get current position
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      
+
       // Get address from coordinates
       final placemarks = await placemarkFromCoordinates(
         position.latitude,
         position.longitude,
       );
-      
+
       String address = 'Current Location';
       if (placemarks.isNotEmpty) {
         final place = placemarks.first;
@@ -3015,16 +3979,15 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           place.locality,
         ].where((e) => e != null && e.isNotEmpty).take(3).join(', ');
       }
-      
+
       widget.onLocationSelected(
         address,
         LatLng(position.latitude, position.longitude),
       );
-      
+
       if (mounted) {
         Navigator.pop(context);
       }
-      
     } catch (e) {
       debugPrint('Error getting current location: $e');
       if (mounted) {
@@ -3056,7 +4019,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          
+
           // Header
           Padding(
             padding: const EdgeInsets.all(16),
@@ -3069,7 +4032,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                 const SizedBox(width: 16),
                 Expanded(
                   child: Text(
-                    widget.isPickup ? 'Enter pickup location' : 'Enter destination',
+                    widget.isPickup
+                        ? 'Enter pickup location'
+                        : 'Enter destination',
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
@@ -3080,7 +4045,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               ],
             ),
           ),
-          
+
           // Search input
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -3103,7 +4068,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                   hintStyle: const TextStyle(color: Color(0xFFBDBDBD)),
                   prefixIcon: Icon(
                     widget.isPickup ? Icons.circle : Icons.location_on,
-                    color: widget.isPickup ? const Color(0xFFD4956A) : const Color(0xFF4CAF50),
+                    color: widget.isPickup
+                        ? const Color(0xFFD4956A)
+                        : const Color(0xFF4CAF50),
                     size: 18,
                   ),
                   suffixIcon: _searchController.text.isNotEmpty
@@ -3112,18 +4079,20 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                             _searchController.clear();
                             _onSearchChanged('');
                           },
-                          child: const Icon(Icons.clear, color: Color(0xFFBDBDBD)),
+                          child:
+                              const Icon(Icons.clear, color: Color(0xFFBDBDBD)),
                         )
                       : null,
                   border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 ),
               ),
             ),
           ),
-          
+
           const SizedBox(height: 12),
-          
+
           // Use Current Location button
           if (widget.isPickup)
             Padding(
@@ -3131,11 +4100,13 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               child: GestureDetector(
                 onTap: _getCurrentLocation,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
                   decoration: BoxDecoration(
                     color: const Color(0xFFF0F8FF),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF4285F4).withOpacity(0.3)),
+                    border: Border.all(
+                        color: const Color(0xFF4285F4).withOpacity(0.3)),
                   ),
                   child: Row(
                     children: [
@@ -3180,16 +4151,18 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                 ),
               ),
             ),
-          
+
           const SizedBox(height: 12),
-          
+
           // Section header
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                _searchController.text.isEmpty ? 'Recent Locations' : 'Search Results',
+                _searchController.text.isEmpty
+                    ? 'Recent Locations'
+                    : 'Search Results',
                 style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
@@ -3198,9 +4171,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               ),
             ),
           ),
-          
+
           const SizedBox(height: 8),
-          
+
           // Suggestions list
           Expanded(
             child: _isLoading
@@ -3209,7 +4182,8 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         CircularProgressIndicator(
-                          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFD4956A)),
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Color(0xFFD4956A)),
                         ),
                         SizedBox(height: 16),
                         Text(
@@ -3224,7 +4198,8 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(Icons.search_off, size: 48, color: Colors.grey[400]),
+                            Icon(Icons.search_off,
+                                size: 48, color: Colors.grey[400]),
                             const SizedBox(height: 16),
                             Text(
                               'No locations found',
@@ -3233,7 +4208,8 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                             const SizedBox(height: 8),
                             Text(
                               'Try a different search term',
-                              style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.grey[400]),
                             ),
                           ],
                         ),
@@ -3259,22 +4235,25 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           _getCurrentLocation();
           return;
         }
-        
+
         // If we have a placeId but no coordinates, fetch them
         if (suggestion.latLng == null && suggestion.placeId != null) {
           setState(() => _isLoading = true);
-          LatLng? latLng = await _placesService.getPlaceDetails(suggestion.placeId!);
-          
+          LatLng? latLng =
+              await _placesService.getPlaceDetails(suggestion.placeId!);
+
           // Fallback: try geocoding if Place Details API fails
           if (latLng == null) {
-            debugPrint('⚠️ Place Details failed, falling back to geocoding for: ${suggestion.name}');
+            debugPrint(
+                '⚠️ Place Details failed, falling back to geocoding for: ${suggestion.name}');
             try {
               final locations = await locationFromAddress(
                 '${suggestion.name}, ${suggestion.address}',
                 localeIdentifier: 'en_IN',
               );
               if (locations.isNotEmpty) {
-                latLng = LatLng(locations.first.latitude, locations.first.longitude);
+                latLng =
+                    LatLng(locations.first.latitude, locations.first.longitude);
               }
             } catch (e) {
               debugPrint('Geocoding fallback also failed: $e');
@@ -3282,18 +4261,18 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           }
 
           setState(() => _isLoading = false);
-          
+
           if (latLng != null) {
             // Save to recent locations if this is a destination selection
             if (!widget.isPickup) {
               ref.read(savedLocationsProvider.notifier).addRecentLocation(
-                name: suggestion.name,
-                address: suggestion.address,
-                location: latLng,
-                placeId: suggestion.placeId,
-              );
+                    name: suggestion.name,
+                    address: suggestion.address,
+                    location: latLng,
+                    placeId: suggestion.placeId,
+                  );
             }
-            
+
             widget.onLocationSelected(
               '${suggestion.name}, ${suggestion.address}',
               latLng,
@@ -3302,29 +4281,33 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           } else {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Could not get location coordinates. Try a different search.')),
+                const SnackBar(
+                    content: Text(
+                        'Could not get location coordinates. Try a different search.')),
               );
             }
           }
           return;
         }
-        
+
         if (suggestion.latLng == null) {
           // Location not found, try searching again
           _searchLocation(suggestion.name);
           return;
         }
-        
+
         // Save to recent locations if this is a destination selection (not pickup)
-        if (!widget.isPickup && suggestion.latLng != null && suggestion.name != 'Current Location') {
+        if (!widget.isPickup &&
+            suggestion.latLng != null &&
+            suggestion.name != 'Current Location') {
           ref.read(savedLocationsProvider.notifier).addRecentLocation(
-            name: suggestion.name,
-            address: suggestion.address,
-            location: suggestion.latLng!,
-            placeId: suggestion.placeId,
-          );
+                name: suggestion.name,
+                address: suggestion.address,
+                location: suggestion.latLng!,
+                placeId: suggestion.placeId,
+              );
         }
-        
+
         widget.onLocationSelected(
           '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}',
           suggestion.latLng,
@@ -3421,4 +4404,39 @@ class _LocationSuggestion {
     this.icon,
     this.placeId,
   });
+}
+
+class _NearbyDriver {
+  final String id;
+  final LatLng position;
+  final String type;
+  final String name;
+  final double rating;
+  final double heading;
+
+  const _NearbyDriver({
+    required this.id,
+    required this.position,
+    required this.type,
+    required this.name,
+    required this.rating,
+    required this.heading,
+  });
+}
+
+class _DriverVisualCluster {
+  final LatLng center;
+  final List<_NearbyDriver> drivers;
+
+  const _DriverVisualCluster({
+    required this.center,
+    required this.drivers,
+  });
+
+  int get count => drivers.length;
+
+  String get clusterId {
+    final ids = drivers.map((d) => d.id).toList()..sort();
+    return ids.join('_');
+  }
 }
