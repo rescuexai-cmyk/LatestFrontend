@@ -23,6 +23,7 @@ import '../../features/driver/presentation/screens/driver_home_screen.dart';
 import '../../features/driver/presentation/screens/driver_active_ride_screen.dart';
 import '../../features/driver/presentation/screens/driver_onboarding_screen.dart';
 import '../../features/driver/presentation/screens/driver_welcome_screen.dart';
+import '../../features/driver/presentation/screens/driver_document_management_screen.dart';
 import '../../features/settings/presentation/screens/server_config_screen.dart';
 import '../services/server_config_service.dart';
 import 'app_routes.dart';
@@ -232,6 +233,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: AppRoutes.driverWelcome,
         name: 'driverWelcome',
         builder: (context, state) => const DriverWelcomeScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.driverDocuments,
+        name: 'driverDocuments',
+        builder: (context, state) => const DriverDocumentManagementScreen(),
       ),
       GoRoute(
         path: AppRoutes.driverHome,

@@ -70,7 +70,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Could not check driver status: ${e.toString().replaceAll('Exception: ', '')}'),
+            content: Text('${ref.tr('driver_status_error')}: ${e.toString().replaceAll('Exception: ', '')}'),
             backgroundColor: Colors.red,
           ),
         );
@@ -285,9 +285,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       height: 22,
                       child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF5C5C5C)),
                     )
-                  : const Text(
-                      "Open Drivers' App",
-                      style: TextStyle(
+                  : Text(
+                      ref.tr('open_drivers_app'),
+                      style: const TextStyle(
                         color: Color(0xFF5C5C5C),
                         fontSize: 16,
                         fontWeight: FontWeight.w500,
@@ -305,9 +305,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       onTap: () {
         showSwitchAccountSheet(context);
       },
-      child: const Text(
-        'Switch Account?',
-        style: TextStyle(
+      child: Text(
+        ref.tr('switch_account'),
+        style: const TextStyle(
           fontSize: 15,
           color: Color(0xFF5C5C5C),
           decoration: TextDecoration.underline,

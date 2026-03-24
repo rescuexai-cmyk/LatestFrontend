@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
@@ -14,10 +15,16 @@ import '../../../../core/services/api_client.dart';
 import '../../../../core/services/server_config_service.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
+import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/widgets/uber_shimmer.dart';
+import '../../../../core/models/pricing_v2.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../providers/driver_rides_provider.dart';
+import '../widgets/incoming_ride_fullscreen.dart';
+import '../ride_stack/ride_stack_sheet.dart';
+import '../ride_stack/state/ride_queue_provider.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
   const DriverHomeScreen({super.key});
@@ -26,7 +33,8 @@ class DriverHomeScreen extends ConsumerStatefulWidget {
   ConsumerState<DriverHomeScreen> createState() => _DriverHomeScreenState();
 }
 
-class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with WidgetsBindingObserver {
+class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
+    with WidgetsBindingObserver {
   // SharedPreferences keys for driver session persistence
   static const String _prefIsOnline = 'driver_is_online';
   static const String _prefSessionStart = 'driver_session_start';
@@ -34,7 +42,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
   bool _isOnline = false;
   bool _isConnecting = false; // CRITICAL: Block UI while connecting
-  String? _acceptingRideId; // CRITICAL: Track which ride is being accepted to disable button
+  String?
+      _acceptingRideId; // CRITICAL: Track which ride is being accepted to disable button
   bool _canStartRides = true; // Backend-driven; fetched on load
   String? _verificationBannerMsg; // Non-null when driver is not yet verified
   double _todayEarnings = 0.0;
@@ -47,7 +56,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
   bool _isLoadingEarnings = false;
   bool _isLoadingHistory = false;
   final String _todayDate = DateFormat('dd.MM.yyyy').format(DateTime.now());
-  
+
+  // Pricing v2: Driver quests and boosts
+  List<DriverQuest> _activeQuests = [];
+  DriverBoost? _activeBoost;
+  bool _isLoadingQuests = false;
+
   // Google Maps
   final Completer<GoogleMapController> _mapController = Completer();
   LatLng _currentLocation = const LatLng(28.4595, 77.0266); // Default Gurgaon
@@ -68,15 +82,26 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
   // WebSocket subscription
   VoidCallback? _rideOffersSubscription;
-  
+
   // Connection status stream subscription
   StreamSubscription<bool>? _connectionStatusSubscription;
+  StreamSubscription<RemoteMessage>? _pushForegroundSubscription;
+  String? _activeIncomingRideId;
+  final Map<String, DateTime> _recentIncomingRides = {};
   AppLifecycleState _lastLifecycleState = AppLifecycleState.resumed;
+  DateTime? _lastStatusSyncAt;
+  String? _driverRecordId;
+
+  // Map style for dark mode
+  String? _mapStyle;
+  bool _lastDarkMode = false;
+  GoogleMapController? _mapControllerInstance;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _hydrateDriverRecordId();
     _getCurrentLocation();
     _setupWebSocketSubscription();
     _fetchEarnings();
@@ -84,6 +109,28 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     _fetchVerificationStatus();
     _restoreSessionState();
     _syncDriverLanguageToApp();
+    _loadMapStyle();
+    _fetchDriverQuests();
+    _setupPushRideListener();
+  }
+
+  /// Load map style based on dark mode setting
+  Future<void> _loadMapStyle() async {
+    try {
+      final isDarkMode = ref.read(settingsProvider).isDarkMode;
+      _lastDarkMode = isDarkMode;
+      final stylePath = isDarkMode
+          ? 'assets/map_styles/raahi_dark.json'
+          : 'assets/map_styles/raahi_light.json';
+      _mapStyle = await rootBundle.loadString(stylePath);
+      if (_mapControllerInstance != null && _mapStyle != null) {
+        _mapControllerInstance!.setMapStyle(_mapStyle);
+      }
+      debugPrint(
+          '🗺️ Driver home map style loaded: ${isDarkMode ? "dark" : "light"}');
+    } catch (e) {
+      debugPrint('Failed to load map style: $e');
+    }
   }
 
   /// Sync driver's saved language (from onboarding) to app locale so whole app shows selected language
@@ -97,7 +144,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       try {
         final lang = supportedLanguages.firstWhere((l) => l.code == driverLang);
         if (mounted) {
-          await ref.read(settingsProvider.notifier).setLanguage(lang.code, lang.name);
+          await ref
+              .read(settingsProvider.notifier)
+              .setLanguage(lang.code, lang.name);
         }
       } catch (_) {
         // Language not in supported list, ignore
@@ -109,7 +158,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
   /// If the driver cannot start rides, disable Go Online and show banner.
   Future<void> _fetchVerificationStatus() async {
     try {
-      final status = await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
+      final status = await ref
+          .read(driverOnboardingProvider.notifier)
+          .fetchOnboardingStatus();
       if (!mounted) return;
       setState(() {
         _canStartRides = status.canStartRides;
@@ -117,17 +168,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           switch (status.onboardingStatus) {
             case OnboardingStatus.documentVerification:
             case OnboardingStatus.documentsUploaded:
-              _verificationBannerMsg = 'Your documents are under review. This usually takes 24-48 hours.';
+              _verificationBannerMsg =
+                  'Your documents are under review. This usually takes 24-48 hours.';
               break;
             case OnboardingStatus.rejected:
-              _verificationBannerMsg = status.message ?? 'Your documents were rejected. Please re-upload.';
+              _verificationBannerMsg = status.message ??
+                  'Your documents were rejected. Please re-upload.';
               break;
             case OnboardingStatus.notStarted:
             case OnboardingStatus.started:
-              _verificationBannerMsg = 'Please complete driver onboarding before going online.';
+              _verificationBannerMsg =
+                  'Please complete driver onboarding before going online.';
               break;
             case OnboardingStatus.completed:
-              _verificationBannerMsg = status.message ?? 'Your account is not eligible to accept rides right now.';
+              _verificationBannerMsg = status.message ??
+                  'Your account is not eligible to accept rides right now.';
               break;
           }
         } else {
@@ -138,13 +193,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       debugPrint('Failed to fetch verification status: $e');
     }
   }
-  
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     _lastLifecycleState = state;
     debugPrint('📱 App lifecycle state changed: $state');
-    
+
     if (state == AppLifecycleState.resumed) {
       // Re-check verification on every resume
       _fetchVerificationStatus();
@@ -155,29 +210,33 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       debugPrint('📱 App paused - socket will auto-reconnect when resumed');
     }
   }
-  
+
   /// Ensure real-time connection is active for the driver.
   /// Called on app resume when driver is online.
   Future<void> _ensureSocketConnection() async {
+    if (_driverId == 'unknown' || _driverId.isEmpty) {
+      await _hydrateDriverRecordId();
+    }
     final driverId = _driverId;
     if (driverId == 'unknown' || driverId.isEmpty) {
       debugPrint('⚠️ Cannot ensure connection - invalid driver ID');
       return;
     }
-    
+
     debugPrint('🔄 Ensuring real-time connection for driver: $driverId');
-    
+
     if (realtimeService.isConnected && realtimeService.isDriverOnline) {
       debugPrint('✅ Already connected');
       // Update H3 cell in case driver moved
-      realtimeService.updateDriverH3(driverId, _currentLocation.latitude, _currentLocation.longitude);
+      realtimeService.updateDriverH3(
+          driverId, _currentLocation.latitude, _currentLocation.longitude);
       return;
     }
-    
+
     debugPrint('🔌 Reconnecting real-time services...');
     final secureStorage = ref.read(secureStorageProvider);
     final token = await secureStorage.read(key: 'auth_token');
-    
+
     final connected = await realtimeService.connectDriver(
       driverId,
       lat: _currentLocation.latitude,
@@ -185,18 +244,42 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       token: token,
       onEvent: _handleDriverEvent,
     );
-    
+
     if (connected) {
       debugPrint('✅ Reconnected successfully');
     } else {
       debugPrint('❌ Reconnection failed');
     }
   }
-  
+
   /// Get the current driver's ID from auth state
   String get _driverId {
-    final user = ref.read(currentUserProvider);
-    return user?.id ?? 'unknown';
+    return _driverRecordId ?? 'unknown';
+  }
+
+  /// Resolve canonical driver id from backend profile.
+  Future<void> _hydrateDriverRecordId() async {
+    if (_driverRecordId != null && _driverRecordId!.isNotEmpty) return;
+    try {
+      final profile = await apiClient.getDriverProfile();
+      final data = profile['data'];
+      String? resolvedId;
+      if (data is Map<String, dynamic>) {
+        resolvedId =
+            (data['driver_id'] ?? data['driverId'] ?? data['id'])?.toString();
+      }
+
+      if (resolvedId != null && resolvedId.isNotEmpty) {
+        if (mounted) {
+          setState(() => _driverRecordId = resolvedId);
+        } else {
+          _driverRecordId = resolvedId;
+        }
+        debugPrint('🪪 Resolved canonical driver id: $resolvedId');
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to resolve canonical driver id: $e');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -212,6 +295,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     if (wasOnline) {
       debugPrint('🔄 Restoring driver online session from SharedPreferences');
 
+      if (_driverId == 'unknown' || _driverId.isEmpty) {
+        await _hydrateDriverRecordId();
+      }
       final driverId = _driverId;
       if (driverId == 'unknown' || driverId.isEmpty) {
         debugPrint('❌ Cannot restore session - invalid driver ID');
@@ -221,14 +307,17 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
       // Re-fetch verification status from backend before reconnecting
       try {
-        final status = await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
+        final status = await ref
+            .read(driverOnboardingProvider.notifier)
+            .fetchOnboardingStatus();
         if (!status.canStartRides) {
           debugPrint('❌ Session restore blocked — driver cannot start rides');
           await _clearSessionData();
           if (mounted) {
             setState(() {
               _canStartRides = false;
-              _verificationBannerMsg = 'Your verification status changed. You cannot go online right now.';
+              _verificationBannerMsg =
+                  'Your verification status changed. You cannot go online right now.';
             });
           }
           return;
@@ -236,12 +325,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       } catch (e) {
         debugPrint('⚠️ Could not check verification during restore: $e');
       }
-      
+
       setState(() => _isConnecting = true);
 
       final secureStorage = ref.read(secureStorageProvider);
       final token = await secureStorage.read(key: 'auth_token');
-      
+
       debugPrint('🔄 Restoring driver connection for: $driverId');
       final registered = await realtimeService.connectDriver(
         driverId,
@@ -250,7 +339,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         token: token,
         onEvent: _handleDriverEvent,
       );
-      
+
       if (!registered) {
         debugPrint('❌ Failed to restore session - could not register');
         final backendReason = realtimeService.takeLastRegistrationError();
@@ -262,10 +351,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         }
         return;
       }
-      
+
       // CRITICAL: Update backend status FIRST before setting UI online
       try {
-        await apiClient.updateDriverStatus(true, lat: _currentLocation.latitude, lng: _currentLocation.longitude);
+        await apiClient.updateDriverStatus(true,
+            lat: _currentLocation.latitude, lng: _currentLocation.longitude);
         debugPrint('✅ Backend status restored successfully');
       } catch (e) {
         debugPrint('❌ Failed to restore driver status on backend: $e');
@@ -275,10 +365,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         setState(() => _isConnecting = false);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Could not restore online session. Please try going online again.'),
+            SnackBar(
+              content: Text(ref.tr('restore_session_failed')),
               backgroundColor: Colors.orange,
-              duration: Duration(seconds: 3),
+              duration: const Duration(seconds: 3),
             ),
           );
         }
@@ -306,7 +396,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
   Future<void> _persistSessionStart() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_prefSessionStart, DateTime.now().millisecondsSinceEpoch);
+    await prefs.setInt(
+        _prefSessionStart, DateTime.now().millisecondsSinceEpoch);
   }
 
   Future<void> _persistFeePaidAt() async {
@@ -351,11 +442,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
-          children: const [
-            Icon(Icons.account_balance_wallet, color: Color(0xFF1A1A1A)),
-            SizedBox(width: 8),
-            Text('Platform Fee',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+          children: [
+            const Icon(Icons.account_balance_wallet, color: Color(0xFF1A1A1A)),
+            const SizedBox(width: 8),
+            Text(ref.tr('platform_fee'),
+                style: const TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
         content: Column(
@@ -388,8 +479,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel',
-                style: TextStyle(color: Color(0xFF999999))),
+            child: Text(ref.tr('cancel'),
+                style: const TextStyle(color: Color(0xFF999999))),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
@@ -398,8 +489,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Pay & Go Online',
-                style: TextStyle(color: Colors.white)),
+            child: Text(ref.tr('pay_go_online'),
+                style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -423,7 +514,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       if (remaining.isNegative) {
         remainingText = '0h 0m';
       } else {
-        remainingText = '${remaining.inHours}h ${remaining.inMinutes.remainder(60)}m';
+        remainingText =
+            '${remaining.inHours}h ${remaining.inMinutes.remainder(60)}m';
       }
     }
 
@@ -433,11 +525,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
-          children: const [
-            Icon(Icons.warning_amber_rounded, color: Color(0xFFE53935)),
-            SizedBox(width: 8),
-            Text('Penalty Warning',
-                style: TextStyle(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Color(0xFFE53935)),
+            const SizedBox(width: 8),
+            Text(ref.tr('penalty_warning'),
+                style: const TextStyle(
                     fontWeight: FontWeight.bold, color: Color(0xFFE53935))),
           ],
         ),
@@ -461,8 +553,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   Text(
                     'Stopping before your 24-hour session ends will incur a ₹10 penalty.\n\nTime remaining: $remainingText',
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        fontSize: 14, color: Color(0xFF666666)),
+                    style:
+                        const TextStyle(fontSize: 14, color: Color(0xFF666666)),
                   ),
                 ],
               ),
@@ -477,13 +569,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Continue Riding',
-                style: TextStyle(color: Colors.white)),
+            child: Text(ref.tr('continue_riding'),
+                style: const TextStyle(color: Colors.white)),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Stop Anyway',
-                style: TextStyle(color: Color(0xFFE53935))),
+            child: Text(ref.tr('stop_anyway'),
+                style: const TextStyle(color: Color(0xFFE53935))),
           ),
         ],
       ),
@@ -510,10 +602,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         affectsEligibility: false,
       );
     }
-    if (lower.contains('not verified') || lower.contains('verification') || lower.contains('driver_not_verified')) {
+    if (lower.contains('not verified') ||
+        lower.contains('verification') ||
+        lower.contains('driver_not_verified')) {
       return _BackendError(
         title: 'Verification Pending',
-        body: 'Your documents are still under review. This usually takes 24-48 hours.',
+        body:
+            'Your documents are still under review. This usually takes 24-48 hours.',
         cta: 'OK',
         allowRetry: false,
         affectsEligibility: true,
@@ -522,16 +617,20 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     if (lower.contains('penalty') || lower.contains('penalty_unpaid')) {
       return _BackendError(
         title: 'Unpaid Penalty',
-        body: 'You have an outstanding penalty. Please clear it before going online.',
+        body:
+            'You have an outstanding penalty. Please clear it before going online.',
         cta: 'OK',
         allowRetry: false,
         affectsEligibility: false,
       );
     }
-    if (lower.contains('suspended') || lower.contains('account_suspended') || lower.contains('deactivated')) {
+    if (lower.contains('suspended') ||
+        lower.contains('account_suspended') ||
+        lower.contains('deactivated')) {
       return _BackendError(
         title: 'Account Suspended',
-        body: 'Your account has been suspended. Please contact support for assistance.',
+        body:
+            'Your account has been suspended. Please contact support for assistance.',
         cta: 'Contact Support',
         allowRetry: false,
         affectsEligibility: true,
@@ -540,7 +639,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     if (lower.contains('status code of 403') || lower.contains('forbidden')) {
       return _BackendError(
         title: 'Cannot Go Online',
-        body: 'Your account is currently not eligible to go online. Please check onboarding/penalty status or contact support.',
+        body:
+            'Your account is currently not eligible to go online. Please check onboarding/penalty status or contact support.',
         cta: 'OK',
         allowRetry: false,
         affectsEligibility: false,
@@ -556,8 +656,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
   }
 
   Future<void> _showConnectionErrorDialog({String? registrationMessage}) async {
-    final hasBackendReason = registrationMessage != null && registrationMessage.isNotEmpty;
-    final classified = hasBackendReason ? _classifyBackendError(registrationMessage) : null;
+    final hasBackendReason =
+        registrationMessage != null && registrationMessage.isNotEmpty;
+    final classified =
+        hasBackendReason ? _classifyBackendError(registrationMessage) : null;
 
     // Only eligibility-related failures should disable start rides.
     if (classified != null && classified.affectsEligibility) {
@@ -583,7 +685,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             Expanded(
               child: Text(
                 classified?.title ?? 'Connection Failed',
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
             ),
           ],
@@ -603,9 +706,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 style: TextStyle(fontSize: 14),
               ),
               const SizedBox(height: 12),
-              _buildErrorReason(Icons.signal_wifi_off, 'Poor internet connection'),
-              _buildErrorReason(Icons.cloud_off, 'Server may be temporarily down'),
-              _buildErrorReason(Icons.security, 'Firewall or mobile data blocking port'),
+              _buildErrorReason(
+                  Icons.signal_wifi_off, 'Poor internet connection'),
+              _buildErrorReason(
+                  Icons.cloud_off, 'Server may be temporarily down'),
+              _buildErrorReason(
+                  Icons.security, 'Firewall or mobile data blocking port'),
               const SizedBox(height: 16),
               const Text(
                 'Try switching to a different Wi-Fi, or retry later.',
@@ -618,7 +724,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: Text(
-              classified != null && !classified.allowRetry ? classified.cta : 'Cancel',
+              classified != null && !classified.allowRetry
+                  ? classified.cta
+                  : 'Cancel',
               style: const TextStyle(color: Color(0xFF999999)),
             ),
           ),
@@ -628,8 +736,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 Navigator.of(ctx).pop(false);
                 context.push(AppRoutes.serverConfig);
               },
-              child: const Text('Edit Server',
-                  style: TextStyle(color: Color(0xFF4285F4))),
+              child: Text(ref.tr('edit_server'),
+                  style: const TextStyle(color: Color(0xFF4285F4))),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
@@ -638,8 +746,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     borderRadius: BorderRadius.circular(8)),
               ),
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Retry',
-                  style: TextStyle(color: Colors.white)),
+              child: Text(ref.tr('retry'),
+                  style: const TextStyle(color: Colors.white)),
             ),
           ],
         ],
@@ -665,7 +773,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             Expanded(
               child: Text(
                 classified.title,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
             ),
           ],
@@ -692,12 +801,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
-          children: const [
-            Icon(Icons.public_off, color: Color(0xFFE53935)),
-            SizedBox(width: 8),
+          children: [
+            const Icon(Icons.public_off, color: Color(0xFFE53935)),
+            const SizedBox(width: 8),
             Expanded(
-              child: Text('Server Unreachable',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              child: Text(ref.tr('server_unreachable'),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 18)),
             ),
           ],
         ),
@@ -710,9 +820,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               style: TextStyle(fontSize: 14),
             ),
             const SizedBox(height: 10),
-            _buildErrorReason(Icons.signal_cellular_alt, 'Mobile data may block the required port'),
+            _buildErrorReason(Icons.signal_cellular_alt,
+                'Mobile data may block the required port'),
             _buildErrorReason(Icons.wifi, 'Try a different Wi‑Fi network'),
-            _buildErrorReason(Icons.vpn_lock, 'Corporate or public Wi‑Fi may block it'),
+            _buildErrorReason(
+                Icons.vpn_lock, 'Corporate or public Wi‑Fi may block it'),
             const SizedBox(height: 12),
             const Text(
               'Switch network and tap Retry, or try again later.',
@@ -723,16 +835,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel',
-                style: TextStyle(color: Color(0xFF999999))),
+            child: Text(ref.tr('cancel'),
+                style: const TextStyle(color: Color(0xFF999999))),
           ),
           TextButton(
             onPressed: () {
               Navigator.of(ctx).pop(false);
               context.push(AppRoutes.serverConfig);
             },
-            child: const Text('Edit Server',
-                style: TextStyle(color: Color(0xFF4285F4))),
+            child: Text(ref.tr('edit_server'),
+                style: const TextStyle(color: Color(0xFF4285F4))),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
@@ -741,8 +853,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Retry',
-                style: TextStyle(color: Colors.white)),
+            child: Text(ref.tr('retry'),
+                style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -793,11 +905,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
-          children: const [
-            Icon(Icons.timer_off, color: Color(0xFFFF9800)),
-            SizedBox(width: 8),
-            Text('Session Expired',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+          children: [
+            const Icon(Icons.timer_off, color: Color(0xFFFF9800)),
+            const SizedBox(width: 8),
+            Text(ref.tr('session_expired'),
+                style: const TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
         content: Column(
@@ -830,8 +942,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Go Offline',
-                style: TextStyle(color: Color(0xFF999999))),
+            child: Text(ref.tr('go_offline'),
+                style: const TextStyle(color: Color(0xFF999999))),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
@@ -840,8 +952,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Pay & Continue',
-                style: TextStyle(color: Colors.white)),
+            child: Text(ref.tr('pay_continue'),
+                style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -861,8 +973,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
   Future<void> _goOffline() async {
     // CRITICAL: Capture driver ID before clearing state
     final driverId = _driverId;
-    
+
     setState(() => _isOnline = false);
+    
+    // Clear ride stack queue when going offline
+    ref.read(rideQueueProvider.notifier).clear();
+    
     await _clearSessionData();
 
     try {
@@ -881,12 +997,92 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('You are now offline'),
+        SnackBar(
+          content: Text(ref.tr('you_are_offline')),
           backgroundColor: Colors.grey,
-          duration: Duration(seconds: 2),
+          duration: const Duration(seconds: 2),
         ),
       );
+    }
+  }
+
+  /// Fetch driver quests (pricing v2 feature)
+  Future<void> _fetchDriverQuests() async {
+    if (!mounted) return;
+    setState(() => _isLoadingQuests = true);
+    try {
+      final data = await apiClient.getDriverQuests();
+      if (!mounted) return;
+
+      if (data['success'] == true) {
+        // Handle both nested and flat response formats
+        final responseData = data['data'];
+        List<dynamic> questsList = [];
+
+        if (responseData is Map<String, dynamic>) {
+          questsList = responseData['quests'] as List<dynamic>? ?? [];
+        } else if (responseData is List) {
+          questsList = responseData;
+        }
+
+        setState(() {
+          _activeQuests = questsList
+              .map((q) => DriverQuest.fromJson(q as Map<String, dynamic>))
+              .where((q) => !q.isCompleted)
+              .toList();
+        });
+
+        // Also fetch boost status
+        _fetchDriverBoost();
+
+        debugPrint('🎯 Quests fetched: ${_activeQuests.length} active');
+        for (final quest in _activeQuests) {
+          debugPrint(
+              '   - ${quest.title}: ${quest.completedRides}/${quest.targetRides} (₹${quest.rewardAmount})');
+        }
+      } else {
+        debugPrint('⚠️ Quests API returned unsuccessful, using defaults');
+        setState(() {
+          _activeQuests = DriverQuest.getDefaultQuests();
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error fetching quests: $e');
+      // Use default quests as fallback
+      setState(() {
+        _activeQuests = DriverQuest.getDefaultQuests();
+      });
+    } finally {
+      if (mounted) setState(() => _isLoadingQuests = false);
+    }
+  }
+
+  /// Fetch driver boost status (pricing v2 feature)
+  Future<void> _fetchDriverBoost() async {
+    try {
+      // Get vehicle type from driver profile if available
+      final driverProfile = ref.read(driverOnboardingProvider);
+      final vehicleType = driverProfile.selectedVehicleType ?? 'auto';
+
+      final data = await apiClient.getDriverBoost(
+        vehicleType,
+        _currentLocation.latitude,
+        _currentLocation.longitude,
+      );
+
+      if (data['success'] == true) {
+        final boostData = data['data'];
+        if (boostData != null) {
+          setState(() {
+            _activeBoost =
+                DriverBoost.fromJson(boostData as Map<String, dynamic>);
+          });
+          debugPrint(
+              '⚡ Boost status: ${_activeBoost?.isActive ?? false}, Amount: ₹${_activeBoost?.boostAmount ?? 0}');
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Error fetching boost: $e');
     }
   }
 
@@ -896,7 +1092,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     try {
       final data = await apiClient.getDriverEarnings();
       if (!mounted) return;
-      
+
       if (data['success'] == true) {
         final earnings = data['data'] as Map<String, dynamic>? ?? {};
         setState(() {
@@ -907,7 +1103,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           _onlineHours = earnings['week']['online_hours'] ?? '0h 0m';
           _rating = (earnings['rating'] ?? 0.0).toDouble();
         });
-        debugPrint('📊 Earnings fetched: Today ₹$_todayEarnings, Week ₹$_weekEarnings');
+        debugPrint(
+            '📊 Earnings fetched: Today ₹$_todayEarnings, Week ₹$_weekEarnings');
       }
     } catch (e) {
       debugPrint('❌ Error fetching earnings: $e');
@@ -915,7 +1112,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       if (mounted) setState(() => _isLoadingEarnings = false);
     }
   }
-  
+
   /// Fetch ride history. If [modalSetState] is provided (from a StatefulBuilder
   /// inside a modal), both parent and modal state are refreshed so the bottom
   /// sheet actually re-renders.
@@ -950,7 +1147,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       update(() => _isLoadingHistory = false);
     }
   }
-  
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -960,6 +1157,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     _positionStream?.cancel();
     _rideOffersSubscription?.call();
     _connectionStatusSubscription?.cancel();
+    _pushForegroundSubscription?.cancel();
+    if (pushNotificationService.onNotificationAction ==
+        _handleNotificationRideAction) {
+      pushNotificationService.onNotificationAction = null;
+    }
     super.dispose();
   }
 
@@ -977,13 +1179,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-      
-      if (permission == LocationPermission.whileInUse || 
+
+      if (permission == LocationPermission.whileInUse ||
           permission == LocationPermission.always) {
         // Get initial position
         final position = await Geolocator.getCurrentPosition();
         _updatePosition(position);
-        
+
         // Start continuous location stream for real-time updates
         _positionStream = Geolocator.getPositionStream(
           locationSettings: const LocationSettings(
@@ -1005,10 +1207,49 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       _currentLocation = LatLng(position.latitude, position.longitude);
       _updateMarkers();
     });
-    
+
+    // Keep realtime in-memory driver state (RAMEN/H3) fresh while online.
+    // This improves rider->driver matching accuracy during active sessions.
+    if (_isOnline) {
+      final driverId = _driverId;
+      if (driverId != 'unknown' && driverId.isNotEmpty) {
+        unawaited(
+          realtimeService.updateDriverLocation(
+            driverId,
+            position.latitude,
+            position.longitude,
+            heading: position.heading,
+            speed: position.speed,
+          ),
+        );
+        unawaited(
+          realtimeService.updateDriverH3(
+            driverId,
+            position.latitude,
+            position.longitude,
+          ),
+        );
+
+        final now = DateTime.now();
+        final shouldSyncStatus = _lastStatusSyncAt == null ||
+            now.difference(_lastStatusSyncAt!) >= const Duration(seconds: 30);
+        if (shouldSyncStatus) {
+          _lastStatusSyncAt = now;
+          unawaited(
+            apiClient.updateDriverStatus(
+              true,
+              lat: position.latitude,
+              lng: position.longitude,
+            ),
+          );
+        }
+      }
+    }
+
     try {
       final controller = await _mapController.future;
-      if (mounted) controller.animateCamera(CameraUpdate.newLatLng(_currentLocation));
+      if (mounted)
+        controller.animateCamera(CameraUpdate.newLatLng(_currentLocation));
     } catch (_) {}
   }
 
@@ -1025,7 +1266,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
   void _setupWebSocketSubscription() {
     _connectionStatusSubscription?.cancel();
-    _connectionStatusSubscription = realtimeService.connectionStatus.listen((connected) {
+    _connectionStatusSubscription =
+        realtimeService.connectionStatus.listen((connected) {
       if (!mounted || !_isOnline) return;
       final authState = ref.read(authStateProvider);
       if (authState.isLoggingOut || authState.user == null) return;
@@ -1039,6 +1281,158 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     });
   }
 
+  void _setupPushRideListener() {
+    _pushForegroundSubscription?.cancel();
+    _pushForegroundSubscription =
+        pushNotificationService.notificationStream.listen((message) {
+      _handleIncomingRidePush(message);
+    });
+    pushNotificationService.onNotificationAction =
+        _handleNotificationRideAction;
+  }
+
+  Future<void> _handleNotificationRideAction(
+    String action,
+    Map<String, dynamic> data,
+  ) async {
+    if (!mounted) return;
+    final actionId = action.toUpperCase();
+    final isRideAction = actionId == NotificationActions.acceptRide ||
+        actionId == NotificationActions.declineRide;
+    if (!isRideAction || !_isOnline) return;
+
+    final offer = _resolveRideOfferForAction(data);
+    if (offer == null) return;
+
+    if (actionId == NotificationActions.acceptRide) {
+      // Reuse the same in-screen accept flow (state + route unchanged).
+      await _acceptRide(offer);
+      return;
+    }
+
+    await _declineRideOffer(offer, reason: 'Declined from heads-up action');
+  }
+
+  RideOffer? _resolveRideOfferForAction(Map<String, dynamic> data) {
+    final rideId = (data['rideId'] ?? data['id'] ?? '').toString();
+    final currentOffers = ref.read(driverRidesProvider).rideOffers;
+    for (final offer in currentOffers) {
+      if (offer.id == rideId) return offer;
+    }
+
+    try {
+      final hydrated = _rideOfferFromPushPayload(data);
+      ref.read(driverRidesProvider.notifier).addRideOffer(hydrated);
+      return hydrated;
+    } catch (e) {
+      debugPrint('Failed to resolve ride from notification action: $e');
+      return null;
+    }
+  }
+
+  bool _isRideRequestPayload(Map<String, dynamic> data) {
+    final type = (data['type'] ?? '').toString().toUpperCase();
+    final event =
+        (data['event'] ?? data['status'] ?? '').toString().toUpperCase();
+    return type == NotificationTypes.newRide ||
+        (type == 'RIDE_UPDATE' && event == 'NEW_RIDE_REQUEST');
+  }
+
+  double _parseFare(dynamic value) {
+    if (value == null) return 0;
+    if (value is num) return value.toDouble();
+    final raw = value.toString();
+    final clean = raw.replaceAll(RegExp(r'[^0-9.]'), '');
+    return double.tryParse(clean) ?? 0;
+  }
+
+  RideOffer _rideOfferFromPushPayload(Map<String, dynamic> data) {
+    final distance =
+        (data['distance'] ?? data['pickupDistance'] ?? '0 km').toString();
+    final rideIdRaw = data['rideId'] ?? data['id'] ?? data['requestId'];
+    final rideId = (rideIdRaw == null || rideIdRaw.toString().isEmpty)
+        ? 'push_${DateTime.now().millisecondsSinceEpoch}'
+        : rideIdRaw.toString();
+    return RideOffer(
+      id: rideId,
+      type: (data['vehicleType'] ?? data['serviceType'] ?? 'bike_rescue')
+          .toString(),
+      earning: _parseFare(data['fare'] ?? data['estimatedFare']),
+      pickupDistance: distance,
+      pickupTime: (data['pickupTime'] ?? 'Now').toString(),
+      dropDistance: distance,
+      dropTime: (data['dropTime'] ?? '').toString(),
+      pickupAddress:
+          (data['pickup'] ?? data['pickupAddress'] ?? 'Pickup').toString(),
+      dropAddress: (data['drop'] ?? data['dropAddress'] ?? 'Drop').toString(),
+      riderName:
+          data['riderName']?.toString() ?? data['passengerName']?.toString(),
+      createdAt: DateTime.now(),
+    );
+  }
+
+  Map<String, dynamic> _ridePayloadFromOffer(RideOffer offer) {
+    return {
+      'type': NotificationTypes.newRide,
+      'rideId': offer.id,
+      'pickup': offer.pickupAddress,
+      'drop': offer.dropAddress,
+      'distance': offer.pickupDistance,
+      'fare': '₹${offer.earning.toStringAsFixed(0)}',
+      if (offer.riderName != null) 'riderName': offer.riderName,
+    };
+  }
+
+  Future<void> _handleIncomingRidePush(RemoteMessage message) async {
+    if (!mounted || !_isOnline) return;
+    if (!_isRideRequestPayload(message.data)) return;
+
+    try {
+      final offer = _rideOfferFromPushPayload(message.data);
+      ref.read(driverRidesProvider.notifier).addRideOffer(offer);
+      await _showIncomingRideOverlay(offer, source: 'push');
+    } catch (e) {
+      debugPrint('⚠️ Failed to handle incoming ride push: $e');
+    }
+  }
+
+  Future<void> _declineRideOffer(RideOffer offer,
+      {String reason = 'Declined by driver'}) async {
+    ref.read(driverRidesProvider.notifier).removeRide(offer.id);
+    // Also remove from ride stack queue
+    ref.read(rideQueueProvider.notifier).removeRide(offer.id);
+    try {
+      await apiClient.declineRide(offer.id, reason: reason);
+    } catch (e) {
+      debugPrint('Decline ride API failed: $e');
+    }
+  }
+
+  Future<void> _showIncomingRideOverlay(
+    RideOffer offer, {
+    required String source,
+  }) async {
+    if (!mounted || !_isOnline) return;
+    if (_activeIncomingRideId == offer.id) return;
+
+    final now = DateTime.now();
+    final lastShownAt = _recentIncomingRides[offer.id];
+    if (lastShownAt != null && now.difference(lastShownAt).inSeconds < 8) {
+      return;
+    }
+    _recentIncomingRides[offer.id] = now;
+
+    await pushNotificationService.showIncomingRideHeadsUp(
+      data: _ridePayloadFromOffer(offer),
+    );
+
+    if (!mounted) return;
+    debugPrint('📣 Adding ride to stack (${offer.id}) from $source');
+    
+    // Add ride to the stack queue instead of showing fullscreen overlay
+    ref.read(rideQueueProvider.notifier).addRide(offer);
+  }
+
   /// Schedule reconnect with exponential backoff when connection drops.
   void _scheduleReconnect() {
     if (!_isOnline || !mounted) return;
@@ -1046,8 +1440,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     if (authState.isLoggingOut || authState.user == null) return;
     _reconnectTimer?.cancel();
     _reconnectAttempts++;
-    final delay = Duration(seconds: (1 << _reconnectAttempts.clamp(0, 5)).clamp(2, 30));
-    debugPrint('🔄 Scheduling reconnect in ${delay.inSeconds}s (attempt $_reconnectAttempts)');
+    final delay =
+        Duration(seconds: (1 << _reconnectAttempts.clamp(0, 5)).clamp(2, 30));
+    debugPrint(
+        '🔄 Scheduling reconnect in ${delay.inSeconds}s (attempt $_reconnectAttempts)');
     _reconnectTimer = Timer(delay, () async {
       if (!mounted || !_isOnline) return;
       await _ensureSocketConnection();
@@ -1055,7 +1451,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
   }
 
   /// Unified handler for driver events from SSE or Socket.io.
-  /// 
+  ///
   /// REAL-TIME FIRST: Uses event data directly instead of REST polling.
   /// This is the industry-standard approach for scalability.
   void _handleDriverEvent(String type, Map<String, dynamic> data) {
@@ -1067,8 +1463,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         debugPrint('⚠️ new_ride_offer event missing ride data');
         return;
       }
-      
-      debugPrint('🚗 New ride offer received via real-time: ${rideData['rideId'] ?? rideData['id']}');
+
+      debugPrint(
+          '🚗 New ride offer received via real-time: ${rideData['rideId'] ?? rideData['id']}');
 
       // Haptic feedback for new ride
       Vibration.hasVibrator().then((hasVibrator) {
@@ -1084,14 +1481,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           final offer = RideOffer.fromJson(rideData);
           final driverRidesNotifier = ref.read(driverRidesProvider.notifier);
           driverRidesNotifier.addRideOffer(offer);
+          unawaited(_showIncomingRideOverlay(offer, source: 'realtime'));
           debugPrint('✅ Ride offer added from real-time event: ${offer.id}');
         } catch (e) {
-          debugPrint('⚠️ Failed to parse ride from event, falling back to REST: $e');
+          debugPrint(
+              '⚠️ Failed to parse ride from event, falling back to REST: $e');
           // Fallback to REST only if parsing fails
           ref.read(driverRidesProvider.notifier).fetchAvailableRides(
-            lat: _currentLocation.latitude,
-            lng: _currentLocation.longitude,
-          );
+                lat: _currentLocation.latitude,
+                lng: _currentLocation.longitude,
+              );
         }
       }
     } else if (type == 'ride_taken') {
@@ -1099,11 +1498,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       debugPrint('🚫 Ride taken by another driver: $rideId');
       if (mounted && rideId != null) {
         ref.read(driverRidesProvider.notifier).removeRide(rideId);
+        // Also remove from ride stack queue
+        ref.read(rideQueueProvider.notifier).removeRide(rideId);
         // Show subtle feedback
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Ride was taken by another driver'),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            content: Text(ref.tr('ride_taken_by_another')),
+            duration: const Duration(seconds: 2),
             backgroundColor: Colors.orange,
           ),
         );
@@ -1114,13 +1515,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       if (mounted && rideId != null) {
         final notifier = ref.read(driverRidesProvider.notifier);
         notifier.removeRide(rideId);
+        // Also remove from ride stack queue
+        ref.read(rideQueueProvider.notifier).removeRide(rideId);
         // If the cancelled ride was our accepted ride (e.g. rider cancelled before OTP), clear it
         final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
         if (acceptedRide != null && acceptedRide.id == rideId) {
           notifier.clearAcceptedRide();
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(data['reason'] as String? ?? 'Ride was cancelled by rider'),
+              content: Text(
+                  data['reason'] as String? ?? 'Ride was cancelled by rider'),
               backgroundColor: Colors.orange,
               duration: const Duration(seconds: 3),
             ),
@@ -1141,9 +1545,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       // On reconnect, do a single REST fetch to sync state
       if (mounted) {
         ref.read(driverRidesProvider.notifier).fetchAvailableRides(
-          lat: _currentLocation.latitude,
-          lng: _currentLocation.longitude,
-        );
+              lat: _currentLocation.latitude,
+              lng: _currentLocation.longitude,
+            );
       }
     }
   }
@@ -1160,7 +1564,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(_verificationBannerMsg ?? 'You are not verified to go online yet.'),
+            content: Text(_verificationBannerMsg ??
+                'You are not verified to go online yet.'),
             backgroundColor: const Color(0xFFD4956A),
             duration: const Duration(seconds: 4),
           ),
@@ -1168,7 +1573,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       }
       return;
     }
-    
+
     if (!_isOnline) {
       // ---- GOING ONLINE ----
 
@@ -1181,36 +1586,42 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       }
 
       // CRITICAL: Get driver ID FIRST before any async operations
+      if (_driverId == 'unknown' || _driverId.isEmpty) {
+        await _hydrateDriverRecordId();
+      }
       final driverId = _driverId;
       if (driverId == 'unknown' || driverId.isEmpty) {
         debugPrint('❌ Cannot go online - invalid driver ID');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Error: Could not identify driver. Please log out and log in again.'),
+            SnackBar(
+              content: Text(ref.tr('driver_id_error')),
               backgroundColor: Colors.red,
             ),
           );
         }
         return;
       }
-      
+
       // CRITICAL: Block UI while connecting
       setState(() => _isConnecting = true);
-      
+
       // 1.5 Pre-check: can we reach the realtime service (port 5007)?
       // We try the health check but don't block if it fails - let the actual connection attempt decide
-      final canReachRealtime = await ServerConfigService.checkRealtimeReachable(timeout: const Duration(seconds: 10));
+      final canReachRealtime = await ServerConfigService.checkRealtimeReachable(
+          timeout: const Duration(seconds: 10));
       if (!canReachRealtime) {
-        debugPrint('⚠️ Health check failed but proceeding with connection attempt...');
+        debugPrint(
+            '⚠️ Health check failed but proceeding with connection attempt...');
         // Don't return - let the actual connection try and fail with a better error
       }
-      
+
       // 2. Connect via SSE + Socket.io and register driver
       final secureStorage = ref.read(secureStorageProvider);
       final token = await secureStorage.read(key: 'auth_token');
-      
-      debugPrint('🚗 Driver going online: $driverId - connecting SSE + Socket.io...');
+
+      debugPrint(
+          '🚗 Driver going online: $driverId - connecting SSE + Socket.io...');
       final registered = await realtimeService.connectDriver(
         driverId,
         lat: _currentLocation.latitude,
@@ -1218,18 +1629,20 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         token: token,
         onEvent: _handleDriverEvent,
       );
-      
+
       if (!registered) {
         final backendReason = realtimeService.takeLastRegistrationError();
-        debugPrint('❌ Registration rejected by backend. Reason: $backendReason');
+        debugPrint(
+            '❌ Registration rejected by backend. Reason: $backendReason');
         setState(() => _isConnecting = false);
         if (mounted) {
           _showConnectionErrorDialog(registrationMessage: backendReason);
         }
         return;
       }
-      
-      debugPrint('✅ Driver $driverId connected successfully - updating backend status...');
+
+      debugPrint(
+          '✅ Driver $driverId connected successfully - updating backend status...');
 
       // 3. Auto-register as driver if not already registered
       try {
@@ -1241,7 +1654,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
       // 4. CRITICAL: Update driver status on backend FIRST - this must succeed
       try {
-        final statusResponse = await apiClient.updateDriverStatus(true, lat: _currentLocation.latitude, lng: _currentLocation.longitude);
+        final statusResponse = await apiClient.updateDriverStatus(true,
+            lat: _currentLocation.latitude, lng: _currentLocation.longitude);
         debugPrint('✅ Backend status updated: $statusResponse');
       } catch (e) {
         debugPrint('❌ Failed to update driver status on backend: $e');
@@ -1266,6 +1680,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         _isOnline = true;
         _isConnecting = false;
       });
+      _lastStatusSyncAt = null;
+      if (driverId != 'unknown' && driverId.isNotEmpty) {
+        unawaited(
+          realtimeService.updateDriverLocation(
+            driverId,
+            _currentLocation.latitude,
+            _currentLocation.longitude,
+          ),
+        );
+        unawaited(
+          realtimeService.updateDriverH3(
+            driverId,
+            _currentLocation.latitude,
+            _currentLocation.longitude,
+          ),
+        );
+      }
       _startCountdownTimer();
       await _persistOnlineState(true);
       await _persistSessionStart();
@@ -1278,10 +1709,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('You are now online!'),
+          SnackBar(
+            content: Text(ref.tr('you_are_online')),
             backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
+            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -1298,12 +1729,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       await _goOffline();
     }
   }
-  
+
   void _fetchRideOffers() {
     ref.read(driverRidesProvider.notifier).fetchAvailableRides(
-      lat: _currentLocation.latitude,
-      lng: _currentLocation.longitude,
-    );
+          lat: _currentLocation.latitude,
+          lng: _currentLocation.longitude,
+        );
   }
 
   Future<void> _acceptRide(RideOffer offer) async {
@@ -1312,32 +1743,41 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       debugPrint('⚠️ Already accepting ride $_acceptingRideId, ignoring tap');
       return;
     }
-    
+
     setState(() => _acceptingRideId = offer.id);
     debugPrint('🚗 Accepting ride: ${offer.id}');
-    
+
     try {
-      final success = await ref.read(driverRidesProvider.notifier).acceptRide(offer.id, driverId: _driverId);
-      
+      final success = await ref
+          .read(driverRidesProvider.notifier)
+          .acceptRide(offer.id, driverId: _driverId);
+
       if (success && mounted) {
+        // Clear the entire ride queue on successful accept
+        ref.read(rideQueueProvider.notifier).clear();
         // Navigate to active ride screen
         debugPrint('✅ Ride accepted successfully, navigating to active ride');
         context.push(AppRoutes.driverActiveRide);
       } else if (mounted) {
+        // Remove the failed ride from queue
+        ref.read(rideQueueProvider.notifier).removeRide(offer.id);
+        
         // Get specific error from provider state
         final error = ref.read(driverRidesProvider).error;
         String errorMessage = 'Failed to accept ride';
-        
+
         if (error != null) {
           if (error.contains('already been accepted')) {
             errorMessage = 'This ride was taken by another driver';
-          } else if (error.contains('not authorized') || error.contains('FORBIDDEN')) {
-            errorMessage = 'You are not authorized to accept rides. Please contact support.';
+          } else if (error.contains('not authorized') ||
+              error.contains('FORBIDDEN')) {
+            errorMessage =
+                'You are not authorized to accept rides. Please contact support.';
           } else {
             errorMessage = error;
           }
         }
-        
+
         debugPrint('❌ Failed to accept ride: $errorMessage');
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1356,39 +1796,57 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
 
   @override
   Widget build(BuildContext context) {
+    final rideQueueState = ref.watch(rideQueueProvider);
+    final hasRideRequests = rideQueueState.hasRides && _isOnline;
+
     return Scaffold(
       backgroundColor: Colors.white,
       drawer: _buildDrawer(),
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            _buildHeader(),
-            Expanded(
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  // Map
-                  _buildMap(),
-                  
-                  // Start Ride / Stop Riding button - always centered at bottom
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 24,
-                    child: Center(
-                      child: Material(
-                        color: Colors.transparent,
-                        child: _buildRideToggleButton(),
-                      ),
-                    ),
+            // Main content
+            Column(
+              children: [
+                _buildHeader(),
+                Expanded(
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      // Map
+                      _buildMap(),
+
+                      // Start Ride / Stop Riding button - always centered at bottom
+                      // Hide when ride stack is visible
+                      if (!hasRideRequests)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 24,
+                          child: Center(
+                            child: Material(
+                              color: Colors.transparent,
+                              child: _buildRideToggleButton(),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+                // Verification banner
+                if (_verificationBannerMsg != null && !_isOnline)
+                  _buildVerificationBanner(),
+                // Hide bottom section when ride stack is visible
+                if (!hasRideRequests) _buildBottomSection(),
+              ],
             ),
-            // Verification banner
-            if (_verificationBannerMsg != null && !_isOnline)
-              _buildVerificationBanner(),
-            _buildBottomSection(),
+            
+            // Ride Stack Overlay - 50% height from bottom
+            if (hasRideRequests)
+              RideStackOverlay(
+                onAccept: (ride) => _acceptRide(ride),
+                onDecline: (ride) => _declineRideOffer(ride),
+              ),
           ],
         ),
       ),
@@ -1402,12 +1860,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       color: const Color(0xFFFFF3E0),
       child: Row(
         children: [
-          const Icon(Icons.hourglass_top_rounded, color: Color(0xFFE65100), size: 20),
+          const Icon(Icons.hourglass_top_rounded,
+              color: Color(0xFFE65100), size: 20),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
               _verificationBannerMsg!,
-              style: const TextStyle(fontSize: 13, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
+              style: const TextStyle(
+                  fontSize: 13,
+                  color: Color(0xFFE65100),
+                  fontWeight: FontWeight.w500),
             ),
           ),
         ],
@@ -1440,9 +1902,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               ),
             ),
           ),
-          
+
           const Spacer(),
-          
+
           // Earnings badge
           GestureDetector(
             onTap: _showEarnings,
@@ -1468,6 +1930,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
   }
 
   Widget _buildMap() {
+    // Watch dark mode changes
+    final isDarkMode = ref.watch(settingsProvider).isDarkMode;
+    if (isDarkMode != _lastDarkMode) {
+      _lastDarkMode = isDarkMode;
+      _loadMapStyle();
+    }
+
     return Stack(
       children: [
         GoogleMap(
@@ -1478,6 +1947,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           markers: _markers,
           onMapCreated: (controller) {
             _mapController.complete(controller);
+            _mapControllerInstance = controller;
+            // Apply map style
+            if (_mapStyle != null) {
+              controller.setMapStyle(_mapStyle);
+            }
             _updateMarkers();
           },
           myLocationEnabled: true,
@@ -1485,7 +1959,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           zoomControlsEnabled: false,
           mapToolbarEnabled: false,
         ),
-        
+
         // Date overlay
         Positioned(
           top: 8,
@@ -1531,12 +2005,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         child: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+            UberShimmer(
+              baseColor: Color(0x88FFFFFF),
+              highlightColor: Color(0xFFFFFFFF),
+              child: UberShimmerBox(
+                width: 44,
+                height: 14,
+                borderRadius: BorderRadius.all(Radius.circular(8)),
               ),
             ),
             SizedBox(width: 12),
@@ -1552,13 +2027,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         ),
       );
     }
-    
+
     // Different sizes for online (compact) vs offline (larger)
     final horizontalPadding = _isOnline ? 16.0 : 32.0;
     final verticalPadding = _isOnline ? 12.0 : 16.0;
     final fontSize = _isOnline ? 14.0 : 18.0;
     final iconSize = _isOnline ? 18.0 : 24.0;
-    
+
     final bool disabledOffline = !_isOnline && !_canStartRides;
 
     return GestureDetector(
@@ -1625,10 +2100,230 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         children: [
           // Status bar
           _buildStatusBar(),
+          // Driver quests section (pricing v2)
+          if (_activeQuests.isNotEmpty && !hasActiveRide) _buildQuestsSection(),
+          // Active boost indicator
+          if (_activeBoost?.isActive == true && !hasActiveRide)
+            _buildBoostIndicator(),
           // Return to active ride card when driver went back during ongoing ride
           if (hasActiveRide) _buildActiveRideReturnCard(),
           // Ride offers (hidden when has active ride - they should return to ride)
           if (!hasActiveRide) _buildRideOffersSection(),
+        ],
+      ),
+    );
+  }
+
+  /// Build driver quests section (pricing v2 feature)
+  Widget _buildQuestsSection() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.emoji_events,
+                      color: Colors.amber.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Daily Quests',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF1A1A1A),
+                    ),
+                  ),
+                ],
+              ),
+              if (_isLoadingQuests)
+                const UberShimmer(
+                  child: UberShimmerBox(
+                    width: 40,
+                    height: 12,
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 80,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: _activeQuests.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (context, index) =>
+                  _buildQuestCard(_activeQuests[index]),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuestCard(DriverQuest quest) {
+    final progress = quest.progress.clamp(0.0, 1.0);
+    final isNearComplete = progress >= 0.8;
+
+    return Container(
+      width: 160,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: isNearComplete
+              ? [Colors.amber.shade50, Colors.amber.shade100]
+              : [Colors.grey.shade50, Colors.grey.shade100],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isNearComplete ? Colors.amber.shade300 : Colors.grey.shade200,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(
+                quest.isPeakHour ? Icons.access_time : Icons.local_taxi,
+                size: 14,
+                color: isNearComplete
+                    ? Colors.amber.shade700
+                    : Colors.grey.shade600,
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  quest.title,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isNearComplete
+                        ? Colors.amber.shade800
+                        : const Color(0xFF1A1A1A),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${quest.completedRides}/${quest.targetRides} rides',
+            style: TextStyle(
+              fontSize: 10,
+              color: Colors.grey.shade600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    backgroundColor: Colors.grey.shade200,
+                    valueColor: AlwaysStoppedAnimation(
+                      isNearComplete
+                          ? Colors.amber.shade600
+                          : const Color(0xFFD4956A),
+                    ),
+                    minHeight: 4,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '₹${quest.rewardAmount.round()}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: isNearComplete
+                      ? Colors.amber.shade700
+                      : const Color(0xFFD4956A),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Build boost indicator (pricing v2 feature)
+  Widget _buildBoostIndicator() {
+    if (_activeBoost == null || !_activeBoost!.isActive)
+      return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.purple.shade50, Colors.purple.shade100],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.purple.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: Colors.purple.shade400,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.bolt, color: Colors.white, size: 16),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Boost Active!',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.purple.shade800,
+                  ),
+                ),
+                Text(
+                  'Earn +₹${_activeBoost!.boostAmount.round()} extra per ride',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.purple.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.purple.shade400,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              '+₹${_activeBoost!.boostAmount.round()}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1653,8 +2348,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             Container(
               width: 56,
               height: 56,
-              decoration: BoxDecoration(color: const Color(0xFFD4956A), borderRadius: BorderRadius.circular(12)),
-              child: const Icon(Icons.directions_car, color: Colors.white, size: 28),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFD4956A),
+                  borderRadius: BorderRadius.circular(12)),
+              child: const Icon(Icons.directions_car,
+                  color: Colors.white, size: 28),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -1663,19 +2361,24 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 children: [
                   const Text(
                     'Ongoing Ride',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Color(0xFF1A1A1A)),
+                    style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1A1A1A)),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     '${acceptedRide.pickupAddress} → ${acceptedRide.dropAddress}',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF666666)),
+                    style:
+                        const TextStyle(fontSize: 12, color: Color(0xFF666666)),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.arrow_forward_ios, size: 16, color: Color(0xFFD4956A)),
+            const Icon(Icons.arrow_forward_ios,
+                size: 16, color: Color(0xFFD4956A)),
           ],
         ),
       ),
@@ -1729,9 +2432,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             Vibration.vibrate(duration: 50);
             _fetchRideOffers();
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Loading more ride offers...'),
-                duration: Duration(seconds: 1),
+              SnackBar(
+                content: Text(ref.tr('loading_ride_offers')),
+                duration: const Duration(seconds: 1),
               ),
             );
           }
@@ -1743,123 +2446,163 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _isOnline ? 'Ride Offers' : 'Ride Offers, Start Ride Now!',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF888888),
-                      ),
-                    ),
-                    if (_isOnline && rideOffers.isNotEmpty)
-                      Text(
-                        'Swipe right to load more',
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: Color(0xFF4285F4).withOpacity(0.7),
-                          fontStyle: FontStyle.italic,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              if (_isOnline)
-                GestureDetector(
-                  onTap: () {
-                    _fetchRideOffers();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Refreshing ride offers...')),
-                    );
-                  },
-                  child: Row(
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Refresh',
-                        style: TextStyle(
-                          color: Color(0xFF4285F4),
+                      Text(
+                        _isOnline
+                            ? 'Ride Offers'
+                            : 'Ride Offers, Start Ride Now!',
+                        style: const TextStyle(
                           fontSize: 12,
+                          color: Color(0xFF888888),
                         ),
                       ),
-                      if (isLoading) ...[
-                        const SizedBox(width: 8),
-                        const SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF4285F4)),
+                      if (_isOnline && rideOffers.isNotEmpty)
+                        Text(
+                          'Swipe right to load more',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFF4285F4).withOpacity(0.7),
+                            fontStyle: FontStyle.italic,
                           ),
                         ),
-                      ],
                     ],
                   ),
                 ),
-            ],
-          ),
-          
-          const SizedBox(height: 8),
-          
-          // Ride offer cards - horizontal scroll
-          // Use smaller height when offline to give more space for the map/Start button
-          SizedBox(
-            height: _isOnline ? 250 : 100,
-            child: rideOffers.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          _isOnline ? Icons.hourglass_empty : Icons.power_settings_new,
-                          size: _isOnline ? 48 : 32,
-                          color: const Color(0xFFCCCCCC),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _isOnline 
-                              ? 'No ride requests available\nWaiting for new bookings...'
-                              : 'Tap Start Ride above to go online',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Color(0xFF888888),
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: rideOffers.length,
-                    itemBuilder: (context, index) {
-                      return Padding(
-                        padding: EdgeInsets.only(
-                          right: index < rideOffers.length - 1 ? 10 : 0,
-                        ),
-                        child: _buildRideOfferCard(rideOffers[index]),
+                if (_isOnline)
+                  GestureDetector(
+                    onTap: () {
+                      _fetchRideOffers();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(ref.tr('refreshing_offers'))),
                       );
                     },
+                    child: Row(
+                      children: [
+                        const Text(
+                          'Refresh',
+                          style: TextStyle(
+                            color: Color(0xFF4285F4),
+                            fontSize: 12,
+                          ),
+                        ),
+                        if (isLoading) ...[
+                          const SizedBox(width: 8),
+                          const UberShimmer(
+                            child: UberShimmerBox(
+                              width: 28,
+                              height: 10,
+                              borderRadius:
+                                  BorderRadius.all(Radius.circular(8)),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-          ),
-        ],
+              ],
+            ),
+
+            const SizedBox(height: 8),
+
+            // Ride offer cards - horizontal scroll
+            // Use smaller height when offline to give more space for the map/Start button
+            SizedBox(
+              height: _isOnline ? 250 : 100,
+              child: (_isOnline && isLoading && rideOffers.isEmpty)
+                  ? UberShimmer(
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: 3,
+                        itemBuilder: (context, index) => Padding(
+                          padding: EdgeInsets.only(right: index < 2 ? 10 : 0),
+                          child: Container(
+                            width: 170,
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border:
+                                  Border.all(color: const Color(0xFFE8E8E8)),
+                            ),
+                            child: const Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                UberShimmerBox(width: 80, height: 10),
+                                SizedBox(height: 10),
+                                UberShimmerBox(width: 90, height: 18),
+                                SizedBox(height: 10),
+                                UberShimmerBox(width: 130, height: 10),
+                                SizedBox(height: 8),
+                                UberShimmerBox(width: 120, height: 10),
+                                Spacer(),
+                                UberShimmerBox(
+                                    width: double.infinity, height: 32),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                  : rideOffers.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                _isOnline
+                                    ? Icons.hourglass_empty
+                                    : Icons.power_settings_new,
+                                size: _isOnline ? 48 : 32,
+                                color: const Color(0xFFCCCCCC),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _isOnline
+                                    ? 'No ride requests available\nWaiting for new bookings...'
+                                    : 'Tap Start Ride above to go online',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Color(0xFF888888),
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: rideOffers.length,
+                          itemBuilder: (context, index) {
+                            return Padding(
+                              padding: EdgeInsets.only(
+                                right: index < rideOffers.length - 1 ? 10 : 0,
+                              ),
+                              child: _buildRideOfferCard(rideOffers[index]),
+                            );
+                          },
+                        ),
+            ),
+          ],
+        ),
       ),
-    ),
     );
   }
 
   Widget _buildRideOfferCard(RideOffer offer) {
     final isGolden = offer.isGolden;
-    final secondsLeft = 15 - DateTime.now().difference(offer.createdAt).inSeconds;
+    final secondsLeft =
+        15 - DateTime.now().difference(offer.createdAt).inSeconds;
     final isExpiring = secondsLeft <= 5;
-    
+
     // Don't show expired offers
     if (secondsLeft <= 0) return const SizedBox.shrink();
-    
+
     return Container(
       width: 170,
       padding: const EdgeInsets.all(12),
@@ -1889,14 +2632,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 offer.type,
                 style: TextStyle(
                   fontSize: 11,
-                  color: isGolden ? const Color(0xFFD4956A) : const Color(0xFF666666),
+                  color: isGolden
+                      ? const Color(0xFFD4956A)
+                      : const Color(0xFF666666),
                   fontWeight: FontWeight.w500,
                 ),
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: isExpiring ? Colors.red.withOpacity(0.1) : Colors.green.withOpacity(0.1),
+                  color: isExpiring
+                      ? Colors.red.withOpacity(0.1)
+                      : Colors.green.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -1910,7 +2657,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               ),
             ],
           ),
-          
+
           // Earning label and amount
           const Text(
             'Earning',
@@ -1924,45 +2671,50 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.w700,
-              color: isGolden ? const Color(0xFFD4956A) : const Color(0xFF4CAF50),
+              color:
+                  isGolden ? const Color(0xFFD4956A) : const Color(0xFF4CAF50),
             ),
           ),
-          
+
           const SizedBox(height: 6),
-          
+
           // Pickup distance row
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Pickup\nDistance',
-                style: TextStyle(fontSize: 9, color: Color(0xFF888888), height: 1.2),
+                style: TextStyle(
+                    fontSize: 9, color: Color(0xFF888888), height: 1.2),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
                     offer.pickupDistance,
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600),
                   ),
                   Text(
                     offer.pickupTime,
-                    style: const TextStyle(fontSize: 8, color: Color(0xFF888888)),
+                    style:
+                        const TextStyle(fontSize: 8, color: Color(0xFF888888)),
                   ),
                 ],
               ),
             ],
           ),
-          
+
           const SizedBox(height: 4),
-          
+
           // Drop distance row
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Drop\nDistance',
-                style: TextStyle(fontSize: 9, color: Color(0xFF888888), height: 1.2),
+                style: TextStyle(
+                    fontSize: 9, color: Color(0xFF888888), height: 1.2),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -1977,15 +2729,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   ),
                   Text(
                     offer.dropTime,
-                    style: const TextStyle(fontSize: 8, color: Color(0xFF888888)),
+                    style:
+                        const TextStyle(fontSize: 8, color: Color(0xFF888888)),
                   ),
                 ],
               ),
             ],
           ),
-          
+
           const Divider(height: 12),
-          
+
           // Pickup/Drop addresses
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1996,11 +2749,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   children: [
                     const Text(
                       'Pickup',
-                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
+                      style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1A1A1A)),
                     ),
                     Text(
                       offer.pickupAddress,
-                      style: const TextStyle(fontSize: 8, color: Color(0xFF666666)),
+                      style: const TextStyle(
+                          fontSize: 8, color: Color(0xFF666666)),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -2009,7 +2766,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Icon(Icons.arrow_forward, size: 10, color: Colors.grey[400]),
+                child: Icon(Icons.arrow_forward,
+                    size: 10, color: Colors.grey[400]),
               ),
               Expanded(
                 child: Column(
@@ -2017,11 +2775,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   children: [
                     const Text(
                       'Drop',
-                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
+                      style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1A1A1A)),
                     ),
                     Text(
                       offer.dropAddress,
-                      style: const TextStyle(fontSize: 8, color: Color(0xFF666666)),
+                      style: const TextStyle(
+                          fontSize: 8, color: Color(0xFF666666)),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -2030,19 +2792,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               ),
             ],
           ),
-          
+
           const SizedBox(height: 8),
-          
+
           // Accept button - CRITICAL: Disable while accepting
           SizedBox(
             width: double.infinity,
             height: 32,
             child: ElevatedButton(
               // CRITICAL: Disable if not online OR if this ride is being accepted
-              onPressed: (_isOnline && _acceptingRideId == null) ? () => _acceptRide(offer) : null,
+              onPressed: (_isOnline && _acceptingRideId == null)
+                  ? () => _acceptRide(offer)
+                  : null,
               style: ElevatedButton.styleFrom(
-                backgroundColor: isGolden ? const Color(0xFFD4956A) : const Color(0xFFD4956A),
-                disabledBackgroundColor: _acceptingRideId == offer.id 
+                backgroundColor: isGolden
+                    ? const Color(0xFFD4956A)
+                    : const Color(0xFFD4956A),
+                disabledBackgroundColor: _acceptingRideId == offer.id
                     ? const Color(0xFF888888) // Gray when accepting this ride
                     : const Color(0xFFFFE4D6),
                 padding: EdgeInsets.zero,
@@ -2054,12 +2820,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   ? const Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        UberShimmer(
+                          baseColor: Color(0x88FFFFFF),
+                          highlightColor: Color(0xFFFFFFFF),
+                          child: UberShimmerBox(
+                            width: 44,
+                            height: 10,
+                            borderRadius: BorderRadius.all(Radius.circular(8)),
                           ),
                         ),
                         SizedBox(width: 6),
@@ -2074,31 +2841,35 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                       ],
                     )
                   : Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    isGolden ? 'Golden Ride' : 'Accept Ride',
-                    style: TextStyle(
-                      color: _isOnline ? Colors.white : const Color(0xFFD4956A).withOpacity(0.5),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          isGolden ? 'Golden Ride' : 'Accept Ride',
+                          style: TextStyle(
+                            color: _isOnline
+                                ? Colors.white
+                                : const Color(0xFFD4956A).withOpacity(0.5),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.check_circle_outline,
+                          size: 12,
+                          color: _isOnline
+                              ? Colors.white
+                              : const Color(0xFFD4956A).withOpacity(0.5),
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.check_circle_outline,
-                    size: 12,
-                    color: _isOnline ? Colors.white : const Color(0xFFD4956A).withOpacity(0.5),
-                  ),
-                ],
-              ),
             ),
           ),
         ],
       ),
     );
   }
-  
+
   // Check if any ride is currently being accepted (for disabling other accept buttons)
   bool get _isAcceptingAnyRide => _acceptingRideId != null;
 
@@ -2197,8 +2968,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 final user = ref.watch(currentUserProvider);
                 final displayName = user?.name ?? 'Driver';
                 final displayPhone = user?.phone ?? '';
-                final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : 'D';
-                
+                final initial =
+                    displayName.isNotEmpty ? displayName[0].toUpperCase() : 'D';
+
                 return Container(
                   padding: const EdgeInsets.all(20),
                   child: Column(
@@ -2207,15 +2979,19 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                       CircleAvatar(
                         radius: 30,
                         backgroundColor: const Color(0xFFD4956A),
-                        backgroundImage: user?.avatarUrl != null ? NetworkImage(user!.avatarUrl!) : null,
-                        child: user?.avatarUrl == null ? Text(
-                          initial,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ) : null,
+                        backgroundImage: user?.avatarUrl != null
+                            ? NetworkImage(user!.avatarUrl!)
+                            : null,
+                        child: user?.avatarUrl == null
+                            ? Text(
+                                initial,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              )
+                            : null,
                       ),
                       const SizedBox(height: 12),
                       Text(
@@ -2237,9 +3013,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 );
               },
             ),
-            
+
             const Divider(),
-            
+
             // Menu items - using translations
             _buildDrawerItem(Icons.home, ref.tr('home'), () {
               Navigator.pop(context);
@@ -2248,11 +3024,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               Navigator.pop(context);
               _showRideHistory();
             }),
-            _buildDrawerItem(Icons.account_balance_wallet, ref.tr('earnings'), () {
+            _buildDrawerItem(Icons.account_balance_wallet, ref.tr('earnings'),
+                () {
               Navigator.pop(context);
               _showEarnings();
             }),
-            _buildDrawerItem(Icons.description_outlined, 'Update Documents', () {
+            _buildDrawerItem(Icons.description_outlined, 'Update Documents',
+                () {
               Navigator.pop(context);
               context.push(AppRoutes.driverOnboarding);
             }),
@@ -2264,15 +3042,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               Navigator.pop(context);
               _showHelpSupport();
             }),
-            
+
             // Logout option
             _buildDrawerItem(Icons.logout, ref.tr('logout'), () {
               Navigator.pop(context);
               _showLogoutConfirmation();
             }, isDestructive: true),
-            
+
             const Spacer(),
-            
+
             // App version
             const Padding(
               padding: EdgeInsets.all(16),
@@ -2289,7 +3067,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   void _showRideHistory() {
     bool hasFetched = false;
 
@@ -2305,94 +3083,104 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           // so the modal rebuilds when data arrives.
           if (!hasFetched) {
             hasFetched = true;
-            Future.microtask(() => _fetchRideHistory(modalSetState: setModalState));
+            Future.microtask(
+                () => _fetchRideHistory(modalSetState: setModalState));
           }
           return DraggableScrollableSheet(
-          initialChildSize: 0.7,
-          minChildSize: 0.5,
-          maxChildSize: 0.95,
-          expand: false,
-          builder: (context, scrollController) => Column(
-            children: [
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE0E0E0),
-                  borderRadius: BorderRadius.circular(2),
+            initialChildSize: 0.7,
+            minChildSize: 0.5,
+            maxChildSize: 0.95,
+            expand: false,
+            builder: (context, scrollController) => Column(
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(top: 12),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE0E0E0),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Text(
-                      ref.tr('ride_history'),
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const Spacer(),
-                    if (_isLoadingHistory)
-                      const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: _rideHistory.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.history, size: 64, color: Colors.grey[300]),
-                            const SizedBox(height: 16),
-                            Text(
-                              _isLoadingHistory ? 'Loading...' : 'No ride history yet',
-                              style: TextStyle(color: Colors.grey[600]),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Complete rides to see your history',
-                              style: TextStyle(fontSize: 12, color: Colors.grey[400]),
-                            ),
-                          ],
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    children: [
+                      Text(
+                        ref.tr('ride_history'),
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w600,
                         ),
-                      )
-                    : ListView.builder(
-                        controller: scrollController,
-                        itemCount: _rideHistory.length,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        itemBuilder: (context, index) {
-                          return _buildHistoryCardFromData(_rideHistory[index]);
-                        },
                       ),
-              ),
-            ],
-          ),
-        );
+                      const Spacer(),
+                      if (_isLoadingHistory)
+                        const UberShimmer(
+                          child: UberShimmerBox(
+                            width: 46,
+                            height: 12,
+                            borderRadius: BorderRadius.all(Radius.circular(8)),
+                          ),
+                        ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: _rideHistory.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.history,
+                                  size: 64, color: Colors.grey[300]),
+                              const SizedBox(height: 16),
+                              Text(
+                                _isLoadingHistory
+                                    ? 'Loading...'
+                                    : 'No ride history yet',
+                                style: TextStyle(color: Colors.grey[600]),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Complete rides to see your history',
+                                style: TextStyle(
+                                    fontSize: 12, color: Colors.grey[400]),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ListView.builder(
+                          controller: scrollController,
+                          itemCount: _rideHistory.length,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          itemBuilder: (context, index) {
+                            return _buildHistoryCardFromData(
+                                _rideHistory[index]);
+                          },
+                        ),
+                ),
+              ],
+            ),
+          );
         },
       ),
     );
   }
-  
+
   Widget _buildHistoryCardFromData(Map<String, dynamic> ride) {
     // Parse ride data from backend - backend returns 'drop_address' not 'destination_address'
     final pickupAddress = ride['pickup_address'] ?? 'Unknown pickup';
-    final destAddress = ride['drop_address'] ?? ride['destination_address'] ?? 'Unknown destination';
+    final destAddress = ride['drop_address'] ??
+        ride['destination_address'] ??
+        'Unknown destination';
     final fare = (ride['fare'] ?? 0).toDouble();
     final distance = (ride['distance'] ?? 0).toDouble();
     final createdAt = ride['created_at'] ?? ride['completed_at'];
-    
+
     // Format date
     String dateStr = 'Unknown date';
     if (createdAt != null) {
@@ -2404,7 +3192,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         final today = DateTime(now.year, now.month, now.day);
         final yesterday = today.subtract(const Duration(days: 1));
         final rideDate = DateTime(date.year, date.month, date.day);
-        
+
         if (rideDate == today) {
           dateStr = 'Today, ${DateFormat('h:mm a').format(date)}';
         } else if (rideDate == yesterday) {
@@ -2414,13 +3202,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         }
       } catch (_) {}
     }
-    
+
     // Format distance
     String distanceStr = '${(distance / 1000).toStringAsFixed(1)} km';
     if (distance < 1000) {
       distanceStr = '${distance.toInt()} m';
     }
-    
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
@@ -2513,7 +3301,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   void _showEarnings() {
     // All state is local to the modal for proper reactivity
     double availableBalance = 0;
@@ -2524,7 +3312,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     bool isRefreshing = false;
     Map<String, dynamic>? primaryAccount;
     List<Map<String, dynamic>> payoutAccounts = [];
-    
+
     // Local copies of earnings data for the modal
     double modalTodayEarnings = _todayEarnings;
     int modalTodayTrips = _todayTrips;
@@ -2532,7 +3320,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     int modalWeekTrips = _weekTrips;
     String modalOnlineHours = _onlineHours;
     double modalRating = _rating;
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -2546,19 +3334,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             if (refresh) {
               setModalState(() => isRefreshing = true);
             }
-            
+
             try {
               // Fetch earnings
               final earningsData = await apiClient.getDriverEarnings();
               if (earningsData['success'] == true) {
-                final earnings = earningsData['data'] as Map<String, dynamic>? ?? {};
-                modalTodayEarnings = (earnings['today']['amount'] ?? 0).toDouble();
+                final earnings =
+                    earningsData['data'] as Map<String, dynamic>? ?? {};
+                modalTodayEarnings =
+                    (earnings['today']['amount'] ?? 0).toDouble();
                 modalTodayTrips = earnings['today']['trips'] ?? 0;
-                modalWeekEarnings = (earnings['week']['amount'] ?? 0).toDouble();
+                modalWeekEarnings =
+                    (earnings['week']['amount'] ?? 0).toDouble();
                 modalWeekTrips = earnings['week']['trips'] ?? 0;
                 modalOnlineHours = earnings['week']['online_hours'] ?? '0h 0m';
                 modalRating = (earnings['rating'] ?? 0.0).toDouble();
-                
+
                 // Also update parent state
                 if (mounted) {
                   setState(() {
@@ -2571,22 +3362,26 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   });
                 }
               }
-              
+
               // Fetch wallet
               final walletData = await apiClient.getDriverWallet();
               if (walletData['success'] == true) {
                 final data = walletData['data'];
-                availableBalance = (data['balance']?['available'] ?? 0).toDouble();
+                availableBalance =
+                    (data['balance']?['available'] ?? 0).toDouble();
                 pendingBalance = (data['balance']?['pending'] ?? 0).toDouble();
-                totalWithdrawn = (data['stats']?['totalWithdrawn'] ?? 0).toDouble();
-                minimumWithdrawal = (data['minimumWithdrawal'] ?? 100).toDouble();
+                totalWithdrawn =
+                    (data['stats']?['totalWithdrawn'] ?? 0).toDouble();
+                minimumWithdrawal =
+                    (data['minimumWithdrawal'] ?? 100).toDouble();
                 primaryAccount = data['primaryAccount'];
               }
-              
+
               // Fetch payout accounts
               final accountsData = await apiClient.getPayoutAccounts();
               if (accountsData['success'] == true) {
-                payoutAccounts = List<Map<String, dynamic>>.from(accountsData['data']?['accounts'] ?? []);
+                payoutAccounts = List<Map<String, dynamic>>.from(
+                    accountsData['data']?['accounts'] ?? []);
               }
             } catch (e) {
               debugPrint('Error fetching earnings data: $e');
@@ -2597,12 +3392,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               });
             }
           }
-          
+
           // Initial fetch
           if (isLoading && !isRefreshing) {
             fetchAllData();
           }
-          
+
           return Container(
             height: MediaQuery.of(context).size.height * 0.85,
             padding: const EdgeInsets.all(20),
@@ -2624,14 +3419,17 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   children: [
                     Text(
                       ref.tr('earnings'),
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.w600),
                     ),
                     const Spacer(),
                     if (isLoading || isRefreshing)
-                      const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                      const UberShimmer(
+                        child: UberShimmerBox(
+                          width: 46,
+                          height: 12,
+                          borderRadius: BorderRadius.all(Radius.circular(8)),
+                        ),
                       )
                     else
                       IconButton(
@@ -2646,7 +3444,6 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   ],
                 ),
                 const SizedBox(height: 16),
-                
                 Expanded(
                   child: SingleChildScrollView(
                     child: Column(
@@ -2667,21 +3464,25 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
                                   const Text(
                                     'Available Balance',
-                                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                                    style: TextStyle(
+                                        color: Colors.white70, fontSize: 14),
                                   ),
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
                                     decoration: BoxDecoration(
                                       color: Colors.white.withOpacity(0.2),
                                       borderRadius: BorderRadius.circular(12),
                                     ),
                                     child: const Text(
                                       'Withdrawable',
-                                      style: TextStyle(color: Colors.white, fontSize: 10),
+                                      style: TextStyle(
+                                          color: Colors.white, fontSize: 10),
                                     ),
                                   ),
                                 ],
@@ -2699,17 +3500,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                               SizedBox(
                                 width: double.infinity,
                                 child: ElevatedButton(
-                                  onPressed: availableBalance >= minimumWithdrawal
-                                      ? () {
-                                          Navigator.pop(context);
-                                          _showWithdrawSheet(availableBalance, minimumWithdrawal, payoutAccounts);
-                                        }
-                                      : null,
+                                  onPressed:
+                                      availableBalance >= minimumWithdrawal
+                                          ? () {
+                                              Navigator.pop(context);
+                                              _showWithdrawSheet(
+                                                  availableBalance,
+                                                  minimumWithdrawal,
+                                                  payoutAccounts);
+                                            }
+                                          : null,
                                   style: ElevatedButton.styleFrom(
                                     backgroundColor: Colors.white,
                                     foregroundColor: const Color(0xFF2E7D32),
-                                    disabledBackgroundColor: Colors.white.withOpacity(0.5),
-                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    disabledBackgroundColor:
+                                        Colors.white.withOpacity(0.5),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 14),
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(12),
                                     ),
@@ -2718,7 +3525,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                     availableBalance >= minimumWithdrawal
                                         ? 'Withdraw Now'
                                         : 'Min ₹${minimumWithdrawal.toInt()} required',
-                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w600),
                                   ),
                                 ),
                               ),
@@ -2726,7 +3534,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                           ),
                         ),
                         const SizedBox(height: 16),
-                        
+
                         // Today's Earnings Card
                         Container(
                           padding: const EdgeInsets.all(20),
@@ -2743,11 +3551,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             children: [
                               Text(
                                 ref.tr('today_earnings'),
-                                style: const TextStyle(color: Colors.white70, fontSize: 14),
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 14),
                               ),
                               const SizedBox(height: 8),
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
                                   Text(
@@ -2760,7 +3570,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                   ),
                                   Text(
                                     '$modalTodayTrips ${ref.tr('trips_completed')}',
-                                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                                    style: const TextStyle(
+                                        color: Colors.white70, fontSize: 14),
                                   ),
                                 ],
                               ),
@@ -2768,52 +3579,68 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                           ),
                         ),
                         const SizedBox(height: 20),
-                        
+
                         // Weekly Summary
                         Text(
                           ref.tr('this_week'),
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 12),
                         Row(
                           children: [
-                            Expanded(child: _buildEarningsStat(ref.tr('total_earnings'), '₹${modalWeekEarnings.toStringAsFixed(0)}')),
+                            Expanded(
+                                child: _buildEarningsStat(
+                                    ref.tr('total_earnings'),
+                                    '₹${modalWeekEarnings.toStringAsFixed(0)}')),
                             const SizedBox(width: 12),
-                            Expanded(child: _buildEarningsStat(ref.tr('total_trips'), '$modalWeekTrips')),
+                            Expanded(
+                                child: _buildEarningsStat(
+                                    ref.tr('total_trips'), '$modalWeekTrips')),
                           ],
                         ),
                         const SizedBox(height: 12),
                         Row(
                           children: [
-                            Expanded(child: _buildEarningsStat(ref.tr('online_hours'), modalOnlineHours)),
+                            Expanded(
+                                child: _buildEarningsStat(
+                                    ref.tr('online_hours'), modalOnlineHours)),
                             const SizedBox(width: 12),
-                            Expanded(child: _buildEarningsStat(ref.tr('rating'), '${modalRating.toStringAsFixed(1)} ★')),
+                            Expanded(
+                                child: _buildEarningsStat(ref.tr('rating'),
+                                    '${modalRating.toStringAsFixed(1)} ★')),
                           ],
                         ),
                         const SizedBox(height: 20),
-                        
+
                         // Lifetime Stats
                         const Text(
                           'Lifetime',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 12),
                         Row(
                           children: [
-                            Expanded(child: _buildEarningsStat('Total Withdrawn', '₹${totalWithdrawn.toStringAsFixed(0)}')),
+                            Expanded(
+                                child: _buildEarningsStat('Total Withdrawn',
+                                    '₹${totalWithdrawn.toStringAsFixed(0)}')),
                             const SizedBox(width: 12),
-                            Expanded(child: _buildEarningsStat('Pending', '₹${pendingBalance.toStringAsFixed(0)}')),
+                            Expanded(
+                                child: _buildEarningsStat('Pending',
+                                    '₹${pendingBalance.toStringAsFixed(0)}')),
                           ],
                         ),
                         const SizedBox(height: 20),
-                        
+
                         // Payment Settings Section
                         const Text(
                           'Payment Settings',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 12),
-                        
+
                         // Primary Account Display
                         if (primaryAccount != null)
                           Container(
@@ -2821,14 +3648,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             decoration: BoxDecoration(
                               color: const Color(0xFFF5F5F5),
                               borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: const Color(0xFF4CAF50), width: 1),
+                              border: Border.all(
+                                  color: const Color(0xFF4CAF50), width: 1),
                             ),
                             child: Row(
                               children: [
                                 Container(
                                   padding: const EdgeInsets.all(10),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF4CAF50).withOpacity(0.1),
+                                    color: const Color(0xFF4CAF50)
+                                        .withOpacity(0.1),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Icon(
@@ -2841,21 +3670,30 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         primaryAccount!['accountType'] == 'UPI'
                                             ? 'UPI: ${primaryAccount!['upiId']}'
                                             : '${primaryAccount!['bankName']} ${primaryAccount!['accountNumber']}',
-                                        style: const TextStyle(fontWeight: FontWeight.w600),
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w600),
                                       ),
                                       Row(
                                         children: [
-                                          const Icon(Icons.check_circle, size: 14, color: Color(0xFF4CAF50)),
+                                          const Icon(Icons.check_circle,
+                                              size: 14,
+                                              color: Color(0xFF4CAF50)),
                                           const SizedBox(width: 4),
                                           Text(
-                                            primaryAccount!['isVerified'] == true ? 'Verified' : 'Primary Account',
-                                            style: const TextStyle(fontSize: 12, color: Color(0xFF4CAF50)),
+                                            primaryAccount!['isVerified'] ==
+                                                    true
+                                                ? 'Verified'
+                                                : 'Primary Account',
+                                            style: const TextStyle(
+                                                fontSize: 12,
+                                                color: Color(0xFF4CAF50)),
                                           ),
                                         ],
                                       ),
@@ -2874,7 +3712,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             ),
                             child: Row(
                               children: [
-                                const Icon(Icons.warning_amber, color: Color(0xFFFF9800)),
+                                const Icon(Icons.warning_amber,
+                                    color: Color(0xFFFF9800)),
                                 const SizedBox(width: 12),
                                 const Expanded(
                                   child: Text(
@@ -2886,7 +3725,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             ),
                           ),
                         const SizedBox(height: 12),
-                        
+
                         // Manage Payment Methods Button
                         SizedBox(
                           width: double.infinity,
@@ -2906,7 +3745,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                           ),
                         ),
                         const SizedBox(height: 12),
-                        
+
                         // Transaction History Button
                         SizedBox(
                           width: double.infinity,
@@ -2930,7 +3769,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   Widget _buildEarningsStat(String label, String value) {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -2958,21 +3797,30 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   // Withdrawal Sheet
-  void _showWithdrawSheet(double availableBalance, double minimumWithdrawal, List<Map<String, dynamic>> accounts) {
+  void _showWithdrawSheet(double availableBalance, double minimumWithdrawal,
+      List<Map<String, dynamic>> accounts) {
     final TextEditingController amountController = TextEditingController();
     String? selectedAccountId;
     bool isProcessing = false;
     String? errorMessage;
-    
+
+    // Pre-capture translations for StatefulBuilder
+    final trWithdrawMoney = ref.tr('withdraw_money');
+    final trAll = ref.tr('all');
+    final trTransferTo = ref.tr('transfer_to');
+    final trAddPaymentFirst = ref.tr('add_payment_method_first');
+    final trWithdraw = ref.tr('withdraw');
+    final trWithdrawalInitiated = ref.tr('withdrawal_initiated');
+
     // Find primary account
     final primaryAccount = accounts.firstWhere(
       (a) => a['isPrimary'] == true,
       orElse: () => accounts.isNotEmpty ? accounts.first : {},
     );
     selectedAccountId = primaryAccount['id'];
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3008,29 +3856,32 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     onPressed: () => Navigator.pop(context),
                     icon: const Icon(Icons.arrow_back),
                   ),
-                  const Text(
-                    'Withdraw Money',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                  Text(
+                    trWithdrawMoney,
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.w600),
                   ),
                 ],
               ),
               const SizedBox(height: 20),
-              
+
               // Available Balance
               Text(
                 'Available: ₹${availableBalance.toStringAsFixed(2)}',
                 style: const TextStyle(fontSize: 16, color: Color(0xFF666666)),
               ),
               const SizedBox(height: 16),
-              
+
               // Amount Input
               TextField(
                 controller: amountController,
                 keyboardType: TextInputType.number,
-                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
+                style:
+                    const TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
                 decoration: InputDecoration(
                   prefixText: '₹ ',
-                  prefixStyle: const TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
+                  prefixStyle: const TextStyle(
+                      fontSize: 24, fontWeight: FontWeight.w600),
                   hintText: '0',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -3044,55 +3895,64 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 },
               ),
               const SizedBox(height: 12),
-              
+
               // Quick Amount Buttons
               Row(
                 children: [
-                  _buildQuickAmountButton('₹500', 500, amountController, setModalState, availableBalance),
+                  _buildQuickAmountButton('₹500', 500, amountController,
+                      setModalState, availableBalance),
                   const SizedBox(width: 8),
-                  _buildQuickAmountButton('₹1000', 1000, amountController, setModalState, availableBalance),
+                  _buildQuickAmountButton('₹1000', 1000, amountController,
+                      setModalState, availableBalance),
                   const SizedBox(width: 8),
-                  _buildQuickAmountButton('₹2000', 2000, amountController, setModalState, availableBalance),
+                  _buildQuickAmountButton('₹2000', 2000, amountController,
+                      setModalState, availableBalance),
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton(
                       onPressed: () {
-                        amountController.text = availableBalance.toStringAsFixed(0);
+                        amountController.text =
+                            availableBalance.toStringAsFixed(0);
                       },
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
-                      child: const Text('All'),
+                      child: Text(trAll),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 20),
-              
+
               // Transfer To Section
               if (accounts.isNotEmpty) ...[
-                const Text(
-                  'Transfer To',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                Text(
+                  trTransferTo,
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 8),
                 ...accounts.map((account) => RadioListTile<String>(
-                  value: account['id'],
-                  groupValue: selectedAccountId,
-                  onChanged: (value) => setModalState(() => selectedAccountId = value),
-                  title: Text(
-                    account['accountType'] == 'UPI'
-                        ? 'UPI: ${account['upiId']}'
-                        : '${account['bankName']} ${account['accountNumber']}',
-                    style: const TextStyle(fontSize: 14),
-                  ),
-                  subtitle: Text(
-                    account['accountType'] == 'UPI' ? 'Instant' : '1-2 business days',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
-                  ),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+                      value: account['id'],
+                      groupValue: selectedAccountId,
+                      onChanged: (value) =>
+                          setModalState(() => selectedAccountId = value),
+                      title: Text(
+                        account['accountType'] == 'UPI'
+                            ? 'UPI: ${account['upiId']}'
+                            : '${account['bankName']} ${account['accountNumber']}',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      subtitle: Text(
+                        account['accountType'] == 'UPI'
+                            ? 'Instant'
+                            : '1-2 business days',
+                        style: const TextStyle(
+                            fontSize: 12, color: Color(0xFF888888)),
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                    )),
               ] else
                 Container(
                   padding: const EdgeInsets.all(16),
@@ -3100,18 +3960,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     color: const Color(0xFFFFF3E0),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Row(
+                  child: Row(
                     children: [
-                      Icon(Icons.warning_amber, color: Color(0xFFFF9800)),
-                      SizedBox(width: 12),
+                      const Icon(Icons.warning_amber, color: Color(0xFFFF9800)),
+                      const SizedBox(width: 12),
                       Expanded(
-                        child: Text('Please add a payment method first'),
+                        child: Text(trAddPaymentFirst),
                       ),
                     ],
                   ),
                 ),
               const SizedBox(height: 20),
-              
+
               // Withdraw Button
               SizedBox(
                 width: double.infinity,
@@ -3119,37 +3979,44 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   onPressed: isProcessing || accounts.isEmpty
                       ? null
                       : () async {
-                          final amount = double.tryParse(amountController.text) ?? 0;
-                          
+                          final amount =
+                              double.tryParse(amountController.text) ?? 0;
+
                           if (amount < minimumWithdrawal) {
-                            setModalState(() => errorMessage = 'Minimum withdrawal is ₹${minimumWithdrawal.toInt()}');
+                            setModalState(() => errorMessage =
+                                'Minimum withdrawal is ₹${minimumWithdrawal.toInt()}');
                             return;
                           }
-                          
+
                           if (amount > availableBalance) {
-                            setModalState(() => errorMessage = 'Insufficient balance');
+                            setModalState(
+                                () => errorMessage = 'Insufficient balance');
                             return;
                           }
-                          
+
                           setModalState(() => isProcessing = true);
-                          
+
                           try {
                             final result = await apiClient.requestWithdrawal(
                               amount: amount,
                               payoutAccountId: selectedAccountId,
                             );
-                            
+
                             if (result['success'] == true && context.mounted) {
                               Navigator.pop(context);
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
-                                  content: Text('Withdrawal of ₹${amount.toStringAsFixed(0)} initiated!'),
+                                  content: Text(
+                                      trWithdrawalInitiated.replaceAll(
+                                          '{amount}',
+                                          amount.toStringAsFixed(0))),
                                   backgroundColor: const Color(0xFF4CAF50),
                                 ),
                               );
                             } else {
                               setModalState(() {
-                                errorMessage = result['message'] ?? 'Withdrawal failed';
+                                errorMessage =
+                                    result['message'] ?? 'Withdrawal failed';
                                 isProcessing = false;
                               });
                             }
@@ -3168,14 +4035,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     ),
                   ),
                   child: isProcessing
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                      ? const UberShimmer(
+                          baseColor: Color(0x88FFFFFF),
+                          highlightColor: Color(0xFFFFFFFF),
+                          child: UberShimmerBox(
+                            width: 140,
+                            height: 14,
+                            borderRadius: BorderRadius.all(Radius.circular(8)),
+                          ),
                         )
-                      : const Text(
-                          'Withdraw',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
+                      : Text(
+                          trWithdraw,
+                          style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white),
                         ),
                 ),
               ),
@@ -3185,8 +4059,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
-  Widget _buildQuickAmountButton(String label, double amount, TextEditingController controller, StateSetter setModalState, double maxAmount) {
+
+  Widget _buildQuickAmountButton(
+      String label,
+      double amount,
+      TextEditingController controller,
+      StateSetter setModalState,
+      double maxAmount) {
     return Expanded(
       child: OutlinedButton(
         onPressed: amount <= maxAmount
@@ -3199,12 +4078,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   // Payment Methods Management Sheet
   void _showPaymentMethodsSheet() {
     List<Map<String, dynamic>> accounts = [];
     bool isLoading = true;
-    
+
+    // Pre-capture translations for StatefulBuilder
+    final trPaymentMethods = ref.tr('payment_methods');
+    final trNoPaymentMethods = ref.tr('no_payment_methods');
+    final trAddPaymentDesc = ref.tr('add_payment_desc');
+    final trSetAsPrimary = ref.tr('set_as_primary');
+    final trDelete = ref.tr('delete');
+    final trAddUpi = ref.tr('add_upi');
+    final trAddBank = ref.tr('add_bank');
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3218,7 +4106,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               final data = await apiClient.getPayoutAccounts();
               if (data['success'] == true) {
                 setModalState(() {
-                  accounts = List<Map<String, dynamic>>.from(data['data']?['accounts'] ?? []);
+                  accounts = List<Map<String, dynamic>>.from(
+                      data['data']?['accounts'] ?? []);
                   isLoading = false;
                 });
               }
@@ -3226,11 +4115,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               setModalState(() => isLoading = false);
             }
           }
-          
+
           if (isLoading) {
             fetchAccounts();
           }
-          
+
           return Container(
             height: MediaQuery.of(context).size.height * 0.7,
             padding: const EdgeInsets.all(20),
@@ -3250,9 +4139,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    const Text(
-                      'Payment Methods',
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                    Text(
+                      trPaymentMethods,
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.w600),
                     ),
                     const Spacer(),
                     IconButton(
@@ -3262,9 +4152,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   ],
                 ),
                 const SizedBox(height: 20),
-                
                 if (isLoading)
-                  const Center(child: CircularProgressIndicator())
+                  const UberShimmer(
+                    child: Column(
+                      children: [
+                        UberShimmerBox(width: double.infinity, height: 54),
+                        SizedBox(height: 12),
+                        UberShimmerBox(width: double.infinity, height: 54),
+                        SizedBox(height: 12),
+                        UberShimmerBox(width: double.infinity, height: 54),
+                      ],
+                    ),
+                  )
                 else ...[
                   // Existing Accounts
                   if (accounts.isEmpty)
@@ -3274,19 +4173,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                         color: const Color(0xFFF5F5F5),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: const Column(
+                      child: Column(
                         children: [
-                          Icon(Icons.account_balance_wallet_outlined, size: 48, color: Color(0xFF888888)),
-                          SizedBox(height: 12),
+                          const Icon(Icons.account_balance_wallet_outlined,
+                              size: 48, color: Color(0xFF888888)),
+                          const SizedBox(height: 12),
                           Text(
-                            'No payment methods added',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                            trNoPaymentMethods,
+                            style: const TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w500),
                           ),
-                          SizedBox(height: 4),
+                          const SizedBox(height: 4),
                           Text(
-                            'Add a bank account or UPI to withdraw your earnings',
+                            trAddPaymentDesc,
                             textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 14, color: Color(0xFF888888)),
+                            style: const TextStyle(
+                                fontSize: 14, color: Color(0xFF888888)),
                           ),
                         ],
                       ),
@@ -3318,18 +4220,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         account['accountType'] == 'UPI'
                                             ? account['upiId'] ?? 'UPI'
                                             : '${account['bankName']} ${account['accountNumber']}',
-                                        style: const TextStyle(fontWeight: FontWeight.w600),
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w600),
                                       ),
                                       if (account['isPrimary'] == true)
                                         const Text(
                                           'Primary',
-                                          style: TextStyle(fontSize: 12, color: Color(0xFF4CAF50)),
+                                          style: TextStyle(
+                                              fontSize: 12,
+                                              color: Color(0xFF4CAF50)),
                                         ),
                                     ],
                                   ),
@@ -3338,23 +4244,29 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                   onSelected: (value) async {
                                     if (value == 'primary') {
                                       try {
-                                        await apiClient.setPrimaryPayoutAccount(account['id']);
+                                        await apiClient.setPrimaryPayoutAccount(
+                                            account['id']);
                                         setModalState(() => isLoading = true);
                                       } catch (e) {
                                         if (context.mounted) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(content: Text('Error: $e')),
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            SnackBar(
+                                                content: Text('Error: $e')),
                                           );
                                         }
                                       }
                                     } else if (value == 'delete') {
                                       try {
-                                        await apiClient.deletePayoutAccount(account['id']);
+                                        await apiClient
+                                            .deletePayoutAccount(account['id']);
                                         setModalState(() => isLoading = true);
                                       } catch (e) {
                                         if (context.mounted) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(content: Text('Error: $e')),
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            SnackBar(
+                                                content: Text('Error: $e')),
                                           );
                                         }
                                       }
@@ -3362,13 +4274,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                   },
                                   itemBuilder: (context) => [
                                     if (account['isPrimary'] != true)
-                                      const PopupMenuItem(
+                                      PopupMenuItem(
                                         value: 'primary',
-                                        child: Text('Set as Primary'),
+                                        child: Text(trSetAsPrimary),
                                       ),
-                                    const PopupMenuItem(
+                                    PopupMenuItem(
                                       value: 'delete',
-                                      child: Text('Delete', style: TextStyle(color: Colors.red)),
+                                      child: Text(trDelete,
+                                          style: const TextStyle(
+                                              color: Colors.red)),
                                     ),
                                   ],
                                 ),
@@ -3378,9 +4292,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                         },
                       ),
                     ),
-                  
+
                   const SizedBox(height: 16),
-                  
+
                   // Add Account Buttons
                   Row(
                     children: [
@@ -3391,7 +4305,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             _showAddUpiSheet();
                           },
                           icon: const Icon(Icons.account_balance_wallet),
-                          label: const Text('Add UPI'),
+                          label: Text(trAddUpi),
                           style: OutlinedButton.styleFrom(
                             padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
@@ -3405,7 +4319,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             _showAddBankSheet();
                           },
                           icon: const Icon(Icons.account_balance),
-                          label: const Text('Add Bank'),
+                          label: Text(trAddBank),
                           style: OutlinedButton.styleFrom(
                             padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
@@ -3421,13 +4335,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   // Add UPI Sheet
   void _showAddUpiSheet() {
     final TextEditingController upiController = TextEditingController();
     bool isAdding = false;
     String? errorMessage;
-    
+
+    // Pre-capture translations
+    final trAddUpiId = ref.tr('add_upi_id');
+    final trUpiId = ref.tr('upi_id');
+    final trUpiHint = ref.tr('upi_hint');
+    final trUpiExample = ref.tr('upi_example');
+    final trAddUpi = ref.tr('add_upi');
+    final trUpiAdded = ref.tr('upi_added');
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3457,17 +4379,17 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 ),
               ),
               const SizedBox(height: 16),
-              const Text(
-                'Add UPI ID',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+              Text(
+                trAddUpiId,
+                style:
+                    const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 20),
-              
               TextField(
                 controller: upiController,
                 decoration: InputDecoration(
-                  labelText: 'UPI ID',
-                  hintText: 'yourname@upi',
+                  labelText: trUpiId,
+                  hintText: trUpiHint,
                   prefixIcon: const Icon(Icons.account_balance_wallet),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -3476,12 +4398,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 ),
               ),
               const SizedBox(height: 8),
-              const Text(
-                'Example: yourname@paytm, yourname@ybl, yourname@oksbi',
-                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              Text(
+                trUpiExample,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
               ),
               const SizedBox(height: 20),
-              
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -3490,29 +4411,31 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                       : () async {
                           final upiId = upiController.text.trim();
                           if (!upiId.contains('@')) {
-                            setModalState(() => errorMessage = 'Invalid UPI ID format');
+                            setModalState(
+                                () => errorMessage = 'Invalid UPI ID format');
                             return;
                           }
-                          
+
                           setModalState(() => isAdding = true);
-                          
+
                           try {
                             final result = await apiClient.addPayoutAccount(
                               accountType: 'UPI',
                               upiId: upiId,
                             );
-                            
+
                             if (result['success'] == true && context.mounted) {
                               Navigator.pop(context);
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('UPI ID added successfully!'),
-                                  backgroundColor: Color(0xFF4CAF50),
+                                SnackBar(
+                                  content: Text(trUpiAdded),
+                                  backgroundColor: const Color(0xFF4CAF50),
                                 ),
                               );
                             } else {
                               setModalState(() {
-                                errorMessage = result['message'] ?? 'Failed to add UPI';
+                                errorMessage =
+                                    result['message'] ?? 'Failed to add UPI';
                                 isAdding = false;
                               });
                             }
@@ -3531,14 +4454,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     ),
                   ),
                   child: isAdding
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                      ? const UberShimmer(
+                          baseColor: Color(0x88FFFFFF),
+                          highlightColor: Color(0xFFFFFFFF),
+                          child: UberShimmerBox(
+                            width: 120,
+                            height: 14,
+                            borderRadius: BorderRadius.all(Radius.circular(8)),
+                          ),
                         )
-                      : const Text(
-                          'Add UPI ID',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
+                      : Text(
+                          trAddUpiId,
+                          style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white),
                         ),
                 ),
               ),
@@ -3548,7 +4478,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   // Add Bank Account Sheet
   void _showAddBankSheet() {
     final bankNameController = TextEditingController();
@@ -3557,7 +4487,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     final holderNameController = TextEditingController();
     bool isAdding = false;
     String? errorMessage;
-    
+
+    // Pre-capture translations
+    final trAddBankAccount = ref.tr('add_bank_account');
+    final trAccountHolderName = ref.tr('account_holder_name');
+    final trBankName = ref.tr('bank_name');
+    final trAccountNumber = ref.tr('account_number');
+    final trIfscCode = ref.tr('ifsc_code');
+    final trAddBankBtn = ref.tr('add_bank_account');
+    final trBankAdded = ref.tr('bank_added');
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3588,12 +4527,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   ),
                 ),
                 const SizedBox(height: 16),
-                const Text(
-                  'Add Bank Account',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                Text(
+                  trAddBankAccount,
+                  style: const TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 20),
-                
                 if (errorMessage != null)
                   Container(
                     padding: const EdgeInsets.all(12),
@@ -3604,59 +4543,61 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.error_outline, color: Colors.red, size: 20),
+                        const Icon(Icons.error_outline,
+                            color: Colors.red, size: 20),
                         const SizedBox(width: 8),
-                        Expanded(child: Text(errorMessage!, style: const TextStyle(color: Colors.red))),
+                        Expanded(
+                            child: Text(errorMessage!,
+                                style: const TextStyle(color: Colors.red))),
                       ],
                     ),
                   ),
-                
                 TextField(
                   controller: holderNameController,
                   textCapitalization: TextCapitalization.words,
                   decoration: InputDecoration(
-                    labelText: 'Account Holder Name',
+                    labelText: trAccountHolderName,
                     prefixIcon: const Icon(Icons.person),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
                 const SizedBox(height: 16),
-                
                 TextField(
                   controller: bankNameController,
                   textCapitalization: TextCapitalization.words,
                   decoration: InputDecoration(
-                    labelText: 'Bank Name',
+                    labelText: trBankName,
                     hintText: 'e.g., HDFC Bank',
                     prefixIcon: const Icon(Icons.account_balance),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
                 const SizedBox(height: 16),
-                
                 TextField(
                   controller: accountNumberController,
                   keyboardType: TextInputType.number,
                   decoration: InputDecoration(
-                    labelText: 'Account Number',
+                    labelText: trAccountNumber,
                     prefixIcon: const Icon(Icons.numbers),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
                 const SizedBox(height: 16),
-                
                 TextField(
                   controller: ifscController,
                   textCapitalization: TextCapitalization.characters,
                   decoration: InputDecoration(
-                    labelText: 'IFSC Code',
+                    labelText: trIfscCode,
                     hintText: 'e.g., HDFC0001234',
                     prefixIcon: const Icon(Icons.code),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
                 const SizedBox(height: 24),
-                
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
@@ -3668,41 +4609,49 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                 bankNameController.text.trim().isEmpty ||
                                 accountNumberController.text.trim().isEmpty ||
                                 ifscController.text.trim().isEmpty) {
-                              setModalState(() => errorMessage = 'Please fill all fields');
+                              setModalState(() =>
+                                  errorMessage = 'Please fill all fields');
                               return;
                             }
-                            
-                            final ifsc = ifscController.text.trim().toUpperCase();
-                            if (!RegExp(r'^[A-Z]{4}0[A-Z0-9]{6}$').hasMatch(ifsc)) {
-                              setModalState(() => errorMessage = 'Invalid IFSC code format');
+
+                            final ifsc =
+                                ifscController.text.trim().toUpperCase();
+                            if (!RegExp(r'^[A-Z]{4}0[A-Z0-9]{6}$')
+                                .hasMatch(ifsc)) {
+                              setModalState(() =>
+                                  errorMessage = 'Invalid IFSC code format');
                               return;
                             }
-                            
+
                             setModalState(() {
                               isAdding = true;
                               errorMessage = null;
                             });
-                            
+
                             try {
                               final result = await apiClient.addPayoutAccount(
                                 accountType: 'BANK_ACCOUNT',
                                 bankName: bankNameController.text.trim(),
-                                accountNumber: accountNumberController.text.trim(),
+                                accountNumber:
+                                    accountNumberController.text.trim(),
                                 ifscCode: ifsc,
-                                accountHolderName: holderNameController.text.trim(),
+                                accountHolderName:
+                                    holderNameController.text.trim(),
                               );
-                              
-                              if (result['success'] == true && context.mounted) {
+
+                              if (result['success'] == true &&
+                                  context.mounted) {
                                 Navigator.pop(context);
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Bank account added successfully!'),
-                                    backgroundColor: Color(0xFF4CAF50),
+                                  SnackBar(
+                                    content: Text(trBankAdded),
+                                    backgroundColor: const Color(0xFF4CAF50),
                                   ),
                                 );
                               } else {
                                 setModalState(() {
-                                  errorMessage = result['message'] ?? 'Failed to add bank account';
+                                  errorMessage = result['message'] ??
+                                      'Failed to add bank account';
                                   isAdding = false;
                                 });
                               }
@@ -3721,14 +4670,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                       ),
                     ),
                     child: isAdding
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        ? const UberShimmer(
+                            baseColor: Color(0x88FFFFFF),
+                            highlightColor: Color(0xFFFFFFFF),
+                            child: UberShimmerBox(
+                              width: 120,
+                              height: 14,
+                              borderRadius:
+                                  BorderRadius.all(Radius.circular(8)),
+                            ),
                           )
-                        : const Text(
-                            'Add Bank Account',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
+                        : Text(
+                            trAddBankBtn,
+                            style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white),
                           ),
                   ),
                 ),
@@ -3740,14 +4697,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   // Transaction History Sheet
   void _showTransactionHistory() {
     List<Map<String, dynamic>> transactions = [];
     bool isLoading = true;
     int currentPage = 1;
     bool hasMore = true;
-    
+
+    // Pre-capture translations
+    final trTransactionHistory = ref.tr('transaction_history');
+    final trNoTransactions = ref.tr('no_transactions_yet');
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3758,19 +4719,19 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         builder: (context, setModalState) {
           Future<void> fetchTransactions({bool loadMore = false}) async {
             if (loadMore && !hasMore) return;
-            
+
             try {
               final data = await apiClient.getWalletTransactions(
                 page: loadMore ? currentPage + 1 : 1,
                 limit: 20,
               );
-              
+
               if (data['success'] == true) {
                 final newTransactions = List<Map<String, dynamic>>.from(
                   data['data']?['transactions'] ?? [],
                 );
                 final pagination = data['data']?['pagination'];
-                
+
                 setModalState(() {
                   if (loadMore) {
                     transactions.addAll(newTransactions);
@@ -3779,7 +4740,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     transactions = newTransactions;
                     currentPage = 1;
                   }
-                  hasMore = pagination != null && currentPage < (pagination['totalPages'] ?? 1);
+                  hasMore = pagination != null &&
+                      currentPage < (pagination['totalPages'] ?? 1);
                   isLoading = false;
                 });
               }
@@ -3787,11 +4749,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               setModalState(() => isLoading = false);
             }
           }
-          
+
           if (isLoading) {
             fetchTransactions();
           }
-          
+
           return Container(
             height: MediaQuery.of(context).size.height * 0.8,
             padding: const EdgeInsets.all(20),
@@ -3811,9 +4773,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    const Text(
-                      'Transaction History',
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                    Text(
+                      trTransactionHistory,
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.w600),
                     ),
                     const Spacer(),
                     IconButton(
@@ -3823,18 +4786,33 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   ],
                 ),
                 const SizedBox(height: 16),
-                
                 if (isLoading)
-                  const Expanded(child: Center(child: CircularProgressIndicator()))
-                else if (transactions.isEmpty)
                   const Expanded(
+                    child: Center(
+                      child: UberShimmer(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            UberShimmerBox(width: 180, height: 14),
+                            SizedBox(height: 10),
+                            UberShimmerBox(width: 140, height: 12),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else if (transactions.isEmpty)
+                  Expanded(
                     child: Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.receipt_long_outlined, size: 64, color: Color(0xFF888888)),
-                          SizedBox(height: 16),
-                          Text('No transactions yet', style: TextStyle(fontSize: 16, color: Color(0xFF888888))),
+                          const Icon(Icons.receipt_long_outlined,
+                              size: 64, color: Color(0xFF888888)),
+                          const SizedBox(height: 16),
+                          Text(trNoTransactions,
+                              style: const TextStyle(
+                                  fontSize: 16, color: Color(0xFF888888))),
                         ],
                       ),
                     ),
@@ -3846,19 +4824,26 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                       itemBuilder: (context, index) {
                         if (index == transactions.length) {
                           fetchTransactions(loadMore: true);
-                          return const Center(
-                            child: Padding(
-                              padding: EdgeInsets.all(16),
-                              child: CircularProgressIndicator(),
+                          return const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Center(
+                              child: UberShimmer(
+                                child: UberShimmerBox(
+                                  width: 120,
+                                  height: 12,
+                                  borderRadius:
+                                      BorderRadius.all(Radius.circular(8)),
+                                ),
+                              ),
                             ),
                           );
                         }
-                        
+
                         final tx = transactions[index];
                         final amount = (tx['amount'] as num).toDouble();
                         final isCredit = amount > 0;
                         final type = tx['type'] as String? ?? 'UNKNOWN';
-                        
+
                         IconData icon;
                         Color iconColor;
                         switch (type) {
@@ -3882,7 +4867,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                             icon = Icons.swap_horiz;
                             iconColor = const Color(0xFF888888);
                         }
-                        
+
                         return Container(
                           margin: const EdgeInsets.only(bottom: 12),
                           padding: const EdgeInsets.all(16),
@@ -3906,12 +4891,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      tx['description'] ?? type.replaceAll('_', ' '),
-                                      style: const TextStyle(fontWeight: FontWeight.w500),
+                                      tx['description'] ??
+                                          type.replaceAll('_', ' '),
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w500),
                                     ),
                                     Text(
                                       _formatDate(tx['createdAt']),
-                                      style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Color(0xFF888888)),
                                     ),
                                   ],
                                 ),
@@ -3921,7 +4910,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                                 style: TextStyle(
                                   fontWeight: FontWeight.w600,
                                   fontSize: 16,
-                                  color: isCredit ? const Color(0xFF4CAF50) : Colors.red,
+                                  color: isCredit
+                                      ? const Color(0xFF4CAF50)
+                                      : Colors.red,
                                 ),
                               ),
                             ],
@@ -3937,14 +4928,14 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   String _formatDate(String? dateStr) {
     if (dateStr == null) return '';
     try {
       final date = DateTime.parse(dateStr);
       final now = DateTime.now();
       final diff = now.difference(date);
-      
+
       if (diff.inDays == 0) {
         return 'Today, ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
       } else if (diff.inDays == 1) {
@@ -3958,7 +4949,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       return dateStr;
     }
   }
-  
+
   void _showSettings() {
     showModalBottomSheet(
       context: context,
@@ -3972,7 +4963,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           final settings = ref.watch(settingsProvider);
           final settingsNotifier = ref.read(settingsProvider.notifier);
           final isDark = Theme.of(context).brightness == Brightness.dark;
-          
+
           return Container(
             height: MediaQuery.of(context).size.height * 0.7,
             padding: const EdgeInsets.all(20),
@@ -3984,7 +4975,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                     width: 40,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF444444) : const Color(0xFFE0E0E0),
+                      color: isDark
+                          ? const Color(0xFF444444)
+                          : const Color(0xFFE0E0E0),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -3994,7 +4987,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   children: [
                     Text(
                       settingsNotifier.tr('settings'),
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.w600),
                     ),
                     const Spacer(),
                     IconButton(
@@ -4085,8 +5079,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
-  Widget _buildSettingsToggle(IconData icon, String title, String subtitle, bool value, Function(bool) onChanged, bool isDark) {
+
+  Widget _buildSettingsToggle(IconData icon, String title, String subtitle,
+      bool value, Function(bool) onChanged, bool isDark) {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Container(
@@ -4096,10 +5091,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFF5F5F5),
           borderRadius: BorderRadius.circular(10),
         ),
-        child: Icon(icon, color: isDark ? const Color(0xFFB0B0B0) : const Color(0xFF666666), size: 20),
+        child: Icon(icon,
+            color: isDark ? const Color(0xFFB0B0B0) : const Color(0xFF666666),
+            size: 20),
       ),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: Text(subtitle, style: TextStyle(fontSize: 12, color: isDark ? const Color(0xFF888888) : const Color(0xFF888888))),
+      subtitle: Text(subtitle,
+          style: TextStyle(
+              fontSize: 12,
+              color:
+                  isDark ? const Color(0xFF888888) : const Color(0xFF888888))),
       trailing: Switch(
         value: value,
         onChanged: onChanged,
@@ -4107,8 +5108,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
-  Widget _buildSettingsTileWithAction(IconData icon, String title, String subtitle, VoidCallback onTap, bool isDark) {
+
+  Widget _buildSettingsTileWithAction(IconData icon, String title,
+      String subtitle, VoidCallback onTap, bool isDark) {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Container(
@@ -4118,15 +5120,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
           color: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFF5F5F5),
           borderRadius: BorderRadius.circular(10),
         ),
-        child: Icon(icon, color: isDark ? const Color(0xFFB0B0B0) : const Color(0xFF666666), size: 20),
+        child: Icon(icon,
+            color: isDark ? const Color(0xFFB0B0B0) : const Color(0xFF666666),
+            size: 20),
       ),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: Text(subtitle, style: TextStyle(fontSize: 12, color: isDark ? const Color(0xFF888888) : const Color(0xFF888888))),
-      trailing: Icon(Icons.chevron_right, color: isDark ? const Color(0xFF666666) : const Color(0xFFCCCCCC)),
+      subtitle: Text(subtitle,
+          style: TextStyle(
+              fontSize: 12,
+              color:
+                  isDark ? const Color(0xFF888888) : const Color(0xFF888888))),
+      trailing: Icon(Icons.chevron_right,
+          color: isDark ? const Color(0xFF666666) : const Color(0xFFCCCCCC)),
       onTap: onTap,
     );
   }
-  
+
   void _showLanguageSelector() {
     showDialog(
       context: context,
@@ -4134,7 +5143,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         builder: (context, ref, child) {
           final settings = ref.watch(settingsProvider);
           final settingsNotifier = ref.read(settingsProvider.notifier);
-          
+
           return AlertDialog(
             title: Text(settingsNotifier.tr('language')),
             content: SizedBox(
@@ -4147,7 +5156,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   final isSelected = settings.languageCode == lang.code;
                   return ListTile(
                     title: Text(lang.name),
-                    subtitle: Text(lang.nativeName, style: const TextStyle(fontSize: 12)),
+                    subtitle: Text(lang.nativeName,
+                        style: const TextStyle(fontSize: 12)),
                     trailing: isSelected
                         ? const Icon(Icons.check, color: Color(0xFFD4956A))
                         : null,
@@ -4156,22 +5166,26 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                         Navigator.of(dialogContext).pop();
                         return;
                       }
-                      
+
                       // Close dialog first to avoid rebuild issues
                       Navigator.of(dialogContext).pop();
-                      
+
                       // Small delay to let dialog animation finish before triggering app rebuild
                       await Future.delayed(const Duration(milliseconds: 300));
-                      
+
                       if (!context.mounted) return;
-                      
+
                       await settingsNotifier.setLanguage(lang.code, lang.name);
-                      ref.read(driverOnboardingProvider.notifier).setLanguage(lang.code).catchError((_) {});
-                      
+                      ref
+                          .read(driverOnboardingProvider.notifier)
+                          .setLanguage(lang.code)
+                          .catchError((_) {});
+
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
-                            content: Text('${lang.nativeName} - Language changed'),
+                            content:
+                                Text('${lang.nativeName} - Language changed'),
                             duration: const Duration(seconds: 2),
                           ),
                         );
@@ -4186,8 +5200,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   void _showAboutDialog() {
+    final trRaahiDriver = ref.tr('raahi_driver');
+    final trVersion = ref.tr('version');
+    final trAppDescription = ref.tr('app_description');
+    final trCopyright = ref.tr('copyright');
+    final trClose = ref.tr('close');
+    final trTermsPrivacy = ref.tr('terms_privacy');
+    final trOpeningTerms = ref.tr('opening_terms');
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -4201,44 +5223,63 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 borderRadius: BorderRadius.circular(10),
               ),
               child: const Center(
-                child: Text('R', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
+                child: Text('R',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 20)),
               ),
             ),
             const SizedBox(width: 12),
-            const Text('Raahi Driver'),
+            Text(trRaahiDriver),
           ],
         ),
-        content: const Column(
+        content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Version 1.0.0'),
-            SizedBox(height: 8),
-            Text('A modern ride-hailing app for drivers.', style: TextStyle(color: Color(0xFF888888))),
-            SizedBox(height: 16),
-            Text('© 2026 Raahi Technologies', style: TextStyle(fontSize: 12, color: Color(0xFF888888))),
+            Text(trVersion),
+            const SizedBox(height: 8),
+            Text(trAppDescription,
+                style: const TextStyle(color: Color(0xFF888888))),
+            const SizedBox(height: 16),
+            Text(trCopyright,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
+            child: Text(trClose),
           ),
           TextButton(
             onPressed: () {
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Opening Terms & Conditions...')),
+                SnackBar(content: Text(trOpeningTerms)),
               );
             },
-            child: const Text('Terms & Privacy'),
+            child: Text(trTermsPrivacy),
           ),
         ],
       ),
     );
   }
-  
+
   void _showHelpSupport() {
+    final trHelpSupport = ref.tr('help_support');
+    final trContactSupport = ref.tr('contact_support');
+    final trGetHelp = ref.tr('get_help');
+    final trFaqs = ref.tr('faqs');
+    final trFindAnswers = ref.tr('find_answers');
+    final trReportIssue = ref.tr('report_issue');
+    final trLetUsKnow = ref.tr('let_us_know');
+    final trSendFeedback = ref.tr('send_feedback');
+    final trHelpImprove = ref.tr('help_improve');
+    final trHelpline = ref.tr('helpline');
+    final trCallNow = ref.tr('call_now');
+    final trDialing = ref.tr('dialing');
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -4264,9 +5305,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             const SizedBox(height: 16),
             Row(
               children: [
-                const Text(
-                  'Help & Support',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                Text(
+                  trHelpSupport,
+                  style: const TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.w600),
                 ),
                 const Spacer(),
                 IconButton(
@@ -4276,10 +5318,14 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               ],
             ),
             const SizedBox(height: 16),
-            _buildHelpTileWithAction(Icons.headset_mic, 'Contact Support', 'Get help from our team', _showContactSupport),
-            _buildHelpTileWithAction(Icons.article_outlined, 'FAQs', 'Find answers to common questions', _showFAQs),
-            _buildHelpTileWithAction(Icons.report_problem_outlined, 'Report an Issue', 'Let us know about problems', _showReportIssue),
-            _buildHelpTileWithAction(Icons.feedback_outlined, 'Send Feedback', 'Help us improve the app', _showFeedback),
+            _buildHelpTileWithAction(Icons.headset_mic, trContactSupport,
+                trGetHelp, _showContactSupport),
+            _buildHelpTileWithAction(
+                Icons.article_outlined, trFaqs, trFindAnswers, _showFAQs),
+            _buildHelpTileWithAction(Icons.report_problem_outlined,
+                trReportIssue, trLetUsKnow, _showReportIssue),
+            _buildHelpTileWithAction(Icons.feedback_outlined, trSendFeedback,
+                trHelpImprove, _showFeedback),
             const Spacer(),
             Container(
               padding: const EdgeInsets.all(16),
@@ -4291,26 +5337,32 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 children: [
                   const Icon(Icons.phone, color: Color(0xFFD4956A)),
                   const SizedBox(width: 12),
-                  const Expanded(
+                  Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('24/7 Helpline', style: TextStyle(fontWeight: FontWeight.w600)),
-                        Text('1800-123-4567', style: TextStyle(color: Color(0xFF888888), fontSize: 12)),
+                        Text(trHelpline,
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w600)),
+                        const Text('1800-123-4567',
+                            style: TextStyle(
+                                color: Color(0xFF888888), fontSize: 12)),
                       ],
                     ),
                   ),
                   ElevatedButton(
                     onPressed: () {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Dialing 1800-123-4567...')),
+                        SnackBar(content: Text(trDialing)),
                       );
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFD4956A),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                     ),
-                    child: const Text('Call Now', style: TextStyle(color: Colors.white)),
+                    child: Text(trCallNow,
+                        style: const TextStyle(color: Colors.white)),
                   ),
                 ],
               ),
@@ -4320,8 +5372,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
-  Widget _buildHelpTileWithAction(IconData icon, String title, String subtitle, VoidCallback onTap) {
+
+  Widget _buildHelpTileWithAction(
+      IconData icon, String title, String subtitle, VoidCallback onTap) {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Container(
@@ -4334,75 +5387,105 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
         child: Icon(icon, color: const Color(0xFFD4956A), size: 20),
       ),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
+      subtitle: Text(subtitle,
+          style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
       trailing: const Icon(Icons.chevron_right, color: Color(0xFFCCCCCC)),
       onTap: onTap,
     );
   }
-  
+
   void _showContactSupport() {
+    final trContactSupport = ref.tr('contact_support');
+    final trLiveChat = ref.tr('live_chat');
+    final trChatWithAgent = ref.tr('chat_with_agent');
+    final trOpeningChat = ref.tr('opening_chat');
+    final trEmailSupport = ref.tr('email_support');
+    final trOpeningEmail = ref.tr('opening_email');
+    final trCallSupport = ref.tr('call_support');
+    final trDialingSupport = ref.tr('dialing_support');
+    final trClose = ref.tr('close');
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Contact Support'),
+        title: Text(trContactSupport),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
               leading: const Icon(Icons.chat, color: Color(0xFFD4956A)),
-              title: const Text('Live Chat'),
-              subtitle: const Text('Chat with support agent'),
+              title: Text(trLiveChat),
+              subtitle: Text(trChatWithAgent),
               onTap: () {
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Opening live chat...')),
+                  SnackBar(content: Text(trOpeningChat)),
                 );
               },
             ),
             ListTile(
               leading: const Icon(Icons.email, color: Color(0xFFD4956A)),
-              title: const Text('Email Support'),
+              title: Text(trEmailSupport),
               subtitle: const Text('support@raahi.com'),
               onTap: () {
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Opening email...')),
+                  SnackBar(content: Text(trOpeningEmail)),
                 );
               },
             ),
             ListTile(
               leading: const Icon(Icons.phone, color: Color(0xFFD4956A)),
-              title: const Text('Call Support'),
+              title: Text(trCallSupport),
               subtitle: const Text('1800-123-4567'),
               onTap: () {
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Dialing support...')),
+                  SnackBar(content: Text(trDialingSupport)),
                 );
               },
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: Text(trClose)),
         ],
       ),
     );
   }
-  
+
   void _showFAQs() {
     final faqs = [
-      {'q': 'How do I start accepting rides?', 'a': 'Tap "Start Ride" to go online and accept ride requests.'},
-      {'q': 'How are earnings calculated?', 'a': 'Earnings include base fare + distance + time charges.'},
-      {'q': 'What if a rider cancels?', 'a': 'You may receive a cancellation fee depending on the circumstances.'},
-      {'q': 'How do I update my documents?', 'a': 'Open menu > Update Documents, or go to Settings > Update Documents.'},
-      {'q': 'When are payments credited?', 'a': 'Payments are credited to your account within 24-48 hours.'},
+      {
+        'q': 'How do I start accepting rides?',
+        'a': 'Tap "Start Ride" to go online and accept ride requests.'
+      },
+      {
+        'q': 'How are earnings calculated?',
+        'a': 'Earnings include base fare + distance + time charges.'
+      },
+      {
+        'q': 'What if a rider cancels?',
+        'a':
+            'You may receive a cancellation fee depending on the circumstances.'
+      },
+      {
+        'q': 'How do I update my documents?',
+        'a':
+            'Open menu > Update Documents, or go to Settings > Update Documents.'
+      },
+      {
+        'q': 'When are payments credited?',
+        'a': 'Payments are credited to your account within 24-48 hours.'
+      },
     ];
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -4414,11 +5497,14 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
               margin: const EdgeInsets.only(top: 12),
               width: 40,
               height: 4,
-              decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2)),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFE0E0E0),
+                  borderRadius: BorderRadius.circular(2)),
             ),
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Frequently Asked Questions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              child: Text('Frequently Asked Questions',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             ),
             Expanded(
               child: ListView.builder(
@@ -4427,8 +5513,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 itemBuilder: (context, index) {
                   return ExpansionTile(
-                    title: Text(faqs[index]['q']!, style: const TextStyle(fontWeight: FontWeight.w500)),
-                    children: [Padding(padding: const EdgeInsets.all(16), child: Text(faqs[index]['a']!))],
+                    title: Text(faqs[index]['q']!,
+                        style: const TextStyle(fontWeight: FontWeight.w500)),
+                    children: [
+                      Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text(faqs[index]['a']!))
+                    ],
                   );
                 },
               ),
@@ -4438,80 +5529,111 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       ),
     );
   }
-  
+
   void _showReportIssue() {
     final TextEditingController issueController = TextEditingController();
     String selectedCategory = 'App Issue';
-    
+
+    // Pre-capture translations
+    final trReportIssue = ref.tr('report_issue');
+    final trCategory = ref.tr('category');
+    final trDescribeIssue = ref.tr('describe_issue');
+    final trDescribePlaceholder = ref.tr('describe_issue_placeholder');
+    final trCancel = ref.tr('cancel');
+    final trSubmit = ref.tr('submit');
+    final trIssueReported = ref.tr('issue_reported');
+
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Report an Issue'),
+          title: Text(trReportIssue),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Category', style: TextStyle(fontWeight: FontWeight.w500)),
+                Text(trCategory,
+                    style: const TextStyle(fontWeight: FontWeight.w500)),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
                   value: selectedCategory,
                   decoration: InputDecoration(
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
-                  items: ['App Issue', 'Payment Issue', 'Ride Issue', 'Account Issue', 'Other']
+                  items: [
+                    'App Issue',
+                    'Payment Issue',
+                    'Ride Issue',
+                    'Account Issue',
+                    'Other'
+                  ]
                       .map((e) => DropdownMenuItem(value: e, child: Text(e)))
                       .toList(),
                   onChanged: (v) => setDialogState(() => selectedCategory = v!),
                 ),
                 const SizedBox(height: 16),
-                const Text('Describe the issue', style: TextStyle(fontWeight: FontWeight.w500)),
+                Text(trDescribeIssue,
+                    style: const TextStyle(fontWeight: FontWeight.w500)),
                 const SizedBox(height: 8),
                 TextField(
                   controller: issueController,
                   maxLines: 4,
                   decoration: InputDecoration(
-                    hintText: 'Please describe your issue in detail...',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    hintText: trDescribePlaceholder,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
               ],
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(context), child: Text(trCancel)),
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Issue reported successfully! We\'ll get back to you soon.')),
+                  SnackBar(content: Text(trIssueReported)),
                 );
               },
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD4956A)),
-              child: const Text('Submit', style: TextStyle(color: Colors.white)),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFD4956A)),
+              child:
+                  Text(trSubmit, style: const TextStyle(color: Colors.white)),
             ),
           ],
         ),
       ),
     );
   }
-  
+
   void _showFeedback() {
     int rating = 0;
     final TextEditingController feedbackController = TextEditingController();
-    
+
+    // Pre-capture translations
+    final trSendFeedback = ref.tr('send_feedback');
+    final trRateExperience = ref.tr('rate_experience');
+    final trTellUsMore = ref.tr('tell_us_more');
+    final trCancel = ref.tr('cancel');
+    final trSubmit = ref.tr('submit');
+    final trFeedbackThanks = ref.tr('feedback_thanks');
+
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Send Feedback'),
+          title: Text(trSendFeedback),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('How would you rate your experience?'),
+                Text(trRateExperience),
                 const SizedBox(height: 16),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -4531,24 +5653,28 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
                   controller: feedbackController,
                   maxLines: 3,
                   decoration: InputDecoration(
-                    hintText: 'Tell us more about your experience...',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    hintText: trTellUsMore,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
               ],
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(context), child: Text(trCancel)),
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Thank you for your feedback!')),
+                  SnackBar(content: Text(trFeedbackThanks)),
                 );
               },
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD4956A)),
-              child: const Text('Submit', style: TextStyle(color: Colors.white)),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFD4956A)),
+              child:
+                  Text(trSubmit, style: const TextStyle(color: Colors.white)),
             ),
           ],
         ),
@@ -4556,9 +5682,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
     );
   }
 
-  Widget _buildDrawerItem(IconData icon, String title, VoidCallback onTap, {bool isDestructive = false}) {
+  Widget _buildDrawerItem(IconData icon, String title, VoidCallback onTap,
+      {bool isDestructive = false}) {
     return ListTile(
-      leading: Icon(icon, color: isDestructive ? Colors.red : const Color(0xFF1A1A1A)),
+      leading: Icon(icon,
+          color: isDestructive ? Colors.red : const Color(0xFF1A1A1A)),
       title: Text(
         title,
         style: TextStyle(
@@ -4569,17 +5697,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
       onTap: onTap,
     );
   }
-  
+
   void _showLogoutConfirmation() {
+    final trLogout = ref.tr('logout');
+    final trLogoutConfirm = ref.tr('logout_confirm');
+    final trCancel = ref.tr('cancel');
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Logout'),
-        content: const Text('Are you sure you want to logout?'),
+        title: Text(trLogout),
+        content: Text(trLogoutConfirm),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+            child: Text(trCancel),
           ),
           ElevatedButton(
             onPressed: () async {
@@ -4593,7 +5725,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Widget
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
             ),
-            child: const Text('Logout', style: TextStyle(color: Colors.white)),
+            child: Text(trLogout, style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),

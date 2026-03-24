@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 /// Screen for Aadhaar card number verification with OTP
 class AadhaarVerificationScreen extends ConsumerStatefulWidget {
@@ -41,7 +42,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
   void _sendOtp() async {
     if (_aadhaarController.text.length != 12) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter valid 12-digit Aadhaar number')),
+        SnackBar(content: Text(ref.tr('valid_aadhaar_error'))),
       );
       return;
     }
@@ -57,7 +58,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('OTP sent to your registered mobile number')),
+      SnackBar(content: Text(ref.tr('otp_sent_mobile'))),
     );
   }
 
@@ -65,7 +66,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
     final otp = _otpControllers.map((c) => c.text).join();
     if (otp.length != 6) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter 6-digit OTP')),
+        SnackBar(content: Text(ref.tr('enter_6_digit_otp'))),
       );
       return;
     }
@@ -86,8 +87,8 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Aadhaar verified successfully!'),
+        SnackBar(
+          content: Text(ref.tr('aadhaar_verified')),
           backgroundColor: Colors.green,
         ),
       );
@@ -143,7 +144,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
                 const SizedBox(height: 4),
                 Row(
                   children: [
-                    Text('Support', style: TextStyle(fontSize: 12, color: _textSecondary)),
+                    Text(ref.tr('support'), style: const TextStyle(fontSize: 12, color: _textSecondary)),
                     Icon(Icons.keyboard_arrow_down, size: 16, color: _textSecondary),
                   ],
                 ),
@@ -192,7 +193,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
         const SizedBox(height: 32),
 
         // Aadhaar number input
-        const Text('Aadhar number', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+        Text(ref.tr('aadhaar_number'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
         const SizedBox(height: 8),
         TextField(
           controller: _aadhaarController,
@@ -257,7 +258,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
                     height: 24,
                     child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                   )
-                : const Text('Send OTP', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                : Text(ref.tr('send_otp'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
           ),
         ),
       ],
@@ -374,7 +375,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
                     height: 24,
                     child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                   )
-                : const Text('Upload Document', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                : Text(ref.tr('upload_document'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
           ),
         ),
       ],

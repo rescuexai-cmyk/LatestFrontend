@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 class DriverOnboardingScreen extends ConsumerStatefulWidget {
   const DriverOnboardingScreen({super.key});
@@ -200,8 +201,8 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     if (email.isEmpty) {
       setState(() => _isEmailValid = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter your email address'),
+        SnackBar(
+          content: Text(ref.tr('enter_email_prompt')),
           backgroundColor: Colors.red,
         ),
       );
@@ -211,8 +212,8 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     if (!_validateEmail(email)) {
       setState(() => _isEmailValid = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a valid email address'),
+        SnackBar(
+          content: Text(ref.tr('enter_valid_email')),
           backgroundColor: Colors.red,
         ),
       );
@@ -235,8 +236,8 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
           widget.onContinue();
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Failed to save email. Please try again.'),
+            SnackBar(
+              content: Text(ref.tr('email_save_failed')),
               backgroundColor: Colors.red,
             ),
           );
@@ -358,7 +359,7 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
           ),
           const SizedBox(height: 16),
           
-          const Text('Language', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('language'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -757,7 +758,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
           const SizedBox(height: 24),
           
           // Full name
-          const Text('Full name', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('full_name'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           TextField(
             controller: _nameController,
@@ -780,7 +781,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
           // Vehicle registration number (mandatory — used to cross-verify RC)
           Row(
             children: [
-              const Text('Vehicle registration number', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+              Text(ref.tr('vehicle_reg_number'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
               const Text(' *', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.red)),
             ],
           ),
@@ -816,7 +817,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
             },
           ),
           const SizedBox(height: 16),
-          const Text('Vehicle model', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('vehicle_model'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           TextField(
             controller: _vehicleModelController,
@@ -845,7 +846,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
           const SizedBox(height: 16),
           
           // Aadhaar number
-          const Text('Aadhar number', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(ref.tr('aadhaar_number'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 8),
           TextField(
             controller: _aadhaarController,
@@ -1098,8 +1099,8 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
                 ),
                 child: const Icon(Icons.camera_alt, color: _accent),
               ),
-              title: const Text('Camera', style: TextStyle(color: _textPrimary)),
-              subtitle: Text('Take a new photo', style: TextStyle(color: _textSecondary)),
+              title: Text(ref.tr('camera'), style: const TextStyle(color: _textPrimary)),
+              subtitle: Text(ref.tr('take_photo'), style: const TextStyle(color: _textSecondary)),
               onTap: () => Navigator.pop(context, ImageSource.camera),
             ),
             const SizedBox(height: 8),
@@ -1112,8 +1113,8 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
                 ),
                 child: const Icon(Icons.photo_library, color: _blue),
               ),
-              title: const Text('Gallery', style: TextStyle(color: _textPrimary)),
-              subtitle: Text('Choose from gallery', style: TextStyle(color: _textSecondary)),
+              title: Text(ref.tr('gallery'), style: const TextStyle(color: _textPrimary)),
+              subtitle: Text(ref.tr('choose_gallery'), style: const TextStyle(color: _textSecondary)),
               onTap: () => Navigator.pop(context, ImageSource.gallery),
             ),
           ],
@@ -1158,8 +1159,8 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
     
     if (imagePath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please select an image first'),
+        SnackBar(
+          content: Text(ref.tr('please_select_image')),
           backgroundColor: Colors.orange,
         ),
       );
@@ -1270,7 +1271,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
               Navigator.pop(context);
               _nextDocument(); // Skip this document
             },
-            child: Text('Skip for now', style: TextStyle(color: _textSecondary)),
+            child: Text(ref.tr('skip_for_now'), style: const TextStyle(color: _textSecondary)),
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context),
@@ -1279,7 +1280,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
-            child: const Text('Try Again'),
+            child: Text(ref.tr('try_again')),
           ),
         ],
       ),
@@ -1906,7 +1907,7 @@ class _VerificationStatusPageState extends ConsumerState<_VerificationStatusPage
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Verification Progress', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                  Text(ref.tr('verification_progress'), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                   Text('$progress%', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFFD4956A))),
                 ],
               ),

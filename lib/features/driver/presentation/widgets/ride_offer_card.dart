@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 enum RideOfferType { bikeRescue, raahiDriver, golden }
 
@@ -27,7 +29,7 @@ class RideOffer {
   });
 }
 
-class RideOfferCard extends StatelessWidget {
+class RideOfferCard extends ConsumerWidget {
   final RideOffer offer;
   final VoidCallback onAccept;
   final bool isGolden;
@@ -40,7 +42,7 @@ class RideOfferCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Container(
       width: 200,
       margin: const EdgeInsets.only(right: 12),
@@ -102,9 +104,9 @@ class RideOfferCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // Earning
-                const Text(
-                  'Earning',
-                  style: TextStyle(
+                Text(
+                  ref.tr('earning'),
+                  style: const TextStyle(
                     fontSize: 11,
                     color: AppColors.textSecondary,
                   ),
@@ -140,68 +142,75 @@ class RideOfferCard extends StatelessWidget {
                 
                 const SizedBox(height: 12),
                 
-                // Pickup & Drop addresses
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Pickup',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary,
+                // Pickup & Drop addresses - Adaptive layout
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              ref.tr('pickup'),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            offer.pickupAddress,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: AppColors.textSecondary,
+                            const SizedBox(height: 2),
+                            Text(
+                              offer.pickupAddress,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                color: AppColors.textSecondary,
+                                height: 1.3,
+                              ),
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Icon(
-                        Icons.arrow_forward,
-                        size: 14,
-                        color: AppColors.textSecondary,
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Icon(
+                          Icons.arrow_forward,
+                          size: 14,
+                          color: AppColors.textSecondary,
+                        ),
                       ),
-                    ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Drop',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              ref.tr('drop'),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            offer.dropAddress,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: AppColors.textSecondary,
+                            const SizedBox(height: 2),
+                            Text(
+                              offer.dropAddress,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                color: AppColors.textSecondary,
+                                height: 1.3,
+                              ),
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
                 
                 const SizedBox(height: 12),
@@ -224,7 +233,7 @@ class RideOfferCard extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Text(
-                          isGolden ? 'Golden Ride' : 'Accept Ride',
+                          isGolden ? ref.tr('golden_ride') : ref.tr('accept_ride'),
                           style: const TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,

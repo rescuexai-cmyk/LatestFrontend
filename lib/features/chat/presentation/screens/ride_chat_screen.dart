@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/providers/settings_provider.dart';
 import '../widgets/ride_chat_widget.dart';
 import '../../providers/chat_provider.dart';
 
@@ -83,7 +84,7 @@ class RideChatScreen extends ConsumerWidget {
           if (otherUserPhone != null)
             IconButton(
               icon: const Icon(Icons.phone),
-              onPressed: () => _callUser(context),
+              onPressed: () => _callUser(context, ref),
             ),
         ],
       ),
@@ -125,11 +126,11 @@ class RideChatScreen extends ConsumerWidget {
     );
   }
 
-  void _callUser(BuildContext context) {
+  void _callUser(BuildContext context, WidgetRef ref) {
     // You can integrate url_launcher here to make calls
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Calling $otherUserName...'),
+        content: Text(ref.tr('calling').replaceAll('{name}', otherUserName)),
         duration: const Duration(seconds: 2),
       ),
     );

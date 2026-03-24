@@ -27,6 +27,14 @@ class RideBookingState {
   final String selectedCabTypeName; // Display name of selected cab type
   final int driverCount;
   final List<LatLng> polylinePoints;
+  
+  // Pricing v2 fields
+  final double originalFare; // Fare before subsidy
+  final double subsidyAmount; // Amount saved due to subsidy
+  final bool isSubsidyApplied; // Whether launch mode subsidy is active
+  final bool isEcoPickup; // Whether eco pickup option was selected
+  final String? ecoPickupAddress; // Alternate pickup address for eco pickup
+  final LatLng? ecoPickupLocation; // Alternate pickup location for eco pickup
 
   const RideBookingState({
     this.rideId,
@@ -46,6 +54,13 @@ class RideBookingState {
     this.selectedCabTypeName = 'Bike Rescue',
     this.driverCount = 1,
     this.polylinePoints = const [],
+    // Pricing v2 defaults
+    this.originalFare = 0,
+    this.subsidyAmount = 0,
+    this.isSubsidyApplied = false,
+    this.isEcoPickup = false,
+    this.ecoPickupAddress,
+    this.ecoPickupLocation,
   });
 
   RideBookingState copyWith({
@@ -66,6 +81,13 @@ class RideBookingState {
     String? selectedCabTypeName,
     int? driverCount,
     List<LatLng>? polylinePoints,
+    // Pricing v2
+    double? originalFare,
+    double? subsidyAmount,
+    bool? isSubsidyApplied,
+    bool? isEcoPickup,
+    String? ecoPickupAddress,
+    LatLng? ecoPickupLocation,
   }) {
     return RideBookingState(
       rideId: rideId ?? this.rideId,
@@ -85,6 +107,13 @@ class RideBookingState {
       selectedCabTypeName: selectedCabTypeName ?? this.selectedCabTypeName,
       driverCount: driverCount ?? this.driverCount,
       polylinePoints: polylinePoints ?? this.polylinePoints,
+      // Pricing v2
+      originalFare: originalFare ?? this.originalFare,
+      subsidyAmount: subsidyAmount ?? this.subsidyAmount,
+      isSubsidyApplied: isSubsidyApplied ?? this.isSubsidyApplied,
+      isEcoPickup: isEcoPickup ?? this.isEcoPickup,
+      ecoPickupAddress: ecoPickupAddress ?? this.ecoPickupAddress,
+      ecoPickupLocation: ecoPickupLocation ?? this.ecoPickupLocation,
     );
   }
 }
@@ -181,11 +210,27 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
     state = state.copyWith(selectedRideType: type);
   }
 
-  void setCabType({required String id, required String name, required double fare}) {
+  void setCabType({
+    required String id, 
+    required String name, 
+    required double fare,
+    double? originalFare,
+    double? subsidyAmount,
+    bool? isSubsidyApplied,
+    bool? isEcoPickup,
+    String? ecoPickupAddress,
+    LatLng? ecoPickupLocation,
+  }) {
     state = state.copyWith(
       selectedCabTypeId: id,
       selectedCabTypeName: name,
       fare: fare,
+      originalFare: originalFare ?? fare,
+      subsidyAmount: subsidyAmount ?? 0,
+      isSubsidyApplied: isSubsidyApplied ?? false,
+      isEcoPickup: isEcoPickup ?? (id == 'eco_pickup'),
+      ecoPickupAddress: ecoPickupAddress,
+      ecoPickupLocation: ecoPickupLocation,
     );
   }
 
@@ -230,6 +275,13 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
       selectedCabTypeName: state.selectedCabTypeName,
       driverCount: state.driverCount,
       polylinePoints: state.polylinePoints,
+      // Pricing v2
+      originalFare: state.originalFare,
+      subsidyAmount: state.subsidyAmount,
+      isSubsidyApplied: state.isSubsidyApplied,
+      isEcoPickup: state.isEcoPickup,
+      ecoPickupAddress: state.ecoPickupAddress,
+      ecoPickupLocation: state.ecoPickupLocation,
     );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -17,13 +18,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   void _handleTruecallerLogin() {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Truecaller login coming soon')),
+      SnackBar(content: Text(ref.tr('truecaller_coming'))),
     );
   }
 
   void _handleGoogleLogin() {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Google login coming soon')),
+      SnackBar(content: Text(ref.tr('google_coming'))),
     );
   }
 

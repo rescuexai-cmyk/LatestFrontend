@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
@@ -54,14 +55,49 @@ class SignUpScreen extends ConsumerStatefulWidget {
 class _SignUpScreenState extends ConsumerState<SignUpScreen> {
   final _phoneController = TextEditingController();
   bool _isLoading = false;
+  int _cooldownSeconds = 0;
+  Timer? _cooldownTimer;
+  int _retryCount = 0;
+  static const int _maxRetries = 3;
+  static const int _baseCooldown = 30; // Base cooldown in seconds
 
   @override
   void dispose() {
     _phoneController.dispose();
+    _cooldownTimer?.cancel();
     super.dispose();
   }
 
+  void _startCooldown(int seconds) {
+    _cooldownSeconds = seconds;
+    _cooldownTimer?.cancel();
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_cooldownSeconds > 0) {
+        if (mounted) setState(() => _cooldownSeconds--);
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  /// Get cooldown duration with exponential backoff
+  int _getCooldownDuration() {
+    // Exponential backoff: 30s, 60s, 120s, 240s...
+    return _baseCooldown * (1 << _retryCount.clamp(0, 3));
+  }
+
   Future<void> _handleContinue() async {
+    // Check if in cooldown
+    if (_cooldownSeconds > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Please wait $_cooldownSeconds seconds before requesting OTP again'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     String phone = _phoneController.text.trim();
     
     // Remove any spaces, dashes, or parentheses
@@ -91,14 +127,14 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
     await Future.delayed(Duration.zero);
 
     try {
-      debugPrint('📱 Attempting to request OTP for phone: $phone');
+      debugPrint('📱 Attempting to request OTP for phone: $phone (attempt ${_retryCount + 1})');
 
       // Get the notifier - wrap in microtask to avoid blocking
       final authNotifier = ref.read(authStateProvider.notifier);
       
       // Add timeout to prevent indefinite blocking
       final result = await authNotifier.requestOTP(phone).timeout(
-        const Duration(seconds: 10),
+        const Duration(seconds: 15),
         onTimeout: () => OTPResult(success: false, error: 'Request timed out. Please try again.'),
       );
 
@@ -109,18 +145,35 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
 
         if (result.success) {
           debugPrint('✅ OTP requested successfully, navigating to OTP screen');
+          _retryCount = 0; // Reset retry count on success
           // Navigate to OTP screen with phone number (without +91 prefix - will be added in display)
           context.push(
             '${AppRoutes.otpVerification}?phone=$phone&isNewUser=true',
           );
         } else {
           debugPrint('❌ OTP request failed: ${result.error}');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result.error ?? 'Failed to send OTP. Please try again.'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          
+          // Check for rate limit error (429)
+          final error = result.error ?? '';
+          if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
+            _retryCount++;
+            final cooldown = _getCooldownDuration();
+            _startCooldown(cooldown);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Too many requests. Please wait $cooldown seconds and try again.'),
+                backgroundColor: Colors.orange,
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(result.error ?? 'Failed to send OTP. Please try again.'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
         }
       }
     } catch (e) {
@@ -128,12 +181,28 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
 
       if (mounted) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Network error: ${e.toString().split(':').last.trim()}'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        
+        final errorStr = e.toString();
+        // Check for rate limit in exception
+        if (errorStr.contains('429') || errorStr.toLowerCase().contains('too many')) {
+          _retryCount++;
+          final cooldown = _getCooldownDuration();
+          _startCooldown(cooldown);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Too many requests. Please wait $cooldown seconds and try again.'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Network error: ${errorStr.split(':').last.trim()}'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
@@ -248,11 +317,11 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
                   
                   // Next button
                   GestureDetector(
-                    onTap: _isLoading ? null : _handleContinue,
+                    onTap: (_isLoading || _cooldownSeconds > 0) ? null : _handleContinue,
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
                       decoration: BoxDecoration(
-                        color: _isLoading ? const Color(0xFFE0E0E0) : Colors.white,
+                        color: (_isLoading || _cooldownSeconds > 0) ? const Color(0xFFE0E0E0) : Colors.white,
                         borderRadius: BorderRadius.circular(28),
                         border: Border.all(color: const Color(0xFFE0E0E0)),
                       ),
@@ -265,24 +334,33 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
                                 valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF1A1A1A)),
                               ),
                             )
-                          : const Row(
-                              children: [
-                                Text(
-                                  'Next',
-                                  style: TextStyle(
+                          : _cooldownSeconds > 0
+                              ? Text(
+                                  'Wait ${_cooldownSeconds}s',
+                                  style: const TextStyle(
                                     fontSize: 16,
                                     fontWeight: FontWeight.w500,
-                                    color: Color(0xFF1A1A1A),
+                                    color: Color(0xFF9E9E9E),
                                   ),
+                                )
+                              : const Row(
+                                  children: [
+                                    Text(
+                                      'Next',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w500,
+                                        color: Color(0xFF1A1A1A),
+                                      ),
+                                    ),
+                                    SizedBox(width: 8),
+                                    Icon(
+                                      Icons.arrow_forward,
+                                      size: 20,
+                                      color: Color(0xFF1A1A1A),
+                                    ),
+                                  ],
                                 ),
-                                SizedBox(width: 8),
-                                Icon(
-                                  Icons.arrow_forward,
-                                  size: 20,
-                                  color: Color(0xFF1A1A1A),
-                                ),
-                              ],
-                            ),
                     ),
                   ),
                 ],

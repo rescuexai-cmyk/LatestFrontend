@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import '../../../../core/providers/settings_provider.dart';
 
 /// Welcome screen shown after driver completes onboarding.
 /// Shows verification status, document checklist, rejection reasons,
@@ -65,7 +66,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text('Re-upload $title', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _textPrimary)),
+        title: Text(ref.tr('reupload').replaceAll('{title}', title), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _textPrimary)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -75,8 +76,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                 decoration: BoxDecoration(color: _accent.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
                 child: const Icon(Icons.camera_alt, color: _accent),
               ),
-              title: const Text('Camera'),
-              subtitle: const Text('Take a new photo'),
+              title: Text(ref.tr('camera')),
+              subtitle: Text(ref.tr('take_photo')),
               onTap: () => Navigator.pop(ctx, ImageSource.camera),
             ),
             const SizedBox(height: 8),
@@ -86,8 +87,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                 decoration: BoxDecoration(color: const Color(0xFF2196F3).withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
                 child: const Icon(Icons.photo_library, color: Color(0xFF2196F3)),
               ),
-              title: const Text('Gallery'),
-              subtitle: const Text('Choose from gallery'),
+              title: Text(ref.tr('gallery')),
+              subtitle: Text(ref.tr('choose_gallery')),
               onTap: () => Navigator.pop(ctx, ImageSource.gallery),
             ),
           ],
@@ -145,7 +146,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
           children: [
             const Icon(Icons.error_outline, color: _error, size: 28),
             const SizedBox(width: 12),
-            Expanded(child: Text('Upload Failed', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+            Expanded(child: Text(ref.tr('upload_failed'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
           ],
         ),
         content: Column(
@@ -162,7 +163,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(ref.tr('ok'))),
         ],
       ),
     );
@@ -282,7 +283,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                     child: Center(
                       child: TextButton(
                         onPressed: () => context.pop(),
-                        child: const Text('Go Back to Home', style: TextStyle(color: _textSecondary, fontSize: 14)),
+                        child: Text(ref.tr('go_back_home'), style: const TextStyle(color: _textSecondary, fontSize: 14)),
                       ),
                     ),
                   ),
@@ -315,7 +316,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
               const SizedBox(height: 4),
               Row(
                 children: [
-                  Text('Support', style: TextStyle(fontSize: 12, color: _textSecondary)),
+                  Text(ref.tr('support'), style: const TextStyle(fontSize: 12, color: _textSecondary)),
                   Icon(Icons.keyboard_arrow_down, size: 16, color: _textSecondary),
                 ],
               ),
@@ -356,8 +357,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
           ),
         ),
         const SizedBox(width: 20),
-        const Expanded(
-          child: Text('Verification\nProgress', style: TextStyle(fontSize: 14, color: _textSecondary)),
+        Expanded(
+          child: Text(ref.tr('verification_progress'), style: const TextStyle(fontSize: 14, color: _textSecondary)),
         ),
       ],
     );

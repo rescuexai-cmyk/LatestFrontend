@@ -2,11 +2,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:firebase_app_check/firebase_app_check.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/providers/settings_provider.dart';
@@ -28,6 +26,14 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Firebase must be initialized before any Firebase API (including background handler).
+  try {
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  } catch (e, st) {
+    debugPrint('❌ Firebase init in main failed: $e\n$st');
+  }
 
   // Catch widget build errors (prevents blank screen from uncaught exceptions)
   ErrorWidget.builder = (FlutterErrorDetails details) {
@@ -86,11 +92,7 @@ class _AppInitializerState extends State<_AppInitializer> {
 
   Future<void> _initialize() async {
     try {
-      // Firebase already initialized in main() before runApp
       debugPrint('🔓 DEV MODE: Firebase App Check DISABLED');
-
-      // Set up Firebase Messaging background handler
-      FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
       // Run init with 12s timeout to prevent blank screen if push/server hangs
       await _runInitWithTimeout();
@@ -117,24 +119,28 @@ class _AppInitializerState extends State<_AppInitializer> {
   }
 
   Future<void> _doInit() async {
-    // Firebase MUST be initialized before any Firebase API (Messaging, etc.)
-    try {
-      await Firebase.initializeApp().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => throw TimeoutException('Firebase init timed out'),
-      );
-      debugPrint('✅ Firebase initialized');
-    } catch (e) {
-      debugPrint('❌ Firebase init failed: $e');
-      rethrow;
+    // Firebase is initialized in main(); ensure app is ready if init was deferred
+    if (Firebase.apps.isEmpty) {
+      try {
+        await Firebase.initializeApp().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => throw TimeoutException('Firebase init timed out'),
+        );
+        debugPrint('✅ Firebase initialized (fallback in _doInit)');
+      } catch (e) {
+        debugPrint('❌ Firebase init failed: $e');
+        rethrow;
+      }
+    } else {
+      debugPrint('✅ Firebase already initialized');
     }
 
     // Push notification (can block on iOS permission dialog)
     try {
       await pushNotificationService.initialize().timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => debugPrint('⚠️ Push init timed out'),
-      );
+            const Duration(seconds: 8),
+            onTimeout: () => debugPrint('⚠️ Push init timed out'),
+          );
     } catch (e) {
       debugPrint('⚠️ Push init failed: $e');
     }
@@ -173,40 +179,17 @@ class _SplashScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
     return Scaffold(
-      backgroundColor: const Color(0xFFF6EFE4),
+      backgroundColor: Colors.black,
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: const Color(0xFFD4956A),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Icon(Icons.directions_car, color: Colors.white, size: 40),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Raahi',
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF2C2C2C),
-              ),
-            ),
-            const SizedBox(height: 32),
-            const SizedBox(
-              width: 32,
-              height: 32,
-              child: CircularProgressIndicator(
-                strokeWidth: 3,
-                color: Color(0xFFD4956A),
-              ),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Image.asset(
+            'assets/images/splash_logo.png',
+            width: screenWidth * 0.85,
+            fit: BoxFit.contain,
+          ),
         ),
       ),
     );
@@ -248,7 +231,6 @@ class _InitErrorScreen extends StatelessWidget {
   }
 }
 
-
 class RideHailingApp extends ConsumerStatefulWidget {
   const RideHailingApp({super.key});
 
@@ -257,11 +239,91 @@ class RideHailingApp extends ConsumerStatefulWidget {
 }
 
 class _RideHailingAppState extends ConsumerState<RideHailingApp> {
+  bool _pendingRideReplayStarted = false;
+
   @override
   void initState() {
     super.initState();
     // Set up notification tap handler
     _setupNotificationHandler();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _replayPendingRideAcceptActions();
+    });
+  }
+
+  double _parseFare(dynamic value) {
+    if (value == null) return 0;
+    if (value is num) return value.toDouble();
+    final raw = value.toString();
+    final clean = raw.replaceAll(RegExp(r'[^0-9.]'), '');
+    return double.tryParse(clean) ?? 0;
+  }
+
+  RideOffer _rideOfferFromPendingAction(Map<String, dynamic> data) {
+    return RideOffer(
+      id: (data['rideId'] ?? data['id'] ?? '').toString(),
+      type: (data['vehicleType'] ?? data['serviceType'] ?? 'bike_rescue')
+          .toString(),
+      earning: _parseFare(data['fare'] ?? data['estimatedFare']),
+      pickupDistance:
+          (data['distance'] ?? data['pickupDistance'] ?? '0 km').toString(),
+      pickupTime: (data['pickupTime'] ?? 'Now').toString(),
+      dropDistance:
+          (data['dropDistance'] ?? data['distance'] ?? '0 km').toString(),
+      dropTime: (data['dropTime'] ?? '').toString(),
+      pickupAddress:
+          (data['pickup'] ?? data['pickupAddress'] ?? 'Pickup').toString(),
+      dropAddress: (data['drop'] ?? data['dropAddress'] ?? 'Drop').toString(),
+      riderName:
+          data['riderName']?.toString() ?? data['passengerName']?.toString(),
+      riderPhone:
+          data['riderPhone']?.toString() ?? data['passengerPhone']?.toString(),
+      riderId: data['riderId']?.toString() ?? data['passengerId']?.toString(),
+      paymentMethod: (data['paymentMethod'] ?? 'cash').toString(),
+      createdAt: DateTime.now(),
+    );
+  }
+
+  Future<void> _replayPendingRideAcceptActions() async {
+    if (_pendingRideReplayStarted) return;
+    _pendingRideReplayStarted = true;
+
+    // Allow auth restoration to complete during cold start.
+    for (int i = 0; i < 6; i++) {
+      if (!mounted) return;
+      final user = ref.read(authStateProvider).user;
+      if (user != null) break;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    final pendingActions =
+        await pushNotificationService.consumePendingRideActions();
+    if (pendingActions.isEmpty || !mounted) return;
+
+    final user = ref.read(authStateProvider).user;
+    if (user?.userType != UserType.driver) return;
+
+    final router = ref.read(appRouterProvider);
+    for (final action in pendingActions.reversed) {
+      final actionId = (action['action'] ?? '').toString();
+      final accepted = action['accepted'] == true;
+      final data = action['data'];
+      if (actionId != NotificationActions.acceptRide ||
+          !accepted ||
+          data is! Map<String, dynamic>) {
+        continue;
+      }
+
+      final offer = _rideOfferFromPendingAction(data);
+      ref.read(driverRidesProvider.notifier).setAcceptedRide(offer);
+
+      // Preserve existing post-accept path: home -> active ride screen.
+      router.go(AppRoutes.driverHome);
+      Future<void>.delayed(const Duration(milliseconds: 250), () {
+        router.push(AppRoutes.driverActiveRide);
+      });
+      break;
+    }
   }
 
   void _setupNotificationHandler() {
@@ -277,18 +339,22 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
       final senderRole = (data['senderRole'] as String?)?.toUpperCase();
       // Payload fallback for cold-start timing windows where auth state may not be restored yet.
       // If sender is PASSENGER, recipient is DRIVER; if sender is DRIVER, recipient is PASSENGER.
-      final bool? roleFromSender =
-          senderRole == 'PASSENGER' ? true : (senderRole == 'DRIVER' ? false : null);
-      final isDriver = authUserType == UserType.driver || roleFromSender == true;
+      final bool? roleFromSender = senderRole == 'PASSENGER'
+          ? true
+          : (senderRole == 'DRIVER' ? false : null);
+      final isDriver =
+          authUserType == UserType.driver || roleFromSender == true;
       final currentUri = router.routeInformationProvider.value.uri;
       final currentRoute = currentUri.toString();
 
-      debugPrint('Notification tapped type=$type rideId=$rideId currentRoute=$currentRoute');
+      debugPrint(
+          'Notification tapped type=$type rideId=$rideId currentRoute=$currentRoute');
 
       bool isSameActiveRideScreen() {
         if (rideId == null || rideId.isEmpty) return false;
         final bookingRideId = ref.read(rideBookingProvider).rideId;
-        final driverAcceptedRideId = ref.read(driverRidesProvider).acceptedRide?.id;
+        final driverAcceptedRideId =
+            ref.read(driverRidesProvider).acceptedRide?.id;
 
         // Rider active ride host: /ride/:rideId/tracking
         final segments = currentUri.pathSegments;
@@ -300,14 +366,17 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
         }
 
         // Rider pre-pickup host: /booking/driver-assigned
-        final isDriverAssignedPath = currentUri.path == AppRoutes.driverAssigned;
+        final isDriverAssignedPath =
+            currentUri.path == AppRoutes.driverAssigned;
         if (isDriverAssignedPath && bookingRideId == rideId) {
           return true;
         }
 
         // Driver active ride host: /driver/active-ride?rideId=...
-        final isDriverActivePath = currentUri.path == AppRoutes.driverActiveRide;
-        final currentRideId = currentUri.queryParameters['rideId'] ?? driverAcceptedRideId;
+        final isDriverActivePath =
+            currentUri.path == AppRoutes.driverActiveRide;
+        final currentRideId =
+            currentUri.queryParameters['rideId'] ?? driverAcceptedRideId;
         if (isDriverActivePath && currentRideId == rideId) {
           return true;
         }
@@ -332,12 +401,13 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
 
         // Case B: elsewhere in app -> open ride host screen and auto-open chat panel.
         if (isDriver) {
-          router.go('${AppRoutes.driverActiveRide}?rideId=$rideId&openChat=true');
+          router
+              .go('${AppRoutes.driverActiveRide}?rideId=$rideId&openChat=true');
         } else {
           router.go('${AppRoutes.driverAssigned}?rideId=$rideId&openChat=true');
         }
       }
-      
+
       // Navigate based on notification type
       if (type == 'RIDE_UPDATE') {
         final rideEvent = event ?? status;
@@ -360,11 +430,16 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
             break;
           case 'RIDE_COMPLETED_PASSENGER':
           case 'RIDE_COMPLETED_DRIVER':
-            // Go to ride details
+            // Route to active ride host so completion sync can show rating flow.
             if (rideId != null && rideId.isNotEmpty) {
-              router.go('/ride/$rideId');
+              ref
+                  .read(rideBookingProvider.notifier)
+                  .setRideDetails(rideId: rideId);
+              if (!isSameActiveRideScreen()) {
+                router.go('${AppRoutes.driverAssigned}?rideId=$rideId');
+              }
             } else {
-              router.go('/history');
+              router.go(AppRoutes.home);
             }
             break;
           case 'RIDE_CANCELLED':
@@ -377,8 +452,17 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
         }
       } else if (type == 'CHAT_MESSAGE') {
         openChatFromNotification();
+      } else if (type == NotificationTypes.newRide) {
+        router.go(AppRoutes.driverHome);
       } else if (type == 'PAYMENT') {
         router.go('/history');
+      } else if (type == 'DRIVER_ONBOARDING') {
+        final onboardingEvent = event ?? status;
+        if (onboardingEvent == 'VERIFIED' || onboardingEvent == 'COMPLETED') {
+          router.go(AppRoutes.driverHome);
+        } else {
+          router.go(AppRoutes.driverWelcome);
+        }
       } else {
         // Default navigation
         router.go('/services');
@@ -390,14 +474,17 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
   Widget build(BuildContext context) {
     final router = ref.watch(appRouterProvider);
     final settings = ref.watch(settingsProvider);
-    
+
     // Update system UI based on theme
     SystemChrome.setSystemUIOverlayStyle(
       SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: settings.isDarkMode ? Brightness.light : Brightness.dark,
-        systemNavigationBarColor: settings.isDarkMode ? const Color(0xFF1A1A1A) : Colors.white,
-        systemNavigationBarIconBrightness: settings.isDarkMode ? Brightness.light : Brightness.dark,
+        statusBarIconBrightness:
+            settings.isDarkMode ? Brightness.light : Brightness.dark,
+        systemNavigationBarColor:
+            settings.isDarkMode ? const Color(0xFF1A1A1A) : Colors.white,
+        systemNavigationBarIconBrightness:
+            settings.isDarkMode ? Brightness.light : Brightness.dark,
       ),
     );
 
@@ -417,12 +504,13 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
         home: const _ConnectionErrorScreen(),
       );
     }
-    
+
     // Find the locale from settings
     final locale = supportedLanguages
-        .where((l) => l.code == settings.languageCode)
-        .map((l) => l.locale)
-        .firstOrNull ?? const Locale('en', 'IN');
+            .where((l) => l.code == settings.languageCode)
+            .map((l) => l.locale)
+            .firstOrNull ??
+        const Locale('en', 'IN');
 
     return MaterialApp.router(
       title: 'Raahi',
@@ -452,7 +540,8 @@ class _ConnectionErrorScreen extends StatefulWidget {
 
 class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
   bool _retrying = false;
-  final _urlController = TextEditingController(text: ServerConfigService.apiUrl);
+  final _urlController =
+      TextEditingController(text: ServerConfigService.apiUrl);
 
   @override
   void dispose() {
@@ -496,7 +585,9 @@ class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
     } else if (mounted) {
       setState(() => _retrying = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Cannot reach this server. Check IP and port.'), backgroundColor: Colors.red),
+        const SnackBar(
+            content: Text('Cannot reach this server. Check IP and port.'),
+            backgroundColor: Colors.red),
       );
     }
   }
@@ -510,7 +601,8 @@ class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.cloud_off_rounded, size: 80, color: Color(0xFFD4956A)),
+              const Icon(Icons.cloud_off_rounded,
+                  size: 80, color: Color(0xFFD4956A)),
               const SizedBox(height: 24),
               const Text(
                 'Cannot reach server',
@@ -529,7 +621,8 @@ class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
                 decoration: InputDecoration(
                   labelText: 'API URL',
                   hintText: 'http://192.168.x.x:3000/api',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12)),
                   prefixIcon: const Icon(Icons.link),
                 ),
                 keyboardType: TextInputType.url,
@@ -556,13 +649,18 @@ class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
                       child: ElevatedButton.icon(
                         onPressed: _retrying ? null : _saveAndRetry,
                         icon: _retrying
-                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: Colors.white))
                             : const Icon(Icons.refresh),
                         label: Text(_retrying ? 'Connecting...' : 'Connect'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFFD4956A),
                           foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
                         ),
                       ),
                     ),

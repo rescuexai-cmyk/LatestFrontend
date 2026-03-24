@@ -3,6 +3,37 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../core/services/api_client.dart';
 
+/// Calculate ETA from distance string (e.g., "1.5 km" -> "5 min away")
+/// Assumes average city traffic speed of 20 km/h
+String _calculateEtaFromDistance(String distanceStr) {
+  final cleanStr = distanceStr.toLowerCase().trim();
+  double distanceKm = 0;
+  
+  if (cleanStr.contains('km')) {
+    final numStr = cleanStr.replaceAll(RegExp(r'[^0-9.]'), '');
+    distanceKm = double.tryParse(numStr) ?? 0;
+  } else if (cleanStr.contains('m')) {
+    final numStr = cleanStr.replaceAll(RegExp(r'[^0-9.]'), '');
+    distanceKm = (double.tryParse(numStr) ?? 0) / 1000;
+  } else {
+    distanceKm = double.tryParse(cleanStr.replaceAll(RegExp(r'[^0-9.]'), '')) ?? 0;
+  }
+  
+  if (distanceKm <= 0) return '0 min away';
+  
+  const avgSpeedKmh = 20.0;
+  final etaMinutes = (distanceKm / avgSpeedKmh * 60).ceil();
+  
+  if (etaMinutes < 1) return '< 1 min away';
+  if (etaMinutes == 1) return '1 min away';
+  if (etaMinutes >= 60) {
+    final hours = etaMinutes ~/ 60;
+    final mins = etaMinutes % 60;
+    return mins > 0 ? '$hours hr $mins min away' : '$hours hr away';
+  }
+  return '$etaMinutes min away';
+}
+
 // Ride offer model
 class RideOffer {
   final String id;
@@ -44,21 +75,23 @@ class RideOffer {
     this.isGolden = false,
     required this.createdAt,
   });
-  
+
   bool get isCashPayment => paymentMethod.toLowerCase() == 'cash';
 
   /// Parse ride offer from backend response.
-  /// 
+  ///
   /// Backend sends two different formats:
-  /// 1. REST API (GET /rides/available): snake_case fields (pickup_location, etc.)
+  /// 1. REST API (GET /api/rides/available): snake_case fields (pickup_location, etc.)
   /// 2. Socket.io (new-ride-request): camelCase fields (pickupLocation, etc.)
-  /// 
+  ///
   /// This factory handles both formats.
   factory RideOffer.fromJson(Map<String, dynamic> json) {
     // Handle both camelCase (socket) and snake_case (REST) field names
     final pickupLoc = json['pickupLocation'] ?? json['pickup_location'];
-    final dropLoc = json['dropLocation'] ?? json['destination_location'] ?? json['drop_location'];
-    
+    final dropLoc = json['dropLocation'] ??
+        json['destination_location'] ??
+        json['drop_location'];
+
     // Parse pickup location
     LatLng? pickupLatLng;
     if (pickupLoc is Map) {
@@ -67,7 +100,7 @@ class RideOffer {
         (pickupLoc['lng'] ?? pickupLoc['longitude'] ?? 0).toDouble(),
       );
     }
-    
+
     // Parse drop location
     LatLng? dropLatLng;
     if (dropLoc is Map) {
@@ -76,7 +109,7 @@ class RideOffer {
         (dropLoc['lng'] ?? dropLoc['longitude'] ?? 0).toDouble(),
       );
     }
-    
+
     // Parse addresses - handle both nested (socket) and flat (REST) formats
     String pickupAddr = 'Unknown';
     if (pickupLoc is Map && pickupLoc['address'] != null) {
@@ -86,7 +119,7 @@ class RideOffer {
     } else if (json['pickupAddress'] != null) {
       pickupAddr = json['pickupAddress'].toString();
     }
-    
+
     String dropAddr = 'Unknown';
     if (dropLoc is Map && dropLoc['address'] != null) {
       dropAddr = dropLoc['address'].toString();
@@ -97,16 +130,23 @@ class RideOffer {
     } else if (json['dropAddress'] != null) {
       dropAddr = json['dropAddress'].toString();
     }
-    
+
     // Parse fare - handle both camelCase (socket/SSE) and snake_case (REST) field names
-    final fare = (json['estimatedFare'] ?? json['earning'] ?? json['fare'] ?? json['totalFare'] ?? json['total_fare'] ?? 0).toDouble();
-    
+    final fare = (json['estimatedFare'] ??
+            json['earning'] ??
+            json['fare'] ??
+            json['totalFare'] ??
+            json['total_fare'] ??
+            0)
+        .toDouble();
+
     // Parse rider name - handle both field names
     final riderName = json['passengerName'] ?? json['rider_name'];
-    
+
     // Parse timestamp
     DateTime createdAt;
-    final timestamp = json['timestamp'] ?? json['created_at'] ?? json['createdAt'];
+    final timestamp =
+        json['timestamp'] ?? json['created_at'] ?? json['createdAt'];
     if (timestamp != null) {
       try {
         createdAt = DateTime.parse(timestamp.toString());
@@ -116,7 +156,7 @@ class RideOffer {
     } else {
       createdAt = DateTime.now();
     }
-    
+
     // Parse distance - calculate from coordinates if not provided
     final distance = json['distance'];
     String pickupDistStr = json['pickup_distance'] ?? '0 km';
@@ -126,10 +166,27 @@ class RideOffer {
       dropDistStr = '${distKm.toStringAsFixed(1)} km';
     }
     
-    // Parse payment method - handle various field names from backend
-    final paymentMethod = (json['paymentMethod'] ?? json['payment_method'] ?? json['paymentType'] ?? 'cash').toString().toLowerCase();
+    // Calculate ETA from distance (average 20 km/h in city traffic)
+    String pickupTimeStr = json['pickup_time'] ?? '';
+    String dropTimeStr = json['drop_time'] ?? '';
     
-    final passenger = json['passenger'] is Map ? json['passenger'] as Map : null;
+    if (pickupTimeStr.isEmpty || pickupTimeStr == '0 min away' || pickupTimeStr == '0 min') {
+      pickupTimeStr = _calculateEtaFromDistance(pickupDistStr);
+    }
+    if (dropTimeStr.isEmpty || dropTimeStr == '0 min away' || dropTimeStr == '0 min') {
+      dropTimeStr = _calculateEtaFromDistance(dropDistStr);
+    }
+
+    // Parse payment method - handle various field names from backend
+    final paymentMethod = (json['paymentMethod'] ??
+            json['payment_method'] ??
+            json['paymentType'] ??
+            'cash')
+        .toString()
+        .toLowerCase();
+
+    final passenger =
+        json['passenger'] is Map ? json['passenger'] as Map : null;
     final riderPhone = (json['rider_phone'] ??
             json['riderPhone'] ??
             json['passenger_phone'] ??
@@ -140,19 +197,25 @@ class RideOffer {
 
     return RideOffer(
       id: (json['rideId'] ?? json['id'] ?? '').toString(),
-      type: json['vehicleType'] ?? json['ride_type'] ?? json['type'] ?? 'Standard',
+      type: json['vehicleType'] ??
+          json['ride_type'] ??
+          json['type'] ??
+          'Standard',
       earning: fare,
       pickupDistance: pickupDistStr,
-      pickupTime: json['pickup_time'] ?? '0 min away',
+      pickupTime: pickupTimeStr,
       dropDistance: dropDistStr,
-      dropTime: json['drop_time'] ?? '0 min away',
+      dropTime: dropTimeStr,
       pickupAddress: pickupAddr,
       dropAddress: dropAddr,
       pickupLocation: pickupLatLng,
       destinationLocation: dropLatLng,
       riderName: riderName,
       riderPhone: riderPhone,
-      riderId: json['passengerId'] ?? json['passenger_id'] ?? json['riderId'] ?? json['rider_id'],
+      riderId: json['passengerId'] ??
+          json['passenger_id'] ??
+          json['riderId'] ??
+          json['rider_id'],
       otp: json['otp']?.toString(), // OTP from REST API (not in socket events)
       paymentMethod: paymentMethod,
       isGolden: json['is_golden'] ?? false,
@@ -204,27 +267,26 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
       final driverLat = lat ?? 28.6139; // Default to Delhi if not provided
       final driverLng = lng ?? 77.2090;
 
-      final response = await _apiClient.get(
-        '/rides/available',
-        queryParameters: {
-          'lat': driverLat,
-          'lng': driverLng,
-          'radius': 10,
-        },
+      final response = await _apiClient.getAvailableRides(
+        lat: driverLat,
+        lng: driverLng,
+        radius: 10,
       );
 
-      if (response.data['success'] == true) {
+      if (response['success'] == true) {
         // Backend returns: { success, data: { rides: [...], total } }
-        final data = response.data['data'] as Map<String, dynamic>?;
+        final data = response['data'] as Map<String, dynamic>?;
         final ridesJson = data?['rides'] as List<dynamic>? ?? [];
-        final rides = ridesJson.map((json) => RideOffer.fromJson(json as Map<String, dynamic>)).toList();
-        
+        final rides = ridesJson
+            .map((json) => RideOffer.fromJson(json as Map<String, dynamic>))
+            .toList();
+
         debugPrint('Fetched ${rides.length} available rides');
         state = state.copyWith(rideOffers: rides, isLoading: false);
       } else {
         state = state.copyWith(
           isLoading: false,
-          error: response.data['message'] ?? 'Failed to fetch rides',
+          error: response['message']?.toString() ?? 'Failed to fetch rides',
         );
       }
     } catch (e) {
@@ -253,20 +315,22 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
         try {
           acceptedRide = state.rideOffers.firstWhere((r) => r.id == rideId);
         } catch (_) {
-          acceptedRide = state.rideOffers.isNotEmpty ? state.rideOffers.first : null;
+          acceptedRide =
+              state.rideOffers.isNotEmpty ? state.rideOffers.first : null;
         }
-        
+
         // Remove accepted ride from available list
-        final updatedOffers = state.rideOffers.where((r) => r.id != rideId).toList();
-        
+        final updatedOffers =
+            state.rideOffers.where((r) => r.id != rideId).toList();
+
         state = state.copyWith(
           rideOffers: updatedOffers,
           acceptedRide: acceptedRide,
           isLoading: false,
         );
-        
+
         debugPrint('✅ Ride $rideId accepted');
-        
+
         // Update driver location to pickup location for navigation/tracking
         // This allows the rider to see the driver approaching the pickup point
         if (acceptedRide?.pickupLocation != null) {
@@ -276,36 +340,40 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
               acceptedRide!.pickupLocation!.latitude,
               acceptedRide.pickupLocation!.longitude,
             );
-            debugPrint('📍 Driver location updated to pickup: ${acceptedRide.pickupLocation}');
+            debugPrint(
+                '📍 Driver location updated to pickup: ${acceptedRide.pickupLocation}');
           } catch (e) {
             // Non-critical - don't fail the accept if location update fails
             debugPrint('⚠️ Failed to update driver location to pickup: $e');
           }
         }
-        
+
         return true;
       } else {
         // Handle specific error codes
         final code = response['code'] as String?;
         String errorMessage;
-        
+
         if (code == 'RIDE_ALREADY_TAKEN') {
-          errorMessage = 'This ride has already been accepted by another driver';
+          errorMessage =
+              'This ride has already been accepted by another driver';
           // Remove the ride from available list since it's taken
-          final updatedOffers = state.rideOffers.where((r) => r.id != rideId).toList();
+          final updatedOffers =
+              state.rideOffers.where((r) => r.id != rideId).toList();
           state = state.copyWith(
             rideOffers: updatedOffers,
             isLoading: false,
             error: errorMessage,
           );
         } else if (code == 'FORBIDDEN') {
-          errorMessage = response['message'] ?? 'You are not authorized to accept rides';
+          errorMessage =
+              response['message'] ?? 'You are not authorized to accept rides';
           state = state.copyWith(isLoading: false, error: errorMessage);
         } else {
           errorMessage = response['message'] ?? 'Failed to accept ride';
           state = state.copyWith(isLoading: false, error: errorMessage);
         }
-        
+
         return false;
       }
     } catch (e) {
@@ -320,10 +388,11 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
 
   /// Remove a ride from the available list (e.g., when it's taken by another driver)
   void removeRide(String rideId) {
-    final updatedOffers = state.rideOffers.where((r) => r.id != rideId).toList();
+    final updatedOffers =
+        state.rideOffers.where((r) => r.id != rideId).toList();
     state = state.copyWith(rideOffers: updatedOffers);
   }
-  
+
   /// Add a new ride offer (from socket event)
   void addRideOffer(RideOffer offer) {
     // Avoid duplicates
@@ -338,6 +407,19 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
       isLoading: state.isLoading,
       error: state.error,
       acceptedRide: null,
+    );
+  }
+
+  /// Hydrate accepted ride from external events (e.g. notification action replay)
+  /// while keeping the same active-ride navigation flow in UI.
+  void setAcceptedRide(RideOffer ride) {
+    final updatedOffers =
+        state.rideOffers.where((r) => r.id != ride.id).toList();
+    state = DriverRidesState(
+      rideOffers: updatedOffers,
+      isLoading: false,
+      error: null,
+      acceptedRide: ride,
     );
   }
 }

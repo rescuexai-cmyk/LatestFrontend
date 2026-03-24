@@ -22,20 +22,22 @@ class FirebasePhoneAuthService {
   /// Send OTP to phone number using Firebase
   /// Returns a result with verificationId or error
   Future<PhoneAuthResult> sendOTP(String phoneNumber) async {
-    // Ensure phone number has country code
-    String formattedPhone = phoneNumber;
-    if (!phoneNumber.startsWith('+')) {
-      formattedPhone = '+91$phoneNumber'; // Default to India
-    }
+    // Normalize phone number to proper E.164 format (+91XXXXXXXXXX)
+    // Extract only digits first
+    final digits = phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
+    // Get last 10 digits (the actual local number)
+    final localDigits = digits.length > 10 ? digits.substring(digits.length - 10) : digits;
+    // Build proper E.164: +91 followed by 10 digit local number
+    final formattedPhone = '+91$localDigits';
 
-    debugPrint('🔥 Firebase: Sending OTP to $formattedPhone');
+    debugPrint('🔥 Firebase: Sending OTP to $formattedPhone (input was: $phoneNumber)');
 
     _verificationCompleter = Completer<PhoneAuthResult>();
 
     try {
       await _auth.verifyPhoneNumber(
         phoneNumber: formattedPhone,
-        timeout: const Duration(seconds: 60),
+        timeout: const Duration(seconds: 120),
         forceResendingToken: _resendToken,
         
         // Called when verification is completed automatically (Android only)

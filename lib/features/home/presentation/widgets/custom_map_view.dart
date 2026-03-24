@@ -10,6 +10,8 @@ import '../../../../core/models/location.dart';
 import '../../../../core/services/maps_service.dart';
 import '../../../../core/services/car_animation_service.dart';
 import '../../../../core/config/app_config.dart';
+import '../../../../core/utils/auto_map_icon.dart';
+import '../../../../core/utils/bike_map_icon.dart';
 
 /// Ride phase enum for determining route display
 enum RidePhase {
@@ -54,6 +56,7 @@ class CustomMapView extends StatefulWidget {
   final bool animateDriver;
   final Function(double distance, int etaMinutes)? onDriverDistanceUpdate;
   final String? vehicleType; // 'bike', 'auto', 'cab', 'cab-mini', 'cab-premium'
+  final bool isDarkMode; // Use dark map style
 
   const CustomMapView({
     super.key,
@@ -78,6 +81,7 @@ class CustomMapView extends StatefulWidget {
     this.animateDriver = true,
     this.onDriverDistanceUpdate,
     this.vehicleType,
+    this.isDarkMode = false,
   });
 
   @override
@@ -161,14 +165,15 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
 
   Future<void> _loadMapStyle() async {
     try {
-      final brightness = WidgetsBinding.instance.platformDispatcher.platformBrightness;
-      final stylePath = brightness == Brightness.dark 
+      // Use widget's isDarkMode setting (from app settings) instead of system brightness
+      final stylePath = widget.isDarkMode 
           ? 'assets/map_styles/raahi_dark.json'
           : 'assets/map_styles/raahi_light.json';
       _mapStyle = await rootBundle.loadString(stylePath);
       if (_mapController != null && _mapStyle != null) {
         _mapController!.setMapStyle(_mapStyle);
       }
+      debugPrint('🗺️ Map style loaded: ${widget.isDarkMode ? "dark" : "light"}');
     } catch (e) {
       debugPrint('Failed to load map style: $e');
     }
@@ -217,23 +222,33 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
         case 'bike':
           assetPath = 'assets/map_icons/icon_bike.png';
           break;
+        case 'bike-rescue':
+          assetPath = 'assets/map_icons/icon_bike_rescue.png';
+          break;
         case 'auto':
           assetPath = 'assets/map_icons/icon_auto.png';
           break;
         case 'cab-premium':
-          assetPath = 'assets/map_icons/icon_cab_premium.png';
-          break;
+        case 'cab-xl':
         case 'cab':
         case 'cab-mini':
         default:
           assetPath = 'assets/map_icons/icon_cab.png';
           break;
       }
-      
-      _vehicleIcon = await BitmapDescriptor.asset(
-        const ImageConfiguration(size: Size(48, 48)),
-        assetPath,
-      );
+
+      const imageConfig =
+          ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5);
+      if (normalizedType == 'bike' || normalizedType == 'bike-rescue') {
+        _vehicleIcon = await loadBikeMapIconProcessed(assetPath,
+                debugLabel: normalizedType) ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
+      } else if (normalizedType == 'auto') {
+        _vehicleIcon = await loadAutoMapIconProcessed(debugLabel: 'auto') ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
+      } else {
+        _vehicleIcon = await BitmapDescriptor.asset(imageConfig, assetPath);
+      }
       _loadedVehicleType = normalizedType;
       if (mounted) _updateMarkers();
       debugPrint('🚗 Vehicle icon loaded from asset: $assetPath');
@@ -255,9 +270,12 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
   String _normalizeVehicleType(String? type) {
     if (type == null || type.isEmpty) return 'cab';
     final lower = type.toLowerCase().trim();
+    // Check for bike rescue first (before generic bike check)
+    if (lower.contains('rescue') || lower == 'bike_rescue') return 'bike-rescue';
     if (lower.contains('bike') || lower.contains('moto')) return 'bike';
     if (lower.contains('auto') || lower.contains('rickshaw')) return 'auto';
-    if (lower.contains('premium') || lower.contains('suv') || lower.contains('xl')) return 'cab-premium';
+    if (lower.contains('premium') || lower.contains('suv')) return 'cab-premium';
+    if (lower.contains('xl')) return 'cab-xl';
     if (lower.contains('mini') || lower.contains('hatch')) return 'cab-mini';
     return 'cab';
   }
@@ -550,6 +568,11 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
     super.didUpdateWidget(oldWidget);
     
     final rideId = widget.rideId ?? 'unknown';
+    
+    // Check if dark mode changed - reload map style
+    if (widget.isDarkMode != oldWidget.isDarkMode) {
+      _loadMapStyle();
+    }
     
     // Check if vehicle type changed - reload appropriate icon
     if (widget.vehicleType != oldWidget.vehicleType) {
@@ -1446,78 +1469,39 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
         : _fullRoutePoints;
     
     if (routePoints.length >= 2) {
-      // Layer 1: Outer glow (subtle shadow effect)
-      polylines.add(
-        Polyline(
-          polylineId: const PolylineId('route_glow_outer'),
-          points: routePoints,
-          color: Colors.black.withOpacity(0.08),
-          width: 20,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      );
+      // Uber/Rapido style: Clean, thin polyline with subtle border
       
-      // Layer 2: Main glow
-      polylines.add(
-        Polyline(
-          polylineId: const PolylineId('route_glow'),
-          points: routePoints,
-          color: glowColor,
-          width: 16,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      );
-      
-      // Layer 3: Border (dark outline)
+      // Layer 1: Border/outline (dark, slightly wider)
       polylines.add(
         Polyline(
           polylineId: const PolylineId('route_border'),
           points: routePoints,
           color: borderColor,
-          width: 10,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-          patterns: isDriverArriving 
-              ? [PatternItem.dash(18), PatternItem.gap(12)]
-              : const <PatternItem>[],
-        ),
-      );
-      
-      // Layer 4: Main route (colored line)
-      polylines.add(
-        Polyline(
-          polylineId: const PolylineId('route_main'),
-          points: routePoints,
-          color: mainColor,
           width: 6,
           startCap: Cap.roundCap,
           endCap: Cap.roundCap,
           jointType: JointType.round,
           patterns: isDriverArriving 
-              ? [PatternItem.dash(18), PatternItem.gap(12)]
+              ? [PatternItem.dash(12), PatternItem.gap(8)]
               : const <PatternItem>[],
         ),
       );
       
-      // Layer 5: Inner highlight (subtle white line for depth)
-      if (!isDriverArriving) {
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('route_highlight'),
-            points: routePoints,
-            color: Colors.white.withOpacity(0.25),
-            width: 2,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-        );
-      }
+      // Layer 2: Main route (colored line - thin like Uber/Rapido)
+      polylines.add(
+        Polyline(
+          polylineId: const PolylineId('route_main'),
+          points: routePoints,
+          color: mainColor,
+          width: 4,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          patterns: isDriverArriving 
+              ? [PatternItem.dash(12), PatternItem.gap(8)]
+              : const <PatternItem>[],
+        ),
+      );
     }
     
     setState(() {

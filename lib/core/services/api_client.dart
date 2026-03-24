@@ -9,41 +9,42 @@ class ApiClient {
   String? _refreshToken;
   bool _isRefreshing = false;
   void Function()? _onAuthError;
+  String _baseApiPrefix = '';
 
   ApiClient() {
     _initDio(AppConfig.apiUrl);
   }
-  
+
   /// Set callback for auth errors (401 after refresh fails, 403 deactivated)
   void setOnAuthError(void Function()? callback) {
     _onAuthError = callback;
   }
-  
+
   /// Set refresh token for automatic token refresh
   void setRefreshToken(String? token) {
     _refreshToken = token;
   }
-  
+
   /// Attempt to refresh the access token
   Future<bool> _attemptTokenRefresh() async {
     if (_refreshToken == null) return false;
-    
+
     try {
       // Create a new Dio instance to avoid interceptor loop
       final refreshDio = Dio(BaseOptions(
         baseUrl: _dio.options.baseUrl,
         headers: {'Content-Type': 'application/json'},
       ));
-      
-      final response = await refreshDio.post('/auth/refresh', data: {
+
+      final response = await refreshDio.post('/api/auth/refresh', data: {
         'refreshToken': _refreshToken,
       });
-      
+
       final data = response.data as Map<String, dynamic>?;
       if (data?['success'] == true) {
         final newAccessToken = data?['data']?['accessToken'] as String?;
         final newRefreshToken = data?['data']?['refreshToken'] as String?;
-        
+
         if (newAccessToken != null) {
           _authToken = newAccessToken;
           if (newRefreshToken != null) {
@@ -62,6 +63,11 @@ class ApiClient {
 
   void _initDio(String baseUrl) {
     debugPrint('ApiClient initializing with baseUrl: $baseUrl');
+
+    // Don't use path prefix logic - Dio handles baseUrl correctly when paths don't start with /
+    // The issue was that we were double-adding /api
+    _baseApiPrefix = '';
+
     _dio = Dio(BaseOptions(
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 15),
@@ -77,33 +83,36 @@ class ApiClient {
         debugPrint('🌐 API Request: ${options.method} ${options.uri}');
         if (_authToken != null) {
           options.headers['Authorization'] = 'Bearer $_authToken';
-          final tokenPreview = _authToken!.length > 30 
-              ? '${_authToken!.substring(0, 30)}...' 
+          final tokenPreview = _authToken!.length > 30
+              ? '${_authToken!.substring(0, 30)}...'
               : _authToken;
           debugPrint('🔑 Auth header: Bearer $tokenPreview');
           if (!_authToken!.startsWith('eyJ')) {
-            debugPrint('⚠️ WARNING: Token does not look like a valid JWT (should start with "eyJ")');
+            debugPrint(
+                '⚠️ WARNING: Token does not look like a valid JWT (should start with "eyJ")');
           }
         }
         return handler.next(options);
       },
       onResponse: (response, handler) {
-        debugPrint('✅ API Response: ${response.statusCode} ${response.requestOptions.uri}');
+        debugPrint(
+            '✅ API Response: ${response.statusCode} ${response.requestOptions.uri}');
         return handler.next(response);
       },
       onError: (error, handler) async {
-        debugPrint('❌ API Error: ${error.response?.statusCode} ${error.requestOptions.uri}');
+        debugPrint(
+            '❌ API Error: ${error.response?.statusCode} ${error.requestOptions.uri}');
         debugPrint('   Error: ${error.message}');
-        
+
         final statusCode = error.response?.statusCode;
-        
+
         // Handle 401 Unauthorized - attempt token refresh
         if (statusCode == 401 && _refreshToken != null && !_isRefreshing) {
           _isRefreshing = true;
           try {
             final refreshResult = await _attemptTokenRefresh();
             _isRefreshing = false;
-            
+
             if (refreshResult) {
               // Retry the original request with new token
               final opts = error.requestOptions;
@@ -118,7 +127,7 @@ class ApiClient {
           // Refresh failed - trigger logout via callback
           _onAuthError?.call();
         }
-        
+
         // Handle 403 Forbidden - user may be deactivated or lack permissions
         if (statusCode == 403) {
           final message = error.response?.data?['message']?.toString() ?? '';
@@ -126,7 +135,7 @@ class ApiClient {
             _onAuthError?.call();
           }
         }
-        
+
         return handler.next(error);
       },
     ));
@@ -142,7 +151,8 @@ class ApiClient {
   void setAuthToken(String? token) {
     _authToken = token;
     if (token != null) {
-      final preview = token.length > 30 ? '${token.substring(0, 30)}...' : token;
+      final preview =
+          token.length > 30 ? '${token.substring(0, 30)}...' : token;
       debugPrint('🔐 setAuthToken called with: $preview');
       if (!token.startsWith('eyJ')) {
         debugPrint('⚠️ WARNING: Token set is NOT a valid JWT format!');
@@ -153,23 +163,28 @@ class ApiClient {
   }
 
   // Generic HTTP methods for flexible API calls
-  Future<Response> get(String path, {Map<String, dynamic>? queryParameters}) async {
+  Future<Response> get(String path,
+      {Map<String, dynamic>? queryParameters}) async {
     return await _dio.get(path, queryParameters: queryParameters);
   }
 
-  Future<Response> post(String path, {dynamic data, Map<String, dynamic>? queryParameters}) async {
+  Future<Response> post(String path,
+      {dynamic data, Map<String, dynamic>? queryParameters}) async {
     return await _dio.post(path, data: data, queryParameters: queryParameters);
   }
 
-  Future<Response> put(String path, {dynamic data, Map<String, dynamic>? queryParameters}) async {
+  Future<Response> put(String path,
+      {dynamic data, Map<String, dynamic>? queryParameters}) async {
     return await _dio.put(path, data: data, queryParameters: queryParameters);
   }
 
-  Future<Response> patch(String path, {dynamic data, Map<String, dynamic>? queryParameters}) async {
+  Future<Response> patch(String path,
+      {dynamic data, Map<String, dynamic>? queryParameters}) async {
     return await _dio.patch(path, data: data, queryParameters: queryParameters);
   }
 
-  Future<Response> delete(String path, {Map<String, dynamic>? queryParameters}) async {
+  Future<Response> delete(String path,
+      {Map<String, dynamic>? queryParameters}) async {
     return await _dio.delete(path, queryParameters: queryParameters);
   }
 
@@ -178,13 +193,24 @@ class ApiClient {
   // ─────────────────────────────────────────────
 
   /// Request OTP for phone number.
-  /// Backend: POST /api/auth/send-otp  body: { phone, countryCode? }
+  /// Backend: POST /api/auth/send-otp  body: { phone, countryCode?, e164Phone? }
   /// Returns: { success: bool, message: string }
-  Future<Map<String, dynamic>> requestOTP(String phone, {String countryCode = '+91'}) async {
+  Future<Map<String, dynamic>> requestOTP(String phone,
+      {String countryCode = '+91'}) async {
     try {
-      final response = await _dio.post('/auth/send-otp', data: {
-        'phone': phone,
-        'countryCode': countryCode,
+      // Normalize to 10 digits
+      final digits = phone.replaceAll(RegExp(r'[^\d]'), '');
+      final localDigits =
+          digits.length > 10 ? digits.substring(digits.length - 10) : digits;
+      // Build proper E.164 format: +919794696252
+      final e164Phone = '+91$localDigits';
+
+      debugPrint('📱 requestOTP: local=$localDigits, e164=$e164Phone');
+
+      final response = await _dio.post('/api/auth/send-otp', data: {
+        'phone': localDigits,
+        'countryCode': '+91',
+        'e164Phone': e164Phone, // Send full E.164 for backend compatibility
       });
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
@@ -194,7 +220,7 @@ class ApiClient {
   }
 
   /// Verify OTP and get auth tokens.
-  /// Backend: POST /api/auth/verify-otp  body: { phone, otp, countryCode? }
+  /// Backend: POST /api/auth/verify-otp  body: { phone, otp, countryCode?, e164Phone? }
   /// Returns: { success, message, data: { user, tokens: { accessToken, refreshToken, expiresIn } } }
   Future<Map<String, dynamic>> verifyOTP(
     String phone,
@@ -202,10 +228,20 @@ class ApiClient {
     String countryCode = '+91',
   }) async {
     try {
-      final response = await _dio.post('/auth/verify-otp', data: {
-        'phone': phone,
+      // Normalize to 10 digits
+      final digits = phone.replaceAll(RegExp(r'[^\d]'), '');
+      final localDigits =
+          digits.length > 10 ? digits.substring(digits.length - 10) : digits;
+      // Build proper E.164 format: +919794696252
+      final e164Phone = '+91$localDigits';
+
+      debugPrint('📱 verifyOTP: local=$localDigits, e164=$e164Phone');
+
+      final response = await _dio.post('/api/auth/verify-otp', data: {
+        'phone': localDigits,
         'otp': otp,
-        'countryCode': countryCode,
+        'countryCode': '+91',
+        'e164Phone': e164Phone, // Send full E.164 for backend compatibility
       });
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
@@ -221,13 +257,13 @@ class ApiClient {
   }
 
   /// Authenticate with Firebase ID token.
-  /// Backend: POST /api/auth/firebase-phone  body: { firebaseIdToken }
+  /// Backend: POST /api/auth/firebase-phone  body: { idToken }
   /// Returns: { success, message, data: { user, tokens: { accessToken, refreshToken, expiresIn } } }
   Future<Map<String, dynamic>> authenticateWithFirebase(String idToken) async {
     try {
       debugPrint('🔥 Sending Firebase ID token to backend...');
-      final response = await _dio.post('/auth/firebase-phone', data: {
-        'firebaseIdToken': idToken,
+      final response = await _dio.post('/api/auth/firebase-phone', data: {
+        'idToken': idToken, // Backend expects 'idToken' not 'firebaseIdToken'
       });
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
@@ -237,7 +273,8 @@ class ApiClient {
       }
       return {
         'success': false,
-        'message': e.response?.statusMessage ?? 'Firebase authentication failed',
+        'message':
+            e.response?.statusMessage ?? 'Firebase authentication failed',
       };
     }
   }
@@ -248,8 +285,22 @@ class ApiClient {
   Future<Map<String, dynamic>> authenticateWithPhone(String phone) async {
     try {
       debugPrint('📱 Authenticating with verified phone: $phone');
-      final response = await _dio.post('/auth/phone', data: {
-        'phone': phone,
+      // Extract digits only
+      final digits = phone.replaceAll(RegExp(r'[^\d]'), '');
+      final localDigits =
+          digits.length > 10 ? digits.substring(digits.length - 10) : digits;
+      // Build E.164 format: +91XXXXXXXXXX
+      final e164 = localDigits.isNotEmpty ? '+91$localDigits' : phone;
+      debugPrint('📱 Sending E.164 phone to backend: $e164');
+
+      final response = await _dio.post('/api/auth/phone', data: {
+        // Backend expects E.164 format in 'phone' field (e.g., +919794696252)
+        // See authService.ts authenticateWithVerifiedPhone() - it validates /^\+[1-9]\d{6,14}$/
+        'phone': e164,
+        // Also send alternate formats for compatibility
+        'phoneNumber': localDigits,
+        'countryCode': '+91',
+        'e164Phone': e164,
       });
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
@@ -268,7 +319,7 @@ class ApiClient {
   /// Backend: POST /api/auth/logout  body: { refreshToken }
   Future<void> signOut({String? refreshToken}) async {
     try {
-      await _dio.post('/auth/logout', data: {
+      await _dio.post('/api/auth/logout', data: {
         if (refreshToken != null) 'refreshToken': refreshToken,
       });
       _authToken = null;
@@ -282,21 +333,21 @@ class ApiClient {
   /// Backend: GET /api/auth/me
   /// Returns: { success, data: { user: { id, email, phone, firstName, lastName, ... } } }
   Future<Map<String, dynamic>> getCurrentUser() async {
-    final response = await _dio.get('/auth/me');
+    final response = await _dio.get('/api/auth/me');
     return response.data as Map<String, dynamic>;
   }
 
   /// Update user profile.
   /// Backend: PUT /api/auth/profile  body: { firstName?, lastName?, email?, profileImage? }
   Future<Map<String, dynamic>> updateUser(Map<String, dynamic> userData) async {
-    final response = await _dio.put('/auth/profile', data: userData);
+    final response = await _dio.put('/api/auth/profile', data: userData);
     return response.data as Map<String, dynamic>;
   }
 
   /// Refresh access token.
   /// Backend: POST /api/auth/refresh  body: { refreshToken }
   Future<Map<String, dynamic>> refreshToken(String refreshToken) async {
-    final response = await _dio.post('/auth/refresh', data: {
+    final response = await _dio.post('/api/auth/refresh', data: {
       'refreshToken': refreshToken,
     });
     return response.data as Map<String, dynamic>;
@@ -336,14 +387,15 @@ class ApiClient {
     if (waypoints != null && waypoints.isNotEmpty) {
       data['waypoints'] = waypoints;
     }
-    final response = await _dio.post('/rides', data: data);
+    final response = await _dio.post('/api/rides', data: data);
     return response.data as Map<String, dynamic>;
   }
 
   /// Get user's ride history (authenticated).
   /// Backend: GET /api/rides?page=&limit=
-  Future<Map<String, dynamic>> getUserRides({int page = 1, int limit = 20}) async {
-    final response = await _dio.get('/rides', queryParameters: {
+  Future<Map<String, dynamic>> getUserRides(
+      {int page = 1, int limit = 20}) async {
+    final response = await _dio.get('/api/rides', queryParameters: {
       'page': page,
       'limit': limit,
     });
@@ -353,7 +405,7 @@ class ApiClient {
   /// Get a single ride by ID.
   /// Backend: GET /api/rides/:id
   Future<Map<String, dynamic>> getRide(String rideId) async {
-    final response = await _dio.get('/rides/$rideId');
+    final response = await _dio.get('/api/rides/$rideId');
     return response.data as Map<String, dynamic>;
   }
 
@@ -364,7 +416,7 @@ class ApiClient {
     required double lng,
     int radius = 10,
   }) async {
-    final response = await _dio.get('/rides/available', queryParameters: {
+    final response = await _dio.get('/api/rides/available', queryParameters: {
       'lat': lat,
       'lng': lng,
       'radius': radius,
@@ -394,17 +446,17 @@ class ApiClient {
       if (extraStopsCount != null) 'extraStopsCount': extraStopsCount,
       if (discountPercent != null) 'discountPercent': discountPercent,
     };
-    final response = await _dio.put('/rides/$rideId/status', data: data);
+    final response = await _dio.put('/api/rides/$rideId/status', data: data);
     return response.data as Map<String, dynamic>;
   }
-  
+
   /// Start ride with OTP verification.
   /// Backend: POST /api/rides/:id/start  body: { otp }
   /// Driver must provide the OTP that passenger received during ride creation.
   /// Returns: { success, data: { ride } } or error if OTP is invalid
   Future<Map<String, dynamic>> startRide(String rideId, String otp) async {
     try {
-      final response = await _dio.post('/rides/$rideId/start', data: {
+      final response = await _dio.post('/api/rides/$rideId/start', data: {
         'otp': otp,
       });
       return response.data as Map<String, dynamic>;
@@ -422,7 +474,8 @@ class ApiClient {
       if (e.response?.statusCode == 403) {
         return {
           'success': false,
-          'message': e.response?.data?['message'] ?? 'Not authorized to start this ride',
+          'message': e.response?.data?['message'] ??
+              'Not authorized to start this ride',
           'code': 'FORBIDDEN',
         };
       }
@@ -440,19 +493,20 @@ class ApiClient {
 
   /// Assign driver to ride (admin/system use).
   /// Backend: POST /api/rides/:id/assign-driver  body: { driverId }
-  Future<Map<String, dynamic>> assignDriverToRide(String rideId, String driverId) async {
-    final response = await _dio.post('/rides/$rideId/assign-driver', data: {
+  Future<Map<String, dynamic>> assignDriverToRide(
+      String rideId, String driverId) async {
+    final response = await _dio.post('/api/rides/$rideId/assign-driver', data: {
       'driverId': driverId,
     });
     return response.data as Map<String, dynamic>;
   }
-  
+
   /// Driver accepts a ride (driver self-accept).
   /// Backend: POST /api/rides/:id/accept
   /// Returns: { success, data: { ride } } or 409 if already taken
   Future<Map<String, dynamic>> acceptRide(String rideId) async {
     try {
-      final response = await _dio.post('/rides/$rideId/accept');
+      final response = await _dio.post('/api/rides/$rideId/accept');
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
       // Handle 409 Conflict - ride already taken
@@ -465,7 +519,8 @@ class ApiClient {
       }
       // Handle 403 Forbidden - not a driver or not authorized
       if (e.response?.statusCode == 403) {
-        final message = e.response?.data?['message']?.toString() ?? 'You are not authorized to accept this ride';
+        final message = e.response?.data?['message']?.toString() ??
+            'You are not authorized to accept this ride';
         return {
           'success': false,
           'message': message,
@@ -476,10 +531,38 @@ class ApiClient {
     }
   }
 
+  /// Driver declines a ride request.
+  /// Backend: POST /api/rides/:id/decline
+  /// Some deployments may not support this endpoint; returns graceful fallback.
+  Future<Map<String, dynamic>> declineRide(String rideId,
+      {String? reason}) async {
+    try {
+      final response = await _dio.post('/api/rides/$rideId/decline', data: {
+        if (reason != null && reason.isNotEmpty) 'reason': reason,
+      });
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404 || e.response?.statusCode == 405) {
+        return {
+          'success': false,
+          'message': 'Decline endpoint not available on backend',
+          'code': 'DECLINE_UNSUPPORTED',
+        };
+      }
+      return {
+        'success': false,
+        'message': e.response?.data?['message']?.toString() ??
+            'Failed to decline ride',
+        'code': 'DECLINE_FAILED',
+      };
+    }
+  }
+
   /// Cancel a ride.
   /// Backend: POST /api/rides/:id/cancel  body: { reason? }
-  Future<Map<String, dynamic>> cancelRide(String rideId, {String? reason}) async {
-    final response = await _dio.post('/rides/$rideId/cancel', data: {
+  Future<Map<String, dynamic>> cancelRide(String rideId,
+      {String? reason}) async {
+    final response = await _dio.post('/api/rides/$rideId/cancel', data: {
       if (reason != null) 'reason': reason,
     });
     return response.data as Map<String, dynamic>;
@@ -487,8 +570,9 @@ class ApiClient {
 
   /// Submit ride rating.
   /// Backend: POST /api/rides/:id/rating  body: { rating, feedback? }
-  Future<void> submitRideRating(String rideId, double rating, {String? feedback}) async {
-    await _dio.post('/rides/$rideId/rating', data: {
+  Future<void> submitRideRating(String rideId, double rating,
+      {String? feedback}) async {
+    await _dio.post('/api/rides/$rideId/rating', data: {
       'rating': rating,
       if (feedback != null && feedback.isNotEmpty) 'feedback': feedback,
     });
@@ -497,14 +581,15 @@ class ApiClient {
   /// Get ride receipt.
   /// Backend: GET /api/rides/:id/receipt
   Future<Map<String, dynamic>> getRideReceipt(String rideId) async {
-    final response = await _dio.get('/rides/$rideId/receipt');
+    final response = await _dio.get('/api/rides/$rideId/receipt');
     return response.data as Map<String, dynamic>;
   }
 
   /// Update driver location for active ride (tracking).
   /// Backend: POST /api/rides/:id/track  body: { lat, lng, heading?, speed? }
-  Future<void> updateRideTracking(String rideId, double lat, double lng, {double? heading, double? speed}) async {
-    await _dio.post('/rides/$rideId/track', data: {
+  Future<void> updateRideTracking(String rideId, double lat, double lng,
+      {double? heading, double? speed}) async {
+    await _dio.post('/api/rides/$rideId/track', data: {
       'lat': lat,
       'lng': lng,
       if (heading != null) 'heading': heading,
@@ -516,7 +601,7 @@ class ApiClient {
   /// Backend: GET /api/rides/:id/messages
   Future<List<Map<String, dynamic>>> getChatMessages(String rideId) async {
     try {
-      final response = await _dio.get('/rides/$rideId/messages');
+      final response = await _dio.get('/api/rides/$rideId/messages');
       final data = response.data as Map<String, dynamic>;
       final innerData = data['data'];
 
@@ -529,7 +614,10 @@ class ApiClient {
         rawMessages = innerData;
       }
 
-      return rawMessages.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList();
+      return rawMessages
+          .whereType<Map>()
+          .map((m) => Map<String, dynamic>.from(m))
+          .toList();
     } catch (e) {
       debugPrint('Error fetching chat messages: $e');
       return [];
@@ -538,11 +626,13 @@ class ApiClient {
 
   /// Send a chat message.
   /// Backend: POST /api/rides/:id/messages  body: { message }
-  Future<Map<String, dynamic>?> sendChatMessage(String rideId, String message, {String? clientMessageId}) async {
+  Future<Map<String, dynamic>?> sendChatMessage(String rideId, String message,
+      {String? clientMessageId}) async {
     try {
-      final response = await _dio.post('/rides/$rideId/messages', data: {
+      final response = await _dio.post('/api/rides/$rideId/messages', data: {
         'message': message,
-        if (clientMessageId != null && clientMessageId.isNotEmpty) 'clientMessageId': clientMessageId,
+        if (clientMessageId != null && clientMessageId.isNotEmpty)
+          'clientMessageId': clientMessageId,
       });
       final data = response.data as Map<String, dynamic>;
       final innerData = data['data'];
@@ -550,9 +640,10 @@ class ApiClient {
         final msg = innerData['message'];
         if (msg is Map) return Map<String, dynamic>.from(msg);
       }
-      if (data['message'] is Map) return Map<String, dynamic>.from(data['message'] as Map);
+      if (data['message'] is Map)
+        return Map<String, dynamic>.from(data['message'] as Map);
       if (innerData is Map && innerData['id'] != null) {
-        return Map<String, dynamic>.from(innerData as Map);
+        return Map<String, dynamic>.from(innerData);
       }
       return null;
     } catch (e) {
@@ -563,13 +654,13 @@ class ApiClient {
 
   /// Mark all ride chat messages as read for the current user.
   Future<Map<String, dynamic>> markRideMessagesRead(String rideId) async {
-    final response = await _dio.post('/rides/$rideId/messages/read');
+    final response = await _dio.post('/api/rides/$rideId/messages/read');
     return response.data as Map<String, dynamic>;
   }
 
   /// Get unread message count for a ride conversation.
   Future<int> getRideUnreadCount(String rideId) async {
-    final response = await _dio.get('/rides/$rideId/messages/unread-count');
+    final response = await _dio.get('/api/rides/$rideId/messages/unread-count');
     final data = response.data as Map<String, dynamic>;
     final inner = data['data'] as Map<String, dynamic>? ?? const {};
     return (inner['unreadCount'] as num?)?.toInt() ?? 0;
@@ -606,17 +697,96 @@ class ApiClient {
     }
     if (distanceKm != null) data['distanceKm'] = distanceKm;
     if (durationMin != null) data['durationMin'] = durationMin;
-    final response = await _dio.post('/pricing/calculate', data: data);
+    final response = await _dio.post('/api/pricing/calculate', data: data);
     return response.data as Map<String, dynamic>;
   }
 
   /// Get nearby drivers.
   /// Backend: GET /api/pricing/nearby-drivers?lat=&lng=&radius=
-  Future<Map<String, dynamic>> getNearbyDrivers(double lat, double lng, {double radius = 5}) async {
-    final response = await _dio.get('/pricing/nearby-drivers', queryParameters: {
+  Future<Map<String, dynamic>> getNearbyDrivers(double lat, double lng,
+      {double radius = 5}) async {
+    final response =
+        await _dio.get('/api/pricing/nearby-drivers', queryParameters: {
       'lat': lat,
       'lng': lng,
       'radius': radius,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  // ─────────────────────────────────────────────
+  // PRICING V2  (Launch + Scale Mode Support)
+  // ─────────────────────────────────────────────
+
+  /// Get zone health metrics for liquidity management
+  /// Backend: GET /api/pricing/zone-health?zoneId=&cityCode=
+  Future<Map<String, dynamic>> getZoneHealth(
+      String zoneId, String cityCode) async {
+    final response =
+        await _dio.get('/api/pricing/zone-health', queryParameters: {
+      'zoneId': zoneId,
+      'cityCode': cityCode,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get eco pickup suggestion (walk a bit, save money)
+  /// Backend: POST /api/pricing/eco-pickup  body: { pickupLat, pickupLng, dropLat, dropLng }
+  Future<Map<String, dynamic>> getEcoPickup({
+    required double pickupLat,
+    required double pickupLng,
+    required double dropLat,
+    required double dropLng,
+  }) async {
+    final response = await _dio.post('/api/pricing/eco-pickup', data: {
+      'pickupLat': pickupLat,
+      'pickupLng': pickupLng,
+      'dropLat': dropLat,
+      'dropLng': dropLng,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get driver quests (daily challenges)
+  /// Backend: GET /api/pricing/driver-quests
+  Future<Map<String, dynamic>> getDriverQuests() async {
+    final response = await _dio.get('/api/pricing/driver-quests');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Update quest progress
+  /// Backend: POST /api/pricing/driver-quests/progress  body: { questId, completedRides }
+  Future<Map<String, dynamic>> updateQuestProgress(
+      String questId, int completedRides) async {
+    final response =
+        await _dio.post('/api/pricing/driver-quests/progress', data: {
+      'questId': questId,
+      'completedRides': completedRides,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get driver boost status
+  /// Backend: GET /api/pricing/driver-boost?vehicleType=&lat=&lng=
+  Future<Map<String, dynamic>> getDriverBoost(
+      String vehicleType, double lat, double lng) async {
+    final response =
+        await _dio.get('/api/pricing/driver-boost', queryParameters: {
+      'vehicleType': vehicleType,
+      'lat': lat,
+      'lng': lng,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get burn metrics (admin/analytics)
+  /// Backend: GET /api/pricing/burn-metrics?cityCode=&date=
+  Future<Map<String, dynamic>> getBurnMetrics(String cityCode,
+      {String? date}) async {
+    final response =
+        await _dio.get('/api/pricing/burn-metrics', queryParameters: {
+      'cityCode': cityCode,
+      if (date != null) 'date': date,
     });
     return response.data as Map<String, dynamic>;
   }
@@ -628,19 +798,21 @@ class ApiClient {
   /// Get driver profile (authenticated).
   /// Backend: GET /api/driver/profile
   Future<Map<String, dynamic>> getDriverProfile() async {
-    final response = await _dio.get('/driver/profile');
+    final response = await _dio.get('/api/driver/profile');
     return response.data as Map<String, dynamic>;
   }
 
   /// Update driver online/offline status.
   /// Backend: PATCH /api/driver/status  body: { online: bool, location?: { latitude, longitude } }
-  Future<Map<String, dynamic>> updateDriverStatus(bool online, {double? lat, double? lng}) async {
-    final response = await _dio.patch('/driver/status', data: {
+  Future<Map<String, dynamic>> updateDriverStatus(bool online,
+      {double? lat, double? lng}) async {
+    final response = await _dio.patch('/api/driver/status', data: {
       'online': online,
-      if (lat != null && lng != null) 'location': {
-        'latitude': lat,
-        'longitude': lng,
-      },
+      if (lat != null && lng != null)
+        'location': {
+          'latitude': lat,
+          'longitude': lng,
+        },
     });
     return response.data as Map<String, dynamic>;
   }
@@ -648,14 +820,15 @@ class ApiClient {
   /// Get driver earnings.
   /// Backend: GET /api/driver/earnings
   Future<Map<String, dynamic>> getDriverEarnings() async {
-    final response = await _dio.get('/driver/earnings');
+    final response = await _dio.get('/api/driver/earnings');
     return response.data as Map<String, dynamic>;
   }
 
   /// Get driver trip history.
   /// Backend: GET /api/driver/trips?page=&limit=
-  Future<Map<String, dynamic>> getDriverTrips({int page = 1, int limit = 10}) async {
-    final response = await _dio.get('/driver/trips', queryParameters: {
+  Future<Map<String, dynamic>> getDriverTrips(
+      {int page = 1, int limit = 10}) async {
+    final response = await _dio.get('/api/driver/trips', queryParameters: {
       'page': page,
       'limit': limit,
     });
@@ -665,7 +838,7 @@ class ApiClient {
   /// Start driver onboarding.
   /// Backend: POST /api/driver/onboarding/start
   Future<Map<String, dynamic>> startDriverOnboarding() async {
-    final response = await _dio.post('/driver/onboarding/start');
+    final response = await _dio.post('/api/driver/onboarding/start');
     return response.data as Map<String, dynamic>;
   }
 
@@ -673,7 +846,7 @@ class ApiClient {
   /// Backend: GET /api/driver/onboarding/status
   /// Returns: { success, data: { onboarding_status, can_start_rides, message? } }
   Future<Map<String, dynamic>> getDriverOnboardingStatus() async {
-    final response = await _dio.get('/driver/onboarding/status');
+    final response = await _dio.get('/api/driver/onboarding/status');
     return response.data as Map<String, dynamic>;
   }
 
@@ -689,12 +862,13 @@ class ApiClient {
     try {
       // Map frontend document types to backend expected types
       final backendDocType = _mapDocumentType(documentType);
-      
+
       final formData = FormData.fromMap({
         // Backend expects 'document' as the file field name
         'document': await MultipartFile.fromFile(
-          filePath, 
-          filename: '${backendDocType.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.jpg',
+          filePath,
+          filename:
+              '${backendDocType.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.jpg',
         ),
       });
       // documentType goes as query parameter, not in form body
@@ -708,12 +882,13 @@ class ApiClient {
       final statusCode = e.response?.statusCode;
       final responseData = e.response?.data;
       String errorMsg = 'Upload failed';
-      
+
       if (responseData is Map && responseData['message'] != null) {
         errorMsg = responseData['message'];
       } else if (statusCode == 401) {
         if (_authToken == 'dev_mock_token_123456') {
-          errorMsg = 'You\'re logged in with dev bypass (OTP 123456). Document upload needs a real login. Log out and sign in with a real OTP, or ask backend to accept 123456.';
+          errorMsg =
+              'You\'re logged in with dev bypass (OTP 123456). Document upload needs a real login. Log out and sign in with a real OTP, or ask backend to accept 123456.';
         } else {
           errorMsg = 'Session expired. Please login again.';
         }
@@ -721,17 +896,17 @@ class ApiClient {
         errorMsg = 'Invalid document format or missing data.';
       } else if (statusCode == 502 || statusCode == 503) {
         errorMsg = 'Server is temporarily unavailable. Please try again later.';
-      } else if (e.type == DioExceptionType.connectionTimeout || 
-                 e.type == DioExceptionType.receiveTimeout) {
+      } else if (e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout) {
         errorMsg = 'Connection timed out. Check your internet connection.';
       } else if (e.type == DioExceptionType.connectionError) {
         errorMsg = 'Cannot connect to server. Check your internet.';
       }
-      
+
       throw Exception(errorMsg);
     }
   }
-  
+
   /// Map frontend document type names to backend expected values
   String _mapDocumentType(String frontendType) {
     switch (frontendType.toLowerCase()) {
@@ -757,38 +932,38 @@ class ApiClient {
         return frontendType.toUpperCase();
     }
   }
-  
+
   /// Update driver email.
   /// Backend: PUT /api/driver/onboarding/email
   Future<Map<String, dynamic>> updateDriverEmail(String email) async {
-    final response = await _dio.put('/driver/onboarding/email', data: {
+    final response = await _dio.put('/api/driver/onboarding/email', data: {
       'email': email,
     });
     return response.data as Map<String, dynamic>;
   }
-  
+
   /// Update driver language preference.
   /// Backend: PUT /api/driver/onboarding/language
   Future<Map<String, dynamic>> updateDriverLanguage(String language) async {
-    final response = await _dio.put('/driver/onboarding/language', data: {
+    final response = await _dio.put('/api/driver/onboarding/language', data: {
       'language': language,
     });
     return response.data as Map<String, dynamic>;
   }
-  
+
   /// Update driver vehicle information.
   /// Backend: PUT /api/driver/onboarding/vehicle
   Future<Map<String, dynamic>> updateDriverVehicle({
     required String vehicleType,
     List<String>? serviceTypes,
   }) async {
-    final response = await _dio.put('/driver/onboarding/vehicle', data: {
+    final response = await _dio.put('/api/driver/onboarding/vehicle', data: {
       'vehicleType': vehicleType,
       if (serviceTypes != null) 'serviceTypes': serviceTypes,
     });
     return response.data as Map<String, dynamic>;
   }
-  
+
   /// Update driver personal information.
   /// Backend: PUT /api/driver/onboarding/personal-info
   Future<Map<String, dynamic>> updateDriverPersonalInfo({
@@ -799,7 +974,8 @@ class ApiClient {
     String? vehicleNumber,
     String? vehicleModel,
   }) async {
-    final response = await _dio.put('/driver/onboarding/personal-info', data: {
+    final response =
+        await _dio.put('/api/driver/onboarding/personal-info', data: {
       if (fullName != null) 'fullName': fullName,
       if (email != null) 'email': email,
       if (aadhaarNumber != null) 'aadhaarNumber': aadhaarNumber,
@@ -816,7 +992,7 @@ class ApiClient {
   /// Submit all uploaded documents for verification.
   /// Backend: POST /api/driver/onboarding/documents/submit
   Future<Map<String, dynamic>> submitDriverDocuments() async {
-    final response = await _dio.post('/driver/onboarding/documents/submit');
+    final response = await _dio.post('/api/driver/onboarding/documents/submit');
     return response.data as Map<String, dynamic>;
   }
 
@@ -827,7 +1003,7 @@ class ApiClient {
     required String description,
     String priority = 'medium',
   }) async {
-    final response = await _dio.post('/driver/support', data: {
+    final response = await _dio.post('/api/driver/support', data: {
       'issue_type': issueType,
       'description': description,
       'priority': priority,
@@ -842,14 +1018,15 @@ class ApiClient {
   /// Get real-time stats (online drivers, active rides, etc.)
   /// Backend: GET /api/realtime/stats
   Future<Map<String, dynamic>> getRealtimeStats() async {
-    final response = await _dio.get('/realtime/stats');
+    final response = await _dio.get('/api/realtime/stats');
     return response.data as Map<String, dynamic>;
   }
 
   /// Update driver location via REST (fallback when socket is down).
   /// Backend: POST /api/realtime/update-driver-location
-  Future<void> updateDriverLocation(String driverId, double lat, double lng, {double? heading, double? speed}) async {
-    await _dio.post('/realtime/update-driver-location', data: {
+  Future<void> updateDriverLocation(String driverId, double lat, double lng,
+      {double? heading, double? speed}) async {
+    await _dio.post('/api/realtime/update-driver-location', data: {
       'driverId': driverId,
       'lat': lat,
       'lng': lng,
@@ -865,7 +1042,7 @@ class ApiClient {
   /// Get notifications for current user.
   /// Backend: GET /api/notifications
   Future<Map<String, dynamic>> getNotifications() async {
-    final response = await _dio.get('/notifications');
+    final response = await _dio.get('/api/notifications');
     return response.data as Map<String, dynamic>;
   }
 
@@ -876,14 +1053,14 @@ class ApiClient {
   /// Get driver wallet balance and details.
   /// Backend: GET /api/driver/wallet
   Future<Map<String, dynamic>> getDriverWallet() async {
-    final response = await _dio.get('/driver/wallet');
+    final response = await _dio.get('/api/driver/wallet');
     return response.data as Map<String, dynamic>;
   }
 
   /// Get driver payout accounts (bank/UPI).
   /// Backend: GET /api/driver/payout-accounts
   Future<Map<String, dynamic>> getPayoutAccounts() async {
-    final response = await _dio.get('/driver/payout-accounts');
+    final response = await _dio.get('/api/driver/payout-accounts');
     return response.data as Map<String, dynamic>;
   }
 
@@ -897,7 +1074,7 @@ class ApiClient {
     String? accountHolderName,
     String? upiId,
   }) async {
-    final response = await _dio.post('/driver/payout-accounts', data: {
+    final response = await _dio.post('/api/driver/payout-accounts', data: {
       'accountType': accountType,
       if (bankName != null) 'bankName': bankName,
       if (accountNumber != null) 'accountNumber': accountNumber,
@@ -911,14 +1088,16 @@ class ApiClient {
   /// Set a payout account as primary.
   /// Backend: PUT /api/driver/payout-accounts/:id/primary
   Future<Map<String, dynamic>> setPrimaryPayoutAccount(String accountId) async {
-    final response = await _dio.put('/driver/payout-accounts/$accountId/primary');
+    final response =
+        await _dio.put('/api/driver/payout-accounts/$accountId/primary');
     return response.data as Map<String, dynamic>;
   }
 
   /// Delete a payout account.
   /// Backend: DELETE /api/driver/payout-accounts/:id
   Future<Map<String, dynamic>> deletePayoutAccount(String accountId) async {
-    final response = await _dio.delete('/driver/payout-accounts/$accountId');
+    final response =
+        await _dio.delete('/api/driver/payout-accounts/$accountId');
     return response.data as Map<String, dynamic>;
   }
 
@@ -928,7 +1107,7 @@ class ApiClient {
     required double amount,
     String? payoutAccountId,
   }) async {
-    final response = await _dio.post('/driver/wallet/withdraw', data: {
+    final response = await _dio.post('/api/driver/wallet/withdraw', data: {
       'amount': amount,
       if (payoutAccountId != null) 'payoutAccountId': payoutAccountId,
     });
@@ -937,8 +1116,10 @@ class ApiClient {
 
   /// Get wallet transaction history.
   /// Backend: GET /api/driver/wallet/transactions
-  Future<Map<String, dynamic>> getWalletTransactions({int page = 1, int limit = 20}) async {
-    final response = await _dio.get('/driver/wallet/transactions', queryParameters: {
+  Future<Map<String, dynamic>> getWalletTransactions(
+      {int page = 1, int limit = 20}) async {
+    final response =
+        await _dio.get('/api/driver/wallet/transactions', queryParameters: {
       'page': page,
       'limit': limit,
     });
@@ -947,8 +1128,10 @@ class ApiClient {
 
   /// Get payout history.
   /// Backend: GET /api/driver/wallet/payouts
-  Future<Map<String, dynamic>> getPayoutHistory({int page = 1, int limit = 20}) async {
-    final response = await _dio.get('/driver/wallet/payouts', queryParameters: {
+  Future<Map<String, dynamic>> getPayoutHistory(
+      {int page = 1, int limit = 20}) async {
+    final response =
+        await _dio.get('/api/driver/wallet/payouts', queryParameters: {
       'page': page,
       'limit': limit,
     });

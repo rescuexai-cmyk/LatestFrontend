@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import '../../../core/services/api_client.dart';
+import '../../../core/services/push_notification_service.dart';
+import '../../auth/providers/auth_provider.dart';
 
 /// Document verification status
 enum DocumentStatus {
@@ -25,6 +27,7 @@ enum OnboardingStatus {
 }
 
 OnboardingStatus _parseOnboardingStatus(String? raw) {
+  debugPrint('📋 _parseOnboardingStatus raw value: "$raw"');
   switch (raw?.toUpperCase()) {
     case 'NOT_STARTED':
       return OnboardingStatus.notStarted;
@@ -43,13 +46,18 @@ OnboardingStatus _parseOnboardingStatus(String? raw) {
     case 'DOCUMENT_VERIFICATION':
     case 'UNDER_REVIEW':
     case 'PENDING_VERIFICATION':
+    case 'PENDING':
+    case 'IN_REVIEW':
       return OnboardingStatus.documentVerification;
     case 'COMPLETED':
     case 'APPROVED':
+    case 'VERIFIED':
+    case 'ACTIVE':
       return OnboardingStatus.completed;
     case 'REJECTED':
       return OnboardingStatus.rejected;
     default:
+      debugPrint('⚠️ Unknown onboarding status: "$raw", defaulting to notStarted');
       return OnboardingStatus.notStarted;
   }
 }
@@ -557,8 +565,11 @@ class DriverOnboardingState {
 /// Driver onboarding notifier — backend is the single source of truth.
 class DriverOnboardingNotifier extends StateNotifier<DriverOnboardingState> {
   final ApiClient _apiClient;
+  final Ref _ref;
+  bool _completionNotificationShown = false;
+  static const _completionNotifSentKeyPrefix = 'driver_completion_notif_sent_user_';
 
-  DriverOnboardingNotifier(this._apiClient) : super(const DriverOnboardingState()) {
+  DriverOnboardingNotifier(this._apiClient, this._ref) : super(const DriverOnboardingState()) {
     _loadMinimalPrefs();
   }
 
@@ -650,6 +661,10 @@ class DriverOnboardingNotifier extends StateNotifier<DriverOnboardingState> {
   
   /// Process the onboarding status response and update state
   BackendOnboardingStatus _processOnboardingStatusResponse(Map<String, dynamic> response) {
+    final previousStatus = state.backendStatus;
+    final wasCompletedAndRideable = previousStatus.onboardingStatus == OnboardingStatus.completed &&
+        previousStatus.canStartRides;
+
     final status = BackendOnboardingStatus.fromJson(response);
     
     // Update document states based on backend data
@@ -689,6 +704,15 @@ class DriverOnboardingNotifier extends StateNotifier<DriverOnboardingState> {
       panCard: updatedPanCard,
       profilePhotoPath: profilePhotoUploaded ? (state.profilePhotoPath ?? 'uploaded') : state.profilePhotoPath,
     );
+
+    final isCompletedAndRideable = status.onboardingStatus == OnboardingStatus.completed &&
+        status.canStartRides;
+    if (isCompletedAndRideable && !wasCompletedAndRideable && !_completionNotificationShown) {
+      _completionNotificationShown = true;
+      _maybeNotifyCompletionOnce(status).catchError((e) {
+        debugPrint('❌ Failed to handle onboarding completion notification: $e');
+      });
+    }
     
     debugPrint('📋 Backend onboarding status: ${status.onboardingStatus.name}, canStartRides=${status.canStartRides}');
     debugPrint('📋 Documents - LICENSE: ${updatedDrivingLicense.status}, RC: ${updatedVehicleRC.status}, AADHAAR: ${updatedAadhaarCard.status}');
@@ -1027,9 +1051,35 @@ class DriverOnboardingNotifier extends StateNotifier<DriverOnboardingState> {
   /// Reset onboarding state
   Future<void> reset() async {
     state = const DriverOnboardingState();
+    _completionNotificationShown = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('driver_vehicle_type');
     await prefs.remove('driver_language');
+  }
+
+  Future<void> _maybeNotifyCompletionOnce(BackendOnboardingStatus status) async {
+    if (!(status.onboardingStatus == OnboardingStatus.completed && status.canStartRides)) {
+      return;
+    }
+
+    final keySuffix = _buildCompletionDedupSuffix(status);
+    final sentKey = '$_completionNotifSentKeyPrefix$keySuffix';
+
+    final prefs = await SharedPreferences.getInstance();
+    final alreadySent = prefs.getBool(sentKey) ?? false;
+    if (alreadySent) return;
+
+    await pushNotificationService.showDriverOnboardingCompletedNotification();
+    await prefs.setBool(sentKey, true);
+  }
+
+  String _buildCompletionDedupSuffix(BackendOnboardingStatus status) {
+    final userId = _ref.read(authStateProvider).user?.id;
+    if (userId != null && userId.isNotEmpty) {
+      return userId;
+    }
+    // Fallback identity bucket if user id is temporarily unavailable.
+    return 'default';
   }
 
   void nextStep() {
@@ -1050,7 +1100,7 @@ class DriverOnboardingNotifier extends StateNotifier<DriverOnboardingState> {
 /// Provider for driver onboarding state
 final driverOnboardingProvider = StateNotifierProvider<DriverOnboardingNotifier, DriverOnboardingState>((ref) {
   final apiClient = ref.watch(apiClientProvider);
-  return DriverOnboardingNotifier(apiClient);
+  return DriverOnboardingNotifier(apiClient, ref);
 });
 
 /// Async provider that fetches the canonical onboarding status from backend.
