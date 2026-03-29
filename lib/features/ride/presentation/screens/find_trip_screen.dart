@@ -10,11 +10,14 @@ import 'package:go_router/go_router.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:intl/intl.dart';
+import 'package:ionicons/ionicons.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/places_service.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/schedule_ride_sheet.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
@@ -114,6 +117,7 @@ class CabType {
 }
 
 class _FindTripScreenState extends ConsumerState<FindTripScreen> {
+  static const Color _findTripAccent = Color(0xFFD4956A);
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final TextEditingController _pickupController = TextEditingController();
   final TextEditingController _destinationController = TextEditingController();
@@ -237,27 +241,41 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
   }
 
-  // Helper to format scheduled time for display
-  String get _scheduledTimeDisplay {
-    if (_scheduledTime == null) return 'Now';
+  /// Chip label aligned with Services hub (implicit now → "Later").
+  String get _scheduleChipLabel {
+    if (_scheduledTime == null) return 'Later';
     final now = DateTime.now();
     final scheduled = _scheduledTime!;
-
     if (scheduled.day == now.day &&
         scheduled.month == now.month &&
         scheduled.year == now.year) {
-      return 'Today, ${TimeOfDay.fromDateTime(scheduled).format(context)}';
+      return DateFormat('h:mm a').format(scheduled);
     }
     final tomorrow = now.add(const Duration(days: 1));
     if (scheduled.day == tomorrow.day &&
         scheduled.month == tomorrow.month &&
         scheduled.year == tomorrow.year) {
-      return 'Tomorrow, ${TimeOfDay.fromDateTime(scheduled).format(context)}';
+      return 'Tomorrow, ${DateFormat('h:mm a').format(scheduled)}';
     }
-    return '${scheduled.day}/${scheduled.month}, ${TimeOfDay.fromDateTime(scheduled).format(context)}';
+    return DateFormat('MMM d, h:mm a').format(scheduled);
   }
 
-  bool get _isScheduledRide => _scheduledTime != null;
+  void _showFindTripSchedulePicker([VoidCallback? afterClose]) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ScheduleRidePickerSheet(
+        currentSchedule: _scheduledTime,
+        accentColor: _findTripAccent,
+        onConfirm: (DateTime selected) {
+          if (mounted) setState(() => _scheduledTime = selected);
+          Navigator.pop(ctx);
+          afterClose?.call();
+        },
+      ),
+    );
+  }
 
   /// Top-down vehicle icon: remove black bg, resize, bottom shadow — only on opaque pixels.
   Future<BitmapDescriptor?> _loadVehicleMapIconProcessed(String assetPath,
@@ -455,7 +473,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           color: Colors.white,
         ),
       ),
-      textDirection: TextDirection.ltr,
+      textDirection: ui.TextDirection.ltr,
       maxLines: 1,
     )..layout();
     textPainter.paint(
@@ -1646,61 +1664,133 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => _LocationSearchSheet(
-        isPickup: isPickup,
-        initialValue: initialVal,
-        biasLocation: bias,
-        onLocationSelected: (address, latLng) {
-          _locationWasSelected = true;
-          if (latLng == null) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                    'Could not get coordinates. Please try a different search.'),
-                backgroundColor: Colors.orange,
-              ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, modalSetState) {
+            return _LocationSearchSheet(
+              isPickup: isPickup,
+              selectingStop: isStop,
+              initialValue: initialVal,
+              biasLocation: bias,
+              showTripOverview: !isStop,
+              pickupDisplay: _pickupController.text.isEmpty
+                  ? ref.tr('enter_pickup')
+                  : _pickupController.text,
+              destinationDisplay: _destinationController.text.isEmpty
+                  ? ref.tr('enter_destination')
+                  : _destinationController.text,
+              stops: List<RideStop>.from(_stops),
+              scheduleLabel: () => _scheduleChipLabel,
+              onScheduleTap: () =>
+                  _showFindTripSchedulePicker(() => modalSetState(() {})),
+              onTripPickupTap: () {
+                Navigator.pop(sheetContext);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  _showLocationSearchSheet(isPickup: true);
+                });
+              },
+              onTripDestinationTap: () {
+                Navigator.pop(sheetContext);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  _showLocationSearchSheet(isPickup: false);
+                });
+              },
+              onTripAddStopTap: _stops.length < 3
+                  ? () {
+                      Navigator.pop(sheetContext);
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        _showLocationSearchSheet(
+                            isPickup: false, addStopAt: _stops.length);
+                      });
+                    }
+                  : null,
+              onTripEditStopTap: (i) {
+                Navigator.pop(sheetContext);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  _showLocationSearchSheet(
+                      isPickup: false, editStopAt: i);
+                });
+              },
+              onTripRemoveStopTap: (i) {
+                if (i < 0 || i >= _stops.length) return;
+                setState(() {
+                  _stops.removeAt(i);
+                  ref.read(rideBookingProvider.notifier).setStops(_stops);
+                });
+                modalSetState(() {});
+                _tryCalculateRoute();
+              },
+              tripPickupController: !isStop ? _pickupController : null,
+              onLocationSelected: (address, latLng, {bool? asPickup}) {
+                _locationWasSelected = true;
+                if (latLng == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                          'Could not get coordinates. Please try a different search.'),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                  return;
+                }
+                final pickupFlow = asPickup ?? isPickup;
+                setState(() {
+                  if (pickupFlow) {
+                    _pickupController.text = address;
+                    _pickupLocation = latLng;
+                    _pickupLocationReady = true;
+                    ref
+                        .read(rideBookingProvider.notifier)
+                        .setPickupLocation(address, latLng);
+                    debugPrint('📍 Pickup set from search: $address');
+                  } else if (editStopAt != null) {
+                    if (editStopAt < _stops.length) {
+                      _stops[editStopAt] =
+                          RideStop(address: address, location: latLng);
+                      ref.read(rideBookingProvider.notifier).setStops(_stops);
+                    }
+                  } else if (addStopAt != null) {
+                    _stops.insert(
+                        addStopAt, RideStop(address: address, location: latLng));
+                    ref.read(rideBookingProvider.notifier).setStops(_stops);
+                  } else {
+                    _destinationController.text = address;
+                    _destinationLocation = latLng;
+                    ref
+                        .read(rideBookingProvider.notifier)
+                        .setDestinationLocation(address, latLng);
+                    debugPrint('📍 Destination set from search: $address');
+                  }
+                });
+                modalSetState(() {});
+                _setupMapElements();
+                _updateDriverMarkers();
+                _tryCalculateRoute();
+                if (_destinationLocation != null) {
+                  Future.delayed(const Duration(milliseconds: 300), () {
+                    _fitRouteBounds(null);
+                  });
+                }
+                if (!isStop &&
+                    _pickupController.text.trim().isNotEmpty &&
+                    _destinationController.text.trim().isNotEmpty &&
+                    _pickupLocation != null &&
+                    _destinationLocation != null) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (Navigator.canPop(sheetContext)) {
+                      Navigator.pop(sheetContext);
+                    }
+                  });
+                }
+              },
             );
-            return;
-          }
-          setState(() {
-            if (isPickup) {
-              _pickupController.text = address;
-              _pickupLocation = latLng;
-              _pickupLocationReady = true; // Mark pickup as ready
-              ref
-                  .read(rideBookingProvider.notifier)
-                  .setPickupLocation(address, latLng);
-              debugPrint('📍 Pickup set from search: $address');
-            } else if (editStopAt != null) {
-              if (editStopAt < _stops.length) {
-                _stops[editStopAt] =
-                    RideStop(address: address, location: latLng);
-                ref.read(rideBookingProvider.notifier).setStops(_stops);
-              }
-            } else if (addStopAt != null) {
-              _stops.insert(
-                  addStopAt, RideStop(address: address, location: latLng));
-              ref.read(rideBookingProvider.notifier).setStops(_stops);
-            } else {
-              _destinationController.text = address;
-              _destinationLocation = latLng;
-              ref
-                  .read(rideBookingProvider.notifier)
-                  .setDestinationLocation(address, latLng);
-              debugPrint('📍 Destination set from search: $address');
-            }
-          });
-          _setupMapElements();
-          _updateDriverMarkers();
-          // Use safe route calculation that checks both locations
-          _tryCalculateRoute();
-          if (_destinationLocation != null) {
-            Future.delayed(const Duration(milliseconds: 300), () {
-              _fitRouteBounds(null);
-            });
-          }
-        },
-      ),
+          },
+        );
+      },
     ).then((_) {
       // If sheet was dismissed without selecting a location AND we came via auto-open,
       // pop back to the home screen
@@ -2267,7 +2357,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Back button
           GestureDetector(
             onTap: () {
               if (context.canPop()) {
@@ -2284,13 +2373,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ),
             ),
           ),
-          // Zone health indicator (pricing v2)
           if (_zoneHealth != null) _buildZoneHealthIndicator(),
-          // Menu button
           GestureDetector(
-            onTap: () {
-              _scaffoldKey.currentState?.openEndDrawer();
-            },
+            onTap: () => _scaffoldKey.currentState?.openEndDrawer(),
             child: const Icon(
               Icons.menu,
               color: Color(0xFF1A1A1A),
@@ -2565,7 +2650,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       ),
       child: Column(
         children: [
-          // Find a trip header
           Align(
             alignment: Alignment.centerLeft,
             child: Text(
@@ -2578,8 +2662,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             ),
           ),
           const SizedBox(height: 12),
-
-          // Pickup location - Tappable
           GestureDetector(
             onTap: () => _showLocationSearchSheet(isPickup: true),
             child: Container(
@@ -2618,8 +2700,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ),
             ),
           ),
-
-          // Stops (Ola/Uber/Rapido style)
           ..._stops.asMap().entries.map((e) {
             final i = e.key;
             final stop = e.value;
@@ -2679,7 +2759,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ],
             );
           }),
-          // Add stop button (max 3 stops like Uber/Ola)
           if (_stops.length < 3)
             GestureDetector(
               onTap: () => _showLocationSearchSheet(
@@ -2705,8 +2784,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 ),
               ),
             ),
-
-          // Divider with connecting line (before destination)
           Row(
             children: [
               const SizedBox(width: 4),
@@ -2721,8 +2798,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               ),
             ],
           ),
-
-          // Destination - Tappable
           GestureDetector(
             onTap: () => _showLocationSearchSheet(isPickup: false),
             child: Container(
@@ -3718,15 +3793,45 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
 // Location Search Bottom Sheet with saved places integration
 class _LocationSearchSheet extends ConsumerStatefulWidget {
   final bool isPickup;
+  /// True when picking an intermediate stop (hide Set Home on recents).
+  final bool selectingStop;
+  final bool showTripOverview;
+  final String pickupDisplay;
+  final String destinationDisplay;
+  final List<RideStop> stops;
+  final String Function() scheduleLabel;
+  final VoidCallback onScheduleTap;
+  final VoidCallback onTripPickupTap;
+  final VoidCallback onTripDestinationTap;
+  final VoidCallback? onTripAddStopTap;
+  final void Function(int index) onTripEditStopTap;
+  final void Function(int index) onTripRemoveStopTap;
   final String initialValue;
   final LatLng? biasLocation;
-  final Function(String address, LatLng? latLng) onLocationSelected;
+  /// [asPickup] when non-null selects pickup vs destination in trip-overview mode; otherwise parent uses sheet [isPickup].
+  final void Function(String address, LatLng? latLng, {bool? asPickup})
+      onLocationSelected;
+  /// Parent pickup controller — required for editable pickup when [ showTripOverview ] is true.
+  final TextEditingController? tripPickupController;
 
   const _LocationSearchSheet({
     required this.isPickup,
+    this.selectingStop = false,
+    this.showTripOverview = false,
+    this.pickupDisplay = '',
+    this.destinationDisplay = '',
+    this.stops = const [],
+    required this.scheduleLabel,
+    required this.onScheduleTap,
+    required this.onTripPickupTap,
+    required this.onTripDestinationTap,
+    this.onTripAddStopTap,
+    required this.onTripEditStopTap,
+    required this.onTripRemoveStopTap,
     required this.initialValue,
     this.biasLocation,
     required this.onLocationSelected,
+    this.tripPickupController,
   });
 
   @override
@@ -3740,12 +3845,45 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   bool _isLoading = false;
   Timer? _debounce;
   final PlacesService _placesService = PlacesService();
+  late final FocusNode _tripPickupFocusNode;
+  late final FocusNode _tripDestFocusNode;
+  /// Which row last drove search / selection in trip-overview mode.
+  bool _tripSelectionIsPickup = false;
+
+  /// In trip-overview mode, whether the **current suggestion list** came from a pickup search (`true`) or destination / default (`false`). Taps use this so choosing a result fills the correct field.
+  bool? _suggestionsForPickup;
+
+  bool get _tripOverviewMode =>
+      widget.showTripOverview && !widget.selectingStop;
+
+  /// Whether the next suggestion tap should update pickup (vs drop) in trip-overview mode.
+  bool get _tapAppliesToPickup {
+    if (!_tripOverviewMode) return widget.isPickup;
+    return _suggestionsForPickup ?? _tripSelectionIsPickup;
+  }
 
   @override
   void initState() {
     super.initState();
     _searchController = TextEditingController(text: widget.initialValue);
+    _tripPickupFocusNode = FocusNode();
+    _tripDestFocusNode = FocusNode();
+    if (_tripOverviewMode) {
+      _tripSelectionIsPickup = widget.isPickup;
+    }
     _loadInitialSuggestions();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LocationSearchSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialValue != oldWidget.initialValue) {
+      _searchController.value = TextEditingValue(
+        text: widget.initialValue,
+        selection:
+            TextSelection.collapsed(offset: widget.initialValue.length),
+      );
+    }
   }
 
   /// Load saved places + recent locations as initial suggestions
@@ -3753,13 +3891,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     final savedLocationsState = ref.read(savedLocationsProvider);
     final suggestions = <_LocationSuggestion>[];
 
-    // Add "Current Location" option at top
-    suggestions.add(_LocationSuggestion(
-      name: 'Current Location',
-      address: 'Use GPS to detect your location',
-      latLng: null,
-      icon: Icons.my_location,
-    ));
+    // Current Location is the blue card above the list (avoids duplicate rows).
 
     // Add Home if saved
     if (savedLocationsState.homeLocation != null) {
@@ -3810,12 +3942,13 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           latLng: recent.latLng,
           placeId: recent.placeId,
           icon: Icons.history_rounded,
+          fromRecent: true,
         ));
       }
     }
 
     // Fallback: if no saved locations, show some defaults
-    if (suggestions.length <= 1) {
+    if (suggestions.isEmpty) {
       suggestions.addAll([
         _LocationSuggestion(
           name: 'U Block, DLF Phase 3',
@@ -3830,19 +3963,48 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       ]);
     }
 
-    setState(() => _suggestions = suggestions);
+    setState(() {
+      _suggestions = suggestions;
+      if (_tripOverviewMode) {
+        // Recent/saved list: treat tap as destination unless user ran a pickup search after.
+        _suggestionsForPickup = false;
+      }
+    });
   }
 
   @override
   void dispose() {
     _searchController.dispose();
+    _tripPickupFocusNode.dispose();
+    _tripDestFocusNode.dispose();
     _debounce?.cancel();
     // End Places API session when sheet closes
     _placesService.endSession();
     super.dispose();
   }
 
+  void _onTripPickupSearchChanged(String query) {
+    if (!_tripOverviewMode) return;
+    _tripSelectionIsPickup = true;
+    setState(() {});
+    _debounce?.cancel();
+
+    if (query.isEmpty) {
+      _loadInitialSuggestions();
+      setState(() => _isLoading = false);
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    _debounce = Timer(const Duration(milliseconds: 300), () {
+      _searchLocation(query, asPickupBias: true);
+    });
+  }
+
   void _onSearchChanged(String query) {
+    if (_tripOverviewMode) {
+      _tripSelectionIsPickup = false;
+    }
     // Cancel previous debounce timer
     _debounce?.cancel();
 
@@ -3857,11 +4019,14 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
     // Debounce the search - reduced to 300ms for faster response
     _debounce = Timer(const Duration(milliseconds: 300), () {
-      _searchLocation(query);
+      _searchLocation(query,
+          asPickupBias: _tripOverviewMode ? false : null);
     });
   }
 
-  Future<void> _searchLocation(String query) async {
+  Future<void> _searchLocation(String query, {bool? asPickupBias}) async {
+    final forPickupList =
+        _tripOverviewMode ? (asPickupBias ?? widget.isPickup) : null;
     try {
       debugPrint('🔍 Searching for: "$query" (length: ${query.length})');
 
@@ -3881,7 +4046,8 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         searchBiasLocation = widget.biasLocation;
         if (searchBiasLocation == null) {
           final booking = ref.read(rideBookingProvider);
-          searchBiasLocation = widget.isPickup
+          final pickupSide = asPickupBias ?? widget.isPickup;
+          searchBiasLocation = pickupSide
               ? booking.destinationLocation ?? booking.pickupLocation
               : booking.pickupLocation;
         }
@@ -3907,6 +4073,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                   ))
               .toList();
           _isLoading = false;
+          if (forPickupList != null) {
+            _suggestionsForPickup = forPickupList;
+          }
         });
         return;
       }
@@ -3959,6 +4128,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             setState(() {
               _suggestions = suggestions;
               _isLoading = false;
+              if (forPickupList != null) {
+                _suggestionsForPickup = forPickupList;
+              }
             });
             return;
           }
@@ -3978,6 +4150,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           ),
         ];
         _isLoading = false;
+        if (forPickupList != null) {
+          _suggestionsForPickup = forPickupList;
+        }
       });
     } catch (e) {
       debugPrint('Search error: $e');
@@ -3991,6 +4166,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           ),
         ];
         _isLoading = false;
+        if (forPickupList != null) {
+          _suggestionsForPickup = forPickupList;
+        }
       });
     }
   }
@@ -4038,13 +4216,26 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         ].where((e) => e != null && e.isNotEmpty).take(3).join(', ');
       }
 
+      final applyPickup = _tapAppliesToPickup;
       widget.onLocationSelected(
         address,
         LatLng(position.latitude, position.longitude),
+        asPickup: _tripOverviewMode ? applyPickup : null,
       );
 
       if (mounted) {
-        Navigator.pop(context);
+        setState(() => _isLoading = false);
+        if (_tripOverviewMode) {
+          if (!applyPickup) {
+            _searchController.value = TextEditingValue(
+              text: address,
+              selection: TextSelection.collapsed(offset: address.length),
+            );
+          }
+          _loadInitialSuggestions();
+        } else {
+          Navigator.pop(context);
+        }
       }
     } catch (e) {
       debugPrint('Error getting current location: $e');
@@ -4055,6 +4246,77 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       }
       setState(() => _isLoading = false);
     }
+  }
+
+  /// Destination / single-mode search field. When [hideInnerPrefix] is true, outer row supplies the map pin.
+  Widget _buildSearchTextField({
+    required bool insetInTripCard,
+    bool hideInnerPrefix = false,
+    bool softInsetBorder = false,
+    FocusNode? focusNode,
+    bool autofocus = true,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: insetInTripCard ? Colors.white : const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(12),
+        border: insetInTripCard
+            ? Border.all(
+                color: softInsetBorder
+                    ? const Color(0xFFE0E0E0)
+                    : const Color(0xFF424242),
+                width: 1,
+              )
+            : null,
+      ),
+      child: TextField(
+        controller: _searchController,
+        focusNode: focusNode,
+        autofocus: autofocus,
+        onChanged: _onSearchChanged,
+        onTap: _tripOverviewMode
+            ? () => setState(() {
+                  _tripSelectionIsPickup = false;
+                  _suggestionsForPickup =
+                      false; // list taps fill destination
+                })
+            : null,
+        onSubmitted: (query) {
+          if (query.isNotEmpty) {
+            _searchLocation(query,
+                asPickupBias: _tripOverviewMode ? false : null);
+          }
+        },
+        decoration: InputDecoration(
+          hintText: 'Search any location (e.g., PVR Allahabad)',
+          hintStyle: const TextStyle(color: Color(0xFFBDBDBD)),
+          prefixIcon: hideInnerPrefix
+              ? null
+              : Icon(
+                  widget.isPickup ? Icons.circle : Icons.location_on,
+                  color: widget.isPickup
+                      ? const Color(0xFFD4956A)
+                      : const Color(0xFF4CAF50),
+                  size: 18,
+                ),
+          suffixIcon: _searchController.text.isNotEmpty
+              ? GestureDetector(
+                  onTap: () {
+                    _searchController.clear();
+                    _onSearchChanged('');
+                  },
+                  child: const Icon(Icons.clear, color: Color(0xFFBDBDBD)),
+                )
+              : null,
+          border: InputBorder.none,
+          contentPadding: EdgeInsets.symmetric(
+            horizontal: hideInnerPrefix ? 12 : 8,
+            vertical: 12,
+          ),
+          isDense: true,
+        ),
+      ),
+    );
   }
 
   @override
@@ -4078,81 +4340,288 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             ),
           ),
 
-          // Header
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                GestureDetector(
-                  onTap: () => Navigator.pop(context),
-                  child: const Icon(Icons.close, color: Color(0xFF1A1A1A)),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Text(
-                    widget.isPickup
-                        ? 'Enter pickup location'
-                        : 'Enter destination',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1A1A1A),
+          if (_tripOverviewMode) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 0, 16, 0),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.arrow_back_rounded,
+                        color: Color(0xFF1A1A1A)),
+                  ),
+                  const Spacer(),
+                  InkWell(
+                    onTap: widget.onScheduleTap,
+                    borderRadius: BorderRadius.circular(20),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F5F5),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFFE0E0E0)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.access_time,
+                              size: 18, color: Colors.grey.shade700),
+                          const SizedBox(width: 6),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 180),
+                            child: Text(
+                              widget.scheduleLabel(),
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF1A1A1A),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
-          ),
-
-          // Search input
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFFF5F5F5),
-                borderRadius: BorderRadius.circular(12),
+                ],
               ),
-              child: TextField(
-                controller: _searchController,
-                autofocus: true,
-                onChanged: _onSearchChanged,
-                onSubmitted: (query) {
-                  if (query.isNotEmpty) {
-                    _searchLocation(query);
-                  }
-                },
-                decoration: InputDecoration(
-                  hintText: 'Search any location (e.g., PVR Allahabad)',
-                  hintStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  prefixIcon: Icon(
-                    widget.isPickup ? Icons.circle : Icons.location_on,
-                    color: widget.isPickup
-                        ? const Color(0xFFD4956A)
-                        : const Color(0xFF4CAF50),
-                    size: 18,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF5F5F5),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFE8E8E8)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (widget.tripPickupController != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Icon(Icons.circle,
+                                size: 12, color: Colors.orange.shade700),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                      color: const Color(0xFFE0E0E0)),
+                                ),
+                                child: TextField(
+                                  controller: widget.tripPickupController,
+                                  focusNode: _tripPickupFocusNode,
+                                  autofocus: widget.isPickup,
+                                  onChanged: _onTripPickupSearchChanged,
+                                  onTap: () => setState(() {
+                                        _tripSelectionIsPickup = true;
+                                        _suggestionsForPickup =
+                                            true; // list taps fill pickup
+                                      }),
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF1A1A1A),
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: 'Enter pickup',
+                                    hintStyle: TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.grey.shade500,
+                                    ),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 12,
+                                    ),
+                                    suffixIcon:
+                                        widget.tripPickupController!.text
+                                                .isNotEmpty
+                                            ? GestureDetector(
+                                                onTap: () {
+                                                  widget.tripPickupController!
+                                                      .clear();
+                                                  _onTripPickupSearchChanged(
+                                                      '');
+                                                },
+                                                child: const Icon(Icons.clear,
+                                                    color: Color(0xFFBDBDBD),
+                                                    size: 20),
+                                              )
+                                            : null,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      InkWell(
+                        onTap: widget.onTripPickupTap,
+                        borderRadius: BorderRadius.circular(10),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.circle,
+                                  size: 12, color: Colors.orange.shade700),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  widget.pickupDisplay.isEmpty
+                                      ? 'Set pickup'
+                                      : widget.pickupDisplay,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: widget.pickupDisplay.isEmpty
+                                        ? Colors.grey
+                                        : const Color(0xFF1A1A1A),
+                                  ),
+                                ),
+                              ),
+                              Icon(Icons.search,
+                                  size: 20, color: Colors.grey.shade600),
+                            ],
+                          ),
+                        ),
+                      ),
+                    for (int i = 0; i < widget.stops.length; i++) ...[
+                      Divider(height: 1, color: Colors.grey.shade300),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.circle,
+                                size: 12, color: Colors.blue.shade400),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                widget.stops[i].address.isEmpty
+                                    ? 'Stop ${i + 1}'
+                                    : widget.stops[i].address,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xFF1A1A1A),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              icon: Icon(Icons.edit_outlined,
+                                  size: 18, color: Colors.grey.shade600),
+                              onPressed: () => widget.onTripEditStopTap(i),
+                              constraints: const BoxConstraints(
+                                  minWidth: 32, minHeight: 32),
+                              padding: EdgeInsets.zero,
+                            ),
+                            IconButton(
+                              icon: Icon(Icons.close,
+                                  size: 18, color: Colors.grey.shade500),
+                              onPressed: () => widget.onTripRemoveStopTap(i),
+                              constraints: const BoxConstraints(
+                                  minWidth: 32, minHeight: 32),
+                              padding: EdgeInsets.zero,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: Colors.grey.shade300,
+                          ),
+                        ),
+                        if (widget.onTripAddStopTap != null)
+                          IconButton(
+                            onPressed: widget.onTripAddStopTap,
+                            icon: Icon(Icons.add_circle_outline,
+                                color: Colors.grey.shade700, size: 26),
+                            tooltip: 'Add stop',
+                            padding: EdgeInsets.zero,
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(
+                                minWidth: 36, minHeight: 36),
+                          ),
+                      ],
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Icon(Icons.place,
+                              size: 20, color: Colors.green.shade700),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: _buildSearchTextField(
+                              insetInTripCard: true,
+                              hideInnerPrefix: true,
+                              softInsetBorder: true,
+                              focusNode: _tripDestFocusNode,
+                              autofocus: !widget.isPickup,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ] else
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () => Navigator.pop(context),
+                    child: const Icon(Icons.arrow_back_rounded,
+                        color: Color(0xFF1A1A1A)),
                   ),
-                  suffixIcon: _searchController.text.isNotEmpty
-                      ? GestureDetector(
-                          onTap: () {
-                            _searchController.clear();
-                            _onSearchChanged('');
-                          },
-                          child:
-                              const Icon(Icons.clear, color: Color(0xFFBDBDBD)),
-                        )
-                      : null,
-                  border: InputBorder.none,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      widget.selectingStop
+                          ? 'Stop location'
+                          : widget.isPickup
+                              ? 'Enter pickup location'
+                              : 'Enter destination',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1A1A1A),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ),
 
-          const SizedBox(height: 12),
-
-          // Use Current Location button
-          if (widget.isPickup)
+          if (!_tripOverviewMode) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildSearchTextField(insetInTripCard: false),
+            ),
+            const SizedBox(height: 12),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: GestureDetector(
@@ -4173,7 +4642,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                         height: 40,
                         decoration: BoxDecoration(
                           color: const Color(0xFF4285F4),
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(20),
                         ),
                         child: const Icon(
                           Icons.my_location,
@@ -4182,19 +4651,19 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                         ),
                       ),
                       const SizedBox(width: 12),
-                      const Expanded(
+                      Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
+                          children: const [
                             Text(
-                              'Use Current Location',
+                              'Current Location',
                               style: TextStyle(
-                                fontWeight: FontWeight.w600,
+                                fontWeight: FontWeight.w700,
                                 color: Color(0xFF1A1A1A),
                               ),
                             ),
                             Text(
-                              'Get your GPS location',
+                              'Use GPS to detect your location',
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Color(0xFF888888),
@@ -4209,8 +4678,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                 ),
               ),
             ),
-
-          const SizedBox(height: 12),
+            const SizedBox(height: 12),
+          ] else
+            const SizedBox(height: 4),
 
           // Section header
           Padding(
@@ -4286,146 +4756,255 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     );
   }
 
-  Widget _buildSuggestionTile(_LocationSuggestion suggestion) {
-    return GestureDetector(
-      onTap: () async {
-        if (suggestion.name == 'Current Location') {
-          _getCurrentLocation();
-          return;
-        }
+  bool _isSameAsSavedHome(_LocationSuggestion suggestion) {
+    final home = ref.read(savedLocationsProvider).homeLocation;
+    if (home == null || suggestion.latLng == null) return false;
+    final latDiff = (home.latitude - suggestion.latLng!.latitude).abs();
+    final lngDiff = (home.longitude - suggestion.latLng!.longitude).abs();
+    return latDiff < 0.001 && lngDiff < 0.001;
+  }
 
-        // If we have a placeId but no coordinates, fetch them
-        if (suggestion.latLng == null && suggestion.placeId != null) {
-          setState(() => _isLoading = true);
-          LatLng? latLng =
-              await _placesService.getPlaceDetails(suggestion.placeId!);
+  Future<void> _setRecentAsHome(_LocationSuggestion suggestion) async {
+    final latLng = suggestion.latLng;
+    if (latLng == null) return;
+    await ref.read(savedLocationsProvider.notifier).setHomeLocation(
+          name: suggestion.name,
+          address: suggestion.address,
+          location: latLng,
+          placeId: suggestion.placeId,
+        );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Home address saved'),
+        backgroundColor: Color(0xFF4CAF50),
+      ),
+    );
+    _loadInitialSuggestions();
+  }
 
-          // Fallback: try geocoding if Place Details API fails
-          if (latLng == null) {
-            debugPrint(
-                '⚠️ Place Details failed, falling back to geocoding for: ${suggestion.name}');
-            try {
-              final locations = await locationFromAddress(
-                '${suggestion.name}, ${suggestion.address}',
-                localeIdentifier: 'en_IN',
-              );
-              if (locations.isNotEmpty) {
-                latLng =
-                    LatLng(locations.first.latitude, locations.first.longitude);
-              }
-            } catch (e) {
-              debugPrint('Geocoding fallback also failed: $e');
-            }
+  Future<void> _handleSuggestionTap(_LocationSuggestion suggestion) async {
+    if (suggestion.name == 'Current Location') {
+      _getCurrentLocation();
+      return;
+    }
+
+    if (suggestion.latLng == null && suggestion.placeId != null) {
+      setState(() => _isLoading = true);
+      LatLng? latLng =
+          await _placesService.getPlaceDetails(suggestion.placeId!);
+
+      if (latLng == null) {
+        debugPrint(
+            '⚠️ Place Details failed, falling back to geocoding for: ${suggestion.name}');
+        try {
+          final locations = await locationFromAddress(
+            '${suggestion.name}, ${suggestion.address}',
+            localeIdentifier: 'en_IN',
+          );
+          if (locations.isNotEmpty) {
+            latLng =
+                LatLng(locations.first.latitude, locations.first.longitude);
           }
-
-          setState(() => _isLoading = false);
-
-          if (latLng != null) {
-            // Save to recent locations if this is a destination selection
-            if (!widget.isPickup) {
-              ref.read(savedLocationsProvider.notifier).addRecentLocation(
-                    name: suggestion.name,
-                    address: suggestion.address,
-                    location: latLng,
-                    placeId: suggestion.placeId,
-                  );
-            }
-
-            widget.onLocationSelected(
-              '${suggestion.name}, ${suggestion.address}',
-              latLng,
-            );
-            if (mounted) Navigator.pop(context);
-          } else {
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                    content: Text(
-                        'Could not get location coordinates. Try a different search.')),
-              );
-            }
-          }
-          return;
+        } catch (e) {
+          debugPrint('Geocoding fallback also failed: $e');
         }
+      }
 
-        if (suggestion.latLng == null) {
-          // Location not found, try searching again
-          _searchLocation(suggestion.name);
-          return;
-        }
+      setState(() => _isLoading = false);
 
-        // Save to recent locations if this is a destination selection (not pickup)
-        if (!widget.isPickup &&
-            suggestion.latLng != null &&
-            suggestion.name != 'Current Location') {
+      if (latLng != null) {
+        final applyPickup = _tapAppliesToPickup;
+        final destinationSide = !applyPickup;
+        if (destinationSide) {
           ref.read(savedLocationsProvider.notifier).addRecentLocation(
                 name: suggestion.name,
                 address: suggestion.address,
-                location: suggestion.latLng!,
+                location: latLng,
                 placeId: suggestion.placeId,
               );
         }
 
+        final asPickup = _tripOverviewMode ? applyPickup : null;
+        final line = '${suggestion.name}, ${suggestion.address}';
         widget.onLocationSelected(
-          '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}',
-          suggestion.latLng,
+          line,
+          latLng,
+          asPickup: asPickup,
         );
-        Navigator.pop(context);
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: const BoxDecoration(
-          border: Border(
-            bottom: BorderSide(color: Color(0xFFF0F0F0)),
-          ),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: _getIconBackgroundColor(suggestion.icon),
-                borderRadius: BorderRadius.circular(20),
+        if (_tripOverviewMode && !applyPickup) {
+          _searchController.value = TextEditingValue(
+            text: line,
+            selection: TextSelection.collapsed(offset: line.length),
+          );
+        }
+        if (_tripOverviewMode && mounted) {
+          _debounce?.cancel();
+          _loadInitialSuggestions();
+        }
+        if (!_tripOverviewMode && mounted) Navigator.pop(context);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text(
+                    'Could not get location coordinates. Try a different search.')),
+          );
+        }
+      }
+      return;
+    }
+
+    if (suggestion.latLng == null) {
+      _searchLocation(suggestion.name,
+          asPickupBias:
+              _tripOverviewMode ? _tapAppliesToPickup : null);
+      return;
+    }
+
+    final applyPickup = _tapAppliesToPickup;
+    final destinationSide = !applyPickup;
+    if (destinationSide &&
+        suggestion.latLng != null &&
+        suggestion.name != 'Current Location') {
+      ref.read(savedLocationsProvider.notifier).addRecentLocation(
+            name: suggestion.name,
+            address: suggestion.address,
+            location: suggestion.latLng!,
+            placeId: suggestion.placeId,
+          );
+    }
+
+    final asPickup = _tripOverviewMode ? applyPickup : null;
+    final line =
+        '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}';
+    widget.onLocationSelected(
+      line,
+      suggestion.latLng,
+      asPickup: asPickup,
+    );
+    if (_tripOverviewMode && !applyPickup) {
+      _searchController.value = TextEditingValue(
+        text: line,
+        selection: TextSelection.collapsed(offset: line.length),
+      );
+    }
+    if (_tripOverviewMode && mounted) {
+      _debounce?.cancel();
+      _loadInitialSuggestions();
+    }
+    if (!_tripOverviewMode && mounted) Navigator.pop(context);
+  }
+
+  Widget _buildSuggestionTile(_LocationSuggestion suggestion) {
+    final tripOverview = _tripOverviewMode;
+    final destinationSide =
+        tripOverview ? !_tapAppliesToPickup : !widget.isPickup;
+    final showHomeHeart = destinationSide &&
+        !widget.selectingStop &&
+        suggestion.fromRecent &&
+        suggestion.latLng != null &&
+        suggestion.name != 'Current Location';
+    final homeMatch = showHomeHeart && _isSameAsSavedHome(suggestion);
+    final pickupEmpty = widget.tripPickupController == null ||
+        widget.tripPickupController!.text.trim().isEmpty;
+    final usePill = suggestion.fromRecent &&
+        _searchController.text.trim().isEmpty &&
+        (!_tripOverviewMode || pickupEmpty);
+
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: InkWell(
+            onTap: () => _handleSuggestionTap(suggestion),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                vertical: usePill ? 12 : 8,
+                horizontal: usePill ? 14 : 0,
               ),
-              child: Icon(
-                suggestion.icon ?? Icons.location_on_outlined,
-                color: _getIconColor(suggestion.icon),
-                size: 20,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
                 children: [
-                  Text(
-                    suggestion.name,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w500,
-                      color: Color(0xFF1A1A1A),
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: _getIconBackgroundColor(suggestion.icon),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Icon(
+                      suggestion.icon ?? Icons.location_on_outlined,
+                      color: _getIconColor(suggestion.icon),
+                      size: 20,
                     ),
                   ),
-                  if (suggestion.address.isNotEmpty)
-                    Text(
-                      suggestion.address,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF888888),
-                      ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          suggestion.name,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF1A1A1A),
+                          ),
+                        ),
+                        if (suggestion.address.isNotEmpty)
+                          Text(
+                            suggestion.address,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF888888),
+                            ),
+                          ),
+                      ],
                     ),
+                  ),
+                  const Icon(
+                    Icons.arrow_forward_ios,
+                    color: Color(0xFFBDBDBD),
+                    size: 16,
+                  ),
                 ],
               ),
             ),
-            const Icon(
-              Icons.arrow_forward_ios,
-              color: Color(0xFFBDBDBD),
-              size: 16,
+          ),
+        ),
+        if (showHomeHeart)
+          IconButton(
+            tooltip: 'Set as Home',
+            onPressed: () => _setRecentAsHome(suggestion),
+            icon: Icon(
+              homeMatch ? Icons.favorite : Icons.favorite_border,
+              color: const Color(0xFFE91E63),
+              size: 22,
             ),
-          ],
+          ),
+      ],
+    );
+
+    if (usePill) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Material(
+          color: const Color(0xFFEEEEEE),
+          borderRadius: BorderRadius.circular(24),
+          clipBehavior: Clip.antiAlias,
+          child: row,
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      decoration: const BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: Color(0xFFF0F0F0)),
         ),
       ),
+      child: row,
     );
   }
 
@@ -4454,6 +5033,8 @@ class _LocationSuggestion {
   final LatLng? latLng;
   final IconData? icon;
   final String? placeId;
+  /// True when this row came from [SavedLocationsState.recentLocations] (shows Set Home heart on destination sheet).
+  final bool fromRecent;
 
   _LocationSuggestion({
     required this.name,
@@ -4461,6 +5042,7 @@ class _LocationSuggestion {
     this.latLng,
     this.icon,
     this.placeId,
+    this.fromRecent = false,
   });
 }
 
