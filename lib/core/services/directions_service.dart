@@ -90,10 +90,15 @@ class DirectionsService {
           debugPrint('   Polyline points: ${polylinePoints.length}');
           debugPrint('   Legs: ${legs.length}, Distance: ${totalDistance}m, Duration: ${totalDuration}s');
           
+          final firstLegDur =
+              (firstLeg['duration']['value'] as num).toDouble();
+
           return RouteResult(
             points: polylinePoints,
             distance: totalDistance,
             duration: totalDuration,
+            firstLegDurationSeconds: firstLegDur,
+            legCount: legs.length,
             distanceText: _formatDistance(totalDistance),
             durationText: _formatDuration(totalDuration),
             startAddress: firstLeg['start_address'] ?? 'Pickup',
@@ -157,6 +162,8 @@ class DirectionsService {
       points: path,
       distance: totalDistance,
       duration: duration,
+      firstLegDurationSeconds: duration,
+      legCount: 1,
       distanceText: '~${_formatDistance(totalDistance)}',
       durationText: '~${_formatDuration(duration)}',
       startAddress: 'Pickup Location',
@@ -526,7 +533,11 @@ class RoadEdge {
 class RouteResult {
   final List<LatLng> points;
   final double distance; // in meters
-  final double duration; // in seconds
+  final double duration; // in seconds (total route)
+  /// First Directions leg duration (pickup → first waypoint or drop).
+  final double firstLegDurationSeconds;
+  /// Number of legs in the route (1 = direct pickup→drop).
+  final int legCount;
   final String distanceText;
   final String durationText;
   final String startAddress;
@@ -537,6 +548,8 @@ class RouteResult {
     required this.points,
     required this.distance,
     required this.duration,
+    this.firstLegDurationSeconds = 0,
+    this.legCount = 1,
     required this.distanceText,
     required this.durationText,
     required this.startAddress,

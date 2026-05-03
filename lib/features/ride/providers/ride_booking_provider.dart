@@ -1,11 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
-/// A stop between pickup and destination (Ola/Uber/Rapido style)
+/// A stop between pickup and destination (Ola/Uber/Rapido style).
+/// [location] may be null while the user is still choosing the place inline.
 class RideStop {
   final String address;
-  final LatLng location;
-  const RideStop({required this.address, required this.location});
+  final LatLng? location;
+  const RideStop({required this.address, this.location});
 }
 
 /// State class to hold ride booking information
@@ -88,25 +89,34 @@ class RideBookingState {
     bool? isEcoPickup,
     String? ecoPickupAddress,
     LatLng? ecoPickupLocation,
+    /// When true, clears drop + route summary (used by Plan Your Ride clear ×).
+    bool clearDestination = false,
   }) {
     return RideBookingState(
       rideId: rideId ?? this.rideId,
       rideOtp: rideOtp ?? this.rideOtp,
       pickupAddress: pickupAddress ?? this.pickupAddress,
-      destinationAddress: destinationAddress ?? this.destinationAddress,
+      destinationAddress: clearDestination
+          ? null
+          : (destinationAddress ?? this.destinationAddress),
       pickupLocation: pickupLocation ?? this.pickupLocation,
-      destinationLocation: destinationLocation ?? this.destinationLocation,
+      destinationLocation: clearDestination
+          ? null
+          : destinationLocation ?? this.destinationLocation,
       stops: stops ?? this.stops,
-      distanceText: distanceText ?? this.distanceText,
-      durationText: durationText ?? this.durationText,
-      distance: distance ?? this.distance,
-      duration: duration ?? this.duration,
-      fare: fare ?? this.fare,
+      distanceText:
+          clearDestination ? '' : distanceText ?? this.distanceText,
+      durationText:
+          clearDestination ? '' : durationText ?? this.durationText,
+      distance: clearDestination ? 0 : distance ?? this.distance,
+      duration: clearDestination ? 0 : duration ?? this.duration,
+      fare: clearDestination ? 0 : fare ?? this.fare,
       selectedRideType: selectedRideType ?? this.selectedRideType,
       selectedCabTypeId: selectedCabTypeId ?? this.selectedCabTypeId,
       selectedCabTypeName: selectedCabTypeName ?? this.selectedCabTypeName,
       driverCount: driverCount ?? this.driverCount,
-      polylinePoints: polylinePoints ?? this.polylinePoints,
+      polylinePoints:
+          clearDestination ? [] : polylinePoints ?? this.polylinePoints,
       // Pricing v2
       originalFare: originalFare ?? this.originalFare,
       subsidyAmount: subsidyAmount ?? this.subsidyAmount,
@@ -134,6 +144,11 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
       destinationAddress: address,
       destinationLocation: location,
     );
+  }
+
+  /// Clear drop-off and route preview (e.g. user tapped × on destination field).
+  void clearDestinationAndRoute() {
+    state = state.copyWith(clearDestination: true);
   }
 
   void setStops(List<RideStop> stops) {

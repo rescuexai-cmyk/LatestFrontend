@@ -3,10 +3,13 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:image/image.dart' as img;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
@@ -17,6 +20,7 @@ import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/places_service.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/schedule_ride_sheet.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
@@ -31,11 +35,14 @@ class FindTripScreen extends ConsumerStatefulWidget {
   final bool autoOpenSearch;
   final String? initialServiceType;
   final DateTime? scheduledTime;
+  /// From hub "Later": pick drop first, then show schedule sheet (no time on home).
+  final bool scheduleAfterLocations;
   const FindTripScreen({
     super.key,
     this.autoOpenSearch = false,
     this.initialServiceType,
     this.scheduledTime,
+    this.scheduleAfterLocations = false,
   });
 
   @override
@@ -118,6 +125,9 @@ class CabType {
 
 class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   static const Color _findTripAccent = Color(0xFFD4956A);
+  /// Figma map pills (Frame 1410081802)
+  static const Color _figmaPillBrown = Color(0xFFCF923D);
+  static const Color _figmaPillLabel = Color(0xFF5B5B5B);
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final TextEditingController _pickupController = TextEditingController();
   final TextEditingController _destinationController = TextEditingController();
@@ -132,6 +142,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
 
   // Scheduled ride time (null = ride now)
   DateTime? _scheduledTime;
+
+  /// Prevents stacking multiple auto-opens from _tryCalculateRoute.
+  bool _deferredSchedulePickerShown = false;
 
   // Cab types fetched from backend
   List<CabType> _cabTypes = [];
@@ -184,6 +197,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   // Route info
   String _distanceText = '';
   String _durationText = '';
+  /// From last [RouteResult]; used so pickup pill ≠ drop when multi-leg.
+  int _routeLegCount = 0;
+  int _firstLegDurationMin = 0;
+  /// Screen positions (map-local px) for floating pills above pickup/drop.
+  Offset? _pickupPillAnchor;
+  Offset? _dropPillAnchor;
+  /// Ignore stale [getScreenCoordinate] results when camera moves quickly.
+  int _pillAnchorGen = 0;
+  DateTime? _lastPillRefreshDuringMove;
   double _estimatedFare = 0;
   bool _isLoadingRoute = false;
 
@@ -209,9 +231,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     _loadCustomMarkers();
     _loadMapStyle();
     _getCurrentLocationForPickup();
-    // Auto-open the destination search sheet if navigated from service card
-    if (widget.autoOpenSearch) {
+    // If not auto-opening search, attempt route (e.g. provider already has both places).
+    if (!widget.autoOpenSearch) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _tryCalculateRoute();
+      });
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         _showLocationSearchSheet(isPickup: false);
       });
     }
@@ -258,6 +286,30 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       return 'Tomorrow, ${DateFormat('h:mm a').format(scheduled)}';
     }
     return DateFormat('MMM d, h:mm a').format(scheduled);
+  }
+
+  bool _hasValidPickupAndDestination() {
+    return _pickupLocationReady &&
+        _pickupLocation != null &&
+        _destinationLocation != null &&
+        _pickupController.text.trim().isNotEmpty &&
+        _destinationController.text.trim().isNotEmpty &&
+        _isValidCoordinate(_pickupLocation!) &&
+        _isValidCoordinate(_destinationLocation!);
+  }
+
+  /// Hub "Later" flow: open schedule sheet only after pickup + drop are set.
+  void _maybeShowDeferredSchedulePicker() {
+    if (!widget.scheduleAfterLocations) return;
+    if (_deferredSchedulePickerShown) return;
+    if (_scheduledTime != null) return;
+    if (!_hasValidPickupAndDestination()) return;
+
+    _deferredSchedulePickerShown = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _showFindTripSchedulePicker();
+    });
   }
 
   void _showFindTripSchedulePicker([VoidCallback? afterClose]) {
@@ -898,6 +950,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
     
     debugPrint('✅ Both locations valid - calculating route');
+    _maybeShowDeferredSchedulePicker();
     _calculateRoute();
   }
   
@@ -933,10 +986,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     final stopMarkers = <Marker>{};
     for (int i = 0; i < _stops.length; i++) {
       final stop = _stops[i];
+      if (stop.location == null) continue;
       stopMarkers.add(
         Marker(
           markerId: MarkerId('stop_$i'),
-          position: stop.location,
+          position: stop.location!,
           icon:
               BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
           infoWindow: InfoWindow(title: 'Stop ${i + 1}', snippet: stop.address),
@@ -953,29 +1007,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
 
     final markers = <Marker>{...stopMarkers};
-    
-    // Pickup marker removed per design - location still used for routing
-    
-    // Only add destination marker if location is set and has address
-    if (_destinationLocation != null && _destinationController.text.isNotEmpty) {
-      markers.add(
-        Marker(
-          markerId: const MarkerId('destination'),
-          position: _destinationLocation!,
-          icon:
-              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-          infoWindow: InfoWindow(
-              title: 'Destination', snippet: _destinationController.text),
-          draggable: true,
-          onDragEnd: (newPosition) async {
-            setState(() => _destinationLocation = newPosition);
-            await _reverseGeocodeAndUpdateDestination(newPosition);
-            _tryCalculateRoute();
-          },
-        ),
-      );
-    }
-    
+
+    // Pickup + destination: no default pins — pills + polyline show route (Figma).
     return markers;
   }
 
@@ -1065,6 +1098,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       _polylines = {};
       _isLoadingRoute = true;
       _isLoadingPricing = true;
+      _routeLegCount = 0;
+      _firstLegDurationMin = 0;
     });
 
     try {
@@ -1075,8 +1110,12 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       debugPrint('   Drop: ${_destinationLocation!.latitude}, ${_destinationLocation!.longitude}');
       debugPrint('========================================');
 
+      final waypointCoords = _stops
+          .where((s) => s.location != null)
+          .map((s) => s.location!)
+          .toList();
       final waypoints =
-          _stops.isNotEmpty ? _stops.map((s) => s.location).toList() : null;
+          waypointCoords.isEmpty ? null : waypointCoords;
       final route = await _directionsService.getRoute(
         origin: _pickupLocation!,
         destination: _destinationLocation!,
@@ -1129,6 +1168,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         _distanceText = route.distanceText;
         _durationText = route.durationText;
         _estimatedFare = fare;
+        _routeLegCount = route.legCount;
+        _firstLegDurationMin =
+            math.max(1, (route.firstLegDurationSeconds / 60).ceil());
 
         // Uber/Rapido-style polylines: thin, clean lines
         _polylines = {
@@ -1167,6 +1209,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       setState(() {
         _isLoadingRoute = false;
         _isLoadingPricing = false;
+        _routeLegCount = 0;
+        _firstLegDurationMin = 0;
       });
     }
   }
@@ -1184,10 +1228,13 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       debugPrint('   Distance: ${distance}m, Duration: ${duration}s');
 
       // Backend: POST /api/pricing/calculate (with waypoints for multi-stop)
-      final waypointsForPricing = _stops.isNotEmpty
-          ? _stops
-              .map((s) =>
-                  {'lat': s.location.latitude, 'lng': s.location.longitude})
+      final completeStops = _stops.where((s) => s.location != null).toList();
+      final waypointsForPricing = completeStops.isNotEmpty
+          ? completeStops
+              .map((s) => {
+                    'lat': s.location!.latitude,
+                    'lng': s.location!.longitude,
+                  })
               .toList()
           : null;
       final data = await apiClient.getRidePricing(
@@ -1576,7 +1623,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       List<LatLng> allPoints = [
         _pickupLocation!,
         _destinationLocation!,
-        ..._stops.map((s) => s.location)
+        ..._stops.where((s) => s.location != null).map((s) => s.location!),
       ];
 
       // Add all polyline points if available
@@ -1629,6 +1676,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       );
 
       debugPrint('✅ Map camera animated to show full route');
+      if (mounted) await _refreshMapPillPositions();
     } catch (e) {
       debugPrint('❌ Error fitting bounds: $e');
       // Fallback: center between pickup and destination
@@ -1643,6 +1691,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           );
         } catch (_) {}
       }
+      if (mounted) await _refreshMapPillPositions();
     }
   }
 
@@ -1681,8 +1730,19 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   : _destinationController.text,
               stops: List<RideStop>.from(_stops),
               scheduleLabel: () => _scheduleChipLabel,
-              onScheduleTap: () =>
-                  _showFindTripSchedulePicker(() => modalSetState(() {})),
+              onScheduleTap: () {
+                if (!_hasValidPickupAndDestination()) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Please choose both pickup and destination first.',
+                      ),
+                    ),
+                  );
+                  return;
+                }
+                _showFindTripSchedulePicker(() => modalSetState(() {}));
+              },
               onTripPickupTap: () {
                 Navigator.pop(sheetContext);
                 WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1699,22 +1759,34 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               },
               onTripAddStopTap: _stops.length < 3
                   ? () {
+                      if (isStop) {
+                        Navigator.pop(sheetContext);
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (!mounted) return;
+                          _showLocationSearchSheet(
+                              isPickup: false, addStopAt: _stops.length);
+                        });
+                      } else {
+                        setState(() {
+                          _stops.add(const RideStop(address: '', location: null));
+                          ref
+                              .read(rideBookingProvider.notifier)
+                              .setStops(_stops);
+                        });
+                        modalSetState(() {});
+                      }
+                    }
+                  : null,
+              onTripEditStopTap: isStop
+                  ? (i) {
                       Navigator.pop(sheetContext);
                       WidgetsBinding.instance.addPostFrameCallback((_) {
                         if (!mounted) return;
                         _showLocationSearchSheet(
-                            isPickup: false, addStopAt: _stops.length);
+                            isPickup: false, editStopAt: i);
                       });
                     }
-                  : null,
-              onTripEditStopTap: (i) {
-                Navigator.pop(sheetContext);
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (!mounted) return;
-                  _showLocationSearchSheet(
-                      isPickup: false, editStopAt: i);
-                });
-              },
+                  : (_) {},
               onTripRemoveStopTap: (i) {
                 if (i < 0 || i >= _stops.length) return;
                 setState(() {
@@ -1725,7 +1797,51 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 _tryCalculateRoute();
               },
               tripPickupController: !isStop ? _pickupController : null,
-              onLocationSelected: (address, latLng, {bool? asPickup}) {
+              onTripDestinationClear: !isStop
+                  ? () {
+                      setState(() {
+                        _destinationController.clear();
+                        _destinationLocation = null;
+                        _distanceText = '';
+                        _durationText = '';
+                        _estimatedFare = 0;
+                        _polylines = {};
+                        _routeLegCount = 0;
+                        _firstLegDurationMin = 0;
+                        _dropPillAnchor = null;
+                      });
+                      ref
+                          .read(rideBookingProvider.notifier)
+                          .clearDestinationAndRoute();
+                      modalSetState(() {});
+                      _setupMapElements();
+                      _updateDriverMarkers();
+                    }
+                  : null,
+              onBookNowTap: !isStop
+                  ? () {
+                      if (_pickupLocation != null &&
+                          _destinationLocation != null &&
+                          _pickupController.text.trim().isNotEmpty &&
+                          _destinationController.text.trim().isNotEmpty) {
+                        Navigator.pop(sheetContext);
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                                'Please choose both pickup and destination.'),
+                          ),
+                        );
+                      }
+                    }
+                  : null,
+              bookNowEnabled: !isStop &&
+                  _pickupLocation != null &&
+                  _destinationLocation != null &&
+                  _pickupController.text.trim().isNotEmpty &&
+                  _destinationController.text.trim().isNotEmpty,
+              onLocationSelected:
+                  (address, latLng, {bool? asPickup, int? stopIndex}) {
                 _locationWasSelected = true;
                 if (latLng == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -1735,6 +1851,25 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       backgroundColor: Colors.orange,
                     ),
                   );
+                  return;
+                }
+                if (stopIndex != null) {
+                  setState(() {
+                    if (stopIndex >= 0 && stopIndex < _stops.length) {
+                      _stops[stopIndex] =
+                          RideStop(address: address, location: latLng);
+                      ref.read(rideBookingProvider.notifier).setStops(_stops);
+                    }
+                  });
+                  modalSetState(() {});
+                  _setupMapElements();
+                  _updateDriverMarkers();
+                  _tryCalculateRoute();
+                  if (_destinationLocation != null) {
+                    Future.delayed(const Duration(milliseconds: 300), () {
+                      _fitRouteBounds(null);
+                    });
+                  }
                   return;
                 }
                 final pickupFlow = asPickup ?? isPickup;
@@ -1825,10 +1960,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildHeader(),
-                    const SizedBox(height: 8),
-                    _buildLocationInputs(),
+                    const SizedBox(height: 4),
+                    _buildAddStopRow(),
                   ],
                 ),
               ),
@@ -2386,6 +2522,35 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     );
   }
 
+  /// Add stop — same as former location card (max 3 stops).
+  Widget _buildAddStopRow() {
+    if (_stops.length >= 3) return const SizedBox.shrink();
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        onPressed: () => _showLocationSearchSheet(
+          isPickup: false,
+          addStopAt: _stops.length,
+        ),
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        icon: const Icon(Icons.add_circle_outline,
+            size: 18, color: Color(0xFF4285F4)),
+        label: Text(
+          'Add stop',
+          style: TextStyle(
+            fontSize: 14,
+            color: const Color(0xFF4285F4).withValues(alpha: 0.9),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Build zone health indicator (pricing v2 feature)
   Widget _buildZoneHealthIndicator() {
     if (_zoneHealth == null) return const SizedBox.shrink();
@@ -2447,8 +2612,256 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     );
   }
 
+  /// Total route duration in minutes (drop-off pill + route badge).
+  int _routeMinutesForPill() {
+    if (_durationMinFromBackend > 0) return _durationMinFromBackend;
+    if (_durationText.isEmpty) return 0;
+    final m = RegExp(r'(\d+)').firstMatch(_durationText);
+    if (m != null) return int.tryParse(m.group(1)!) ?? 0;
+    return 0;
+  }
+
+  /// Pick-up brown block: first leg only when Directions has multiple legs; otherwise "—"
+  /// (full trip time is shown on drop-off only).
+  int? _pickupMinutesForPill() {
+    if (_durationText.isEmpty && !_isLoadingRoute) return null;
+    if (_routeLegCount <= 1) return null;
+    return _firstLegDurationMin > 0 ? _firstLegDurationMin : null;
+  }
+
+  int? _dropMinutesForPill() {
+    final m = _routeMinutesForPill();
+    return m > 0 ? m : null;
+  }
+
+  (double, double) _pillMetrics() {
+    final sw = MediaQuery.sizeOf(context).width;
+    final sx = sw / 390.0;
+    final pillW = math.min(211 * sx, sw * 0.45);
+    final pillH = pillW * (45.0 / 211.0);
+    return (pillW, pillH);
+  }
+
+  /// Native map returns screen pixels; Flutter layout uses logical pixels on Android.
+  Offset _mapScreenCoordToLogicalOffset(ScreenCoordinate sc) {
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final x = sc.x.toDouble();
+    final y = sc.y.toDouble();
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return Offset(x / dpr, y / dpr);
+    }
+    return Offset(x, y);
+  }
+
+  /// Places pills above pickup/drop LatLng using map screen coordinates.
+  Future<void> _refreshMapPillPositions() async {
+    final c = _controller;
+    if (c == null || !mounted) return;
+    final gen = ++_pillAnchorGen;
+    Offset? pick;
+    Offset? drop;
+    try {
+      if (_pickupLocation != null) {
+        final sc = await c.getScreenCoordinate(_pickupLocation!);
+        if (!mounted || gen != _pillAnchorGen) return;
+        pick = _mapScreenCoordToLogicalOffset(sc);
+      }
+      if (_destinationLocation != null &&
+          _destinationController.text.isNotEmpty) {
+        final sc2 = await c.getScreenCoordinate(_destinationLocation!);
+        if (!mounted || gen != _pillAnchorGen) return;
+        drop = _mapScreenCoordToLogicalOffset(sc2);
+      }
+      if (!mounted || gen != _pillAnchorGen) return;
+      setState(() {
+        _pickupPillAnchor = pick;
+        _dropPillAnchor = drop;
+      });
+    } catch (e) {
+      debugPrint('Map pill anchor: $e');
+      if (mounted && gen == _pillAnchorGen) {
+        setState(() {
+          _pickupPillAnchor = null;
+          _dropPillAnchor = null;
+        });
+      }
+    }
+  }
+
+  /// Figma Frame 1410081802 — floating map pill (pick-up or drop-off).
+  Widget _buildFigmaMapLocationPill({
+    required bool isPickup,
+    required VoidCallback onTap,
+    required int? minutesForBrown,
+  }) {
+    final mq = MediaQuery.of(context);
+    final w = mq.size.width;
+    final sx = w / 390.0;
+    final pillW = math.min(211 * sx, w * 0.45);
+    final pillH = pillW * (45.0 / 211.0);
+    final brownW = pillW * (40.0 / 211.0);
+    final showMinutes = minutesForBrown != null && minutesForBrown > 0;
+    final address = isPickup
+        ? (_pickupController.text.isEmpty
+            ? ref.tr('enter_pickup')
+            : _pickupController.text)
+        : (_destinationController.text.isEmpty
+            ? ref.tr('enter_destination')
+            : _destinationController.text);
+    final empty = isPickup
+        ? _pickupController.text.isEmpty
+        : _destinationController.text.isEmpty;
+
+    return Material(
+      elevation: 0,
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(9),
+        child: Container(
+          width: pillW,
+          height: pillH,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(9),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.25),
+                offset: const Offset(0, 4),
+                blurRadius: 4,
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: brownW,
+                height: pillH,
+                child: ColoredBox(
+                  color: _figmaPillBrown,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        showMinutes ? '$minutesForBrown' : '—',
+                        style: GoogleFonts.poppins(
+                          fontSize: math.min(25 * sx, 22),
+                          fontWeight: FontWeight.w500,
+                          height: 38 / 25,
+                          letterSpacing: -1.25,
+                          color: Colors.black,
+                        ),
+                      ),
+                      Text(
+                        'min',
+                        style: GoogleFonts.poppins(
+                          fontSize: math.min(10 * sx, 10),
+                          fontWeight: FontWeight.w300,
+                          height: 15 / 10,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(left: 10 * sx, right: 8 * sx),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isPickup ? 'Pick-up' : 'Drop off',
+                        style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          height: 18 / 12,
+                          color: _figmaPillLabel,
+                        ),
+                      ),
+                      Text(
+                        address,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.poppins(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          height: 21 / 14,
+                          color: empty
+                              ? const Color(0xFFBDBDBD)
+                              : Colors.black,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: EdgeInsets.only(right: 2 * sx),
+                child: const Icon(
+                  Icons.keyboard_arrow_right_rounded,
+                  size: 18.5,
+                  color: Colors.black,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Pills anchored above pickup/drop on the map, with top-corner fallback.
+  Widget _buildMapPillPositioned({
+    required bool isPickup,
+    required double mapPillLeft,
+    required double mapPillTop,
+    required double sheetHeightPx,
+  }) {
+    final mq = MediaQuery.of(context);
+    final sh = mq.size.height;
+    final (pillW, pillH) = _pillMetrics();
+    final anchor = isPickup ? _pickupPillAnchor : _dropPillAnchor;
+    final minutes = isPickup ? _pickupMinutesForPill() : _dropMinutesForPill();
+
+    if (anchor != null) {
+      // Center horizontally on the projected point; do not clamp to screen edges
+      // (that detached pills from markers near left/right). Light vertical bounds only.
+      final left = anchor.dx - pillW / 2;
+      var top = anchor.dy - pillH - 14;
+      top = top.clamp(0.0, sh - pillH);
+      return Positioned(
+        left: left,
+        top: top,
+        child: _buildFigmaMapLocationPill(
+          isPickup: isPickup,
+          minutesForBrown: minutes,
+          onTap: () => _showLocationSearchSheet(isPickup: isPickup),
+        ),
+      );
+    }
+
+    return Positioned(
+      left: isPickup ? mapPillLeft : null,
+      right: isPickup ? null : mapPillLeft,
+      top: mapPillTop,
+      child: _buildFigmaMapLocationPill(
+        isPickup: isPickup,
+        minutesForBrown: minutes,
+        onTap: () => _showLocationSearchSheet(isPickup: isPickup),
+      ),
+    );
+  }
+
   Widget _buildMapSection() {
     final screenHeight = MediaQuery.of(context).size.height;
+    final pt = MediaQuery.of(context).padding.top;
+    final sw = MediaQuery.sizeOf(context).width;
+    final sx = sw / 390.0;
+    final mapPillLeft = 9 * sx;
+    final mapPillTop = pt + 68;
     double sheetFraction = 0.40;
     try {
       final s = _sheetController.size;
@@ -2459,6 +2872,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     final sheetHeightPx = screenHeight * sheetFraction;
 
     return Stack(
+      clipBehavior: Clip.none,
       children: [
         // Google Map (full-bleed)
         Positioned.fill(
@@ -2502,20 +2916,49 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       _fitRouteBounds(null);
                     }
                   });
+                  Future.delayed(const Duration(milliseconds: 700), () {
+                    if (mounted) _refreshMapPillPositions();
+                  });
                 },
                 onCameraMove: (position) {
                   _currentZoomLevel = position.zoom;
+                  // Keep pills glued to LatLngs during pinch/zoom/pan (idle-only felt laggy).
+                  final now = DateTime.now();
+                  if (_lastPillRefreshDuringMove == null ||
+                      now.difference(_lastPillRefreshDuringMove!) >=
+                          const Duration(milliseconds: 24)) {
+                    _lastPillRefreshDuringMove = now;
+                    _refreshMapPillPositions();
+                  }
                 },
-                onCameraIdle: _updateDriverMarkers,
+                onCameraIdle: () {
+                  _lastPillRefreshDuringMove = null;
+                  _updateDriverMarkers();
+                  _refreshMapPillPositions();
+                },
                 myLocationEnabled: true,
                 myLocationButtonEnabled: false,
                 zoomControlsEnabled: false,
                 mapToolbarEnabled: false,
-                // Keep route/map labels visible below top overlays and above bottom sheet.
-                padding: EdgeInsets.only(top: 220, bottom: sheetHeightPx),
+                // Top overlays: Figma map pills + header (no large location card).
+                padding: EdgeInsets.only(top: 130, bottom: sheetHeightPx),
               );
             },
           ),
+        ),
+
+        // Figma pick-up / drop-off — above map points (see _refreshMapPillPositions)
+        _buildMapPillPositioned(
+          isPickup: true,
+          mapPillLeft: mapPillLeft,
+          mapPillTop: mapPillTop,
+          sheetHeightPx: sheetHeightPx,
+        ),
+        _buildMapPillPositioned(
+          isPickup: false,
+          mapPillLeft: mapPillLeft,
+          mapPillTop: mapPillTop,
+          sheetHeightPx: sheetHeightPx,
         ),
 
         // Loading indicator for route calculation
@@ -2631,210 +3074,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             ),
           ),
       ],
-    );
-  }
-
-  Widget _buildLocationInputs() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              ref.tr('find_trip'),
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A1A),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          GestureDetector(
-            onTap: () => _showLocationSearchSheet(isPickup: true),
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Row(
-                children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFFD4956A),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      _pickupController.text.isEmpty
-                          ? ref.tr('enter_pickup')
-                          : _pickupController.text,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: _pickupController.text.isEmpty
-                            ? const Color(0xFFBDBDBD)
-                            : const Color(0xFF1A1A1A),
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const Icon(
-                    Icons.edit,
-                    size: 16,
-                    color: Color(0xFFBDBDBD),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          ..._stops.asMap().entries.map((e) {
-            final i = e.key;
-            final stop = e.value;
-            return Column(
-              children: [
-                Row(
-                  children: [
-                    const SizedBox(width: 4),
-                    Container(
-                        width: 2, height: 12, color: const Color(0xFFE0E0E0)),
-                    const SizedBox(width: 18),
-                    const Expanded(child: Divider(color: Color(0xFFE0E0E0))),
-                  ],
-                ),
-                GestureDetector(
-                  onTap: () =>
-                      _showLocationSearchSheet(isPickup: false, editStopAt: i),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF4285F4),
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 1),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            stop.address,
-                            style: const TextStyle(
-                                fontSize: 14, color: Color(0xFF1A1A1A)),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        GestureDetector(
-                          onTap: () {
-                            setState(() {
-                              _stops.removeAt(i);
-                              ref
-                                  .read(rideBookingProvider.notifier)
-                                  .setStops(_stops);
-                            });
-                            _tryCalculateRoute();
-                          },
-                          child: const Icon(Icons.close,
-                              size: 18, color: Color(0xFFBDBDBD)),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            );
-          }),
-          if (_stops.length < 3)
-            GestureDetector(
-              onTap: () => _showLocationSearchSheet(
-                  isPickup: false, addStopAt: _stops.length),
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    const SizedBox(width: 4),
-                    Container(
-                        width: 2, height: 12, color: const Color(0xFFE0E0E0)),
-                    const SizedBox(width: 18),
-                    const Icon(Icons.add_circle_outline,
-                        size: 18, color: Color(0xFF4285F4)),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Add stop',
-                      style: TextStyle(
-                          fontSize: 14,
-                          color: const Color(0xFF4285F4).withOpacity(0.9)),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          Row(
-            children: [
-              const SizedBox(width: 4),
-              Container(
-                width: 2,
-                height: 20,
-                color: const Color(0xFFE0E0E0),
-              ),
-              const SizedBox(width: 18),
-              const Expanded(
-                child: Divider(color: Color(0xFFE0E0E0)),
-              ),
-            ],
-          ),
-          GestureDetector(
-            onTap: () => _showLocationSearchSheet(isPickup: false),
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.location_on,
-                    size: 14,
-                    color: Color(0xFF4CAF50),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      _destinationController.text.isEmpty
-                          ? ref.tr('enter_destination')
-                          : _destinationController.text,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: _destinationController.text.isEmpty
-                            ? const Color(0xFFBDBDBD)
-                            : const Color(0xFF1A1A1A),
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const Icon(
-                    Icons.edit,
-                    size: 16,
-                    color: Color(0xFFBDBDBD),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -3790,6 +4029,1211 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
 }
 
+/// Gold stepper: pickup ring → optional + nodes per stop → drop ring (fills card height).
+class _PlanRideMultiStopRail extends StatelessWidget {
+  const _PlanRideMultiStopRail({
+    required this.gold,
+    required this.stopCount,
+  });
+
+  final Color gold;
+  final int stopCount;
+
+  static const double _topRing = 26;
+  static const double _bottomRing = 22;
+  static const double _stopNode = 22;
+
+  @override
+  Widget build(BuildContext context) {
+    final nodes = <Widget>[
+      Container(
+        width: _topRing,
+        height: _topRing,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: gold, width: 7),
+        ),
+      ),
+      ...List.generate(
+        stopCount,
+        (_) => Container(
+          width: _stopNode,
+          height: _stopNode,
+          decoration: BoxDecoration(
+            color: gold,
+            shape: BoxShape.circle,
+          ),
+          alignment: Alignment.center,
+          child: const Icon(Icons.add, color: Colors.white, size: 14),
+        ),
+      ),
+      SizedBox(
+        width: _bottomRing,
+        height: _bottomRing,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: gold, width: 2),
+              ),
+            ),
+            Container(
+              width: 11,
+              height: 11,
+              decoration: BoxDecoration(
+                color: gold,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ];
+
+    return SizedBox(
+      width: 26,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.topCenter,
+        children: [
+          Positioned(
+            left: 12,
+            top: _topRing,
+            bottom: _bottomRing,
+            child: Container(width: 2, color: gold),
+          ),
+          Column(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: nodes,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Figma: "Add Spot" pill — no fill, solid border only (matches updated design).
+class _PlanRideChipAddSpot extends StatelessWidget {
+  const _PlanRideChipAddSpot({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(200),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(200),
+            border: Border.all(
+              color: const Color(0xFF292D32),
+              width: 0.92,
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Add Spot',
+                style: TextStyle(
+                  fontFamily: 'Poppins',
+                  fontWeight: FontWeight.w400,
+                  fontSize: 12,
+                  height: 18 / 12,
+                  letterSpacing: -0.36,
+                  color: Color(0xFF000000),
+                ),
+              ),
+              const SizedBox(width: 7.34),
+              Transform.translate(
+                offset: const Offset(0, -1),
+                child: const Text(
+                  '+',
+                  style: TextStyle(
+                    fontFamily: 'Poppins',
+                    fontWeight: FontWeight.w500,
+                    fontSize: 19.2,
+                    height: 1,
+                    color: Color(0xFF000000),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashedRoundedRectPainter extends CustomPainter {
+  _DashedRoundedRectPainter({
+    required this.color,
+    required this.borderRadius,
+    this.dashWidth = 3.5,
+    this.dashSpace = 3,
+  });
+
+  final Color color;
+  final double borderRadius;
+  final double dashWidth;
+  final double dashSpace;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final maxR = math.min(size.width, size.height) / 2 - 1;
+    final r = RRect.fromRectAndRadius(
+      Rect.fromLTWH(0.75, 0.75, size.width - 1.5, size.height - 1.5),
+      Radius.circular(math.min(borderRadius, maxR)),
+    );
+    final path = Path()..addRRect(r);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final len = math.min(dashWidth, metric.length - distance);
+        canvas.drawPath(metric.extractPath(distance, distance + len), paint);
+        distance += dashWidth + dashSpace;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedRoundedRectPainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.borderRadius != borderRadius ||
+      oldDelegate.dashWidth != dashWidth ||
+      oldDelegate.dashSpace != dashSpace;
+}
+
+/// Figma: "Add Home" — white fill, dashed outline, outlined home icon in gold.
+class _PlanRideChipAddHome extends StatelessWidget {
+  const _PlanRideChipAddHome({required this.onTap});
+
+  final VoidCallback onTap;
+
+  static const _gold = Color(0xFFCF923D);
+
+  @override
+  Widget build(BuildContext context) {
+    const radius = 200.0;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(radius),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(radius),
+          child: Stack(
+            children: [
+              const Positioned.fill(
+                child: ColoredBox(color: Colors.white),
+              ),
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _DashedRoundedRectPainter(
+                    color: const Color(0xFF292D32),
+                    borderRadius: radius,
+                  ),
+                ),
+              ),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Add Home',
+                      style: TextStyle(
+                        fontFamily: 'Poppins',
+                        fontWeight: FontWeight.w400,
+                        fontSize: 12,
+                        height: 18 / 12,
+                        letterSpacing: -0.36,
+                        color: Color(0xFF000000),
+                      ),
+                    ),
+                    const SizedBox(width: 7.34),
+                    Icon(
+                      Icons.home_outlined,
+                      size: 14,
+                      color: _gold.withValues(alpha: 0.95),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Plan Your Ride: when home exists — dashed **gold** border, `Home: address…`, black circle + white house (Figma).
+/// Text area fills drop-off; only the home icon opens **edit home**.
+class _PlanRideHomeSetChip extends StatelessWidget {
+  const _PlanRideHomeSetChip({
+    required this.address,
+    required this.onTextTap,
+    required this.onEditHomeIconTap,
+  });
+
+  final String address;
+  final VoidCallback onTextTap;
+  final VoidCallback onEditHomeIconTap;
+
+  static const _gold = Color(0xFFCF923D);
+
+  @override
+  Widget build(BuildContext context) {
+    const radius = 200.0;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: Stack(
+        children: [
+          const Positioned.fill(child: ColoredBox(color: Colors.white)),
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _DashedRoundedRectPainter(
+                color: _gold,
+                borderRadius: radius,
+                dashWidth: 3.2,
+                dashSpace: 2.8,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 3, 4, 3),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: onTextTap,
+                      borderRadius: BorderRadius.circular(radius),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 4, 6, 4),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: RichText(
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            text: TextSpan(
+                              style: const TextStyle(
+                                fontFamily: 'Poppins',
+                                fontSize: 12,
+                                height: 18 / 12,
+                                letterSpacing: -0.36,
+                              ),
+                              children: [
+                                const TextSpan(
+                                  text: 'Home: ',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFF000000),
+                                  ),
+                                ),
+                                TextSpan(
+                                  text: address,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w400,
+                                    color: Color(0xFF303030),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: onEditHomeIconTap,
+                    customBorder: const CircleBorder(),
+                    child: Padding(
+                      padding: const EdgeInsets.all(6),
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF000000),
+                          shape: BoxShape.circle,
+                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(
+                          Icons.home_rounded,
+                          size: 10,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+bool _latLngRoughlyEqual(LatLng a, LatLng b) {
+  return (a.latitude - b.latitude).abs() < 0.0001 &&
+      (a.longitude - b.longitude).abs() < 0.0001;
+}
+
+/// Figma **Add Home** sheet: same plan-ride background; search + recents (no duplicate Home row).
+class _AddHomeSheet extends ConsumerStatefulWidget {
+  const _AddHomeSheet();
+
+  @override
+  ConsumerState<_AddHomeSheet> createState() => _AddHomeSheetState();
+}
+
+class _AddHomeSheetState extends ConsumerState<_AddHomeSheet> {
+  static const _gold = Color(0xFFCF923D);
+  static const _sheetBgAsset =
+      'assets/images/plan_ride_sheet_background.png';
+
+  late final TextEditingController _searchController;
+  final FocusNode _searchFocus = FocusNode();
+  final PlacesService _placesService = PlacesService();
+  Timer? _debounce;
+  List<_LocationSuggestion> _suggestions = [];
+  _LocationSuggestion? _selected;
+  bool _isLoading = false;
+  bool _showSuccess = false;
+  bool _savedThisSession = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController = TextEditingController();
+    _searchFocus.addListener(() {
+      if (mounted) setState(() {});
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadInitialList();
+    });
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _searchController.dispose();
+    _searchFocus.dispose();
+    _placesService.endSession();
+    super.dispose();
+  }
+
+  void _loadInitialList() {
+    final saved = ref.read(savedLocationsProvider);
+    final suggestions = <_LocationSuggestion>[];
+    final homeLl = saved.homeLocation?.latLng;
+
+    if (saved.workLocation != null) {
+      final w = saved.workLocation!;
+      suggestions.add(_LocationSuggestion(
+        name: 'Work',
+        address: w.address,
+        latLng: w.latLng,
+        placeId: w.placeId,
+        icon: Icons.work_rounded,
+      ));
+    }
+    for (final fav in saved.favorites) {
+      if (homeLl != null &&
+          _latLngRoughlyEqual(fav.latLng, homeLl)) {
+        continue;
+      }
+      suggestions.add(_LocationSuggestion(
+        name: fav.name,
+        address: fav.address,
+        latLng: fav.latLng,
+        placeId: fav.placeId,
+        icon: Icons.favorite_rounded,
+      ));
+    }
+    for (final recent in saved.recentLocations.take(8)) {
+      if (homeLl != null &&
+          _latLngRoughlyEqual(recent.latLng, homeLl)) {
+        continue;
+      }
+      final already = suggestions.any((s) =>
+          s.latLng != null &&
+          _latLngRoughlyEqual(s.latLng!, recent.latLng));
+      if (!already) {
+        suggestions.add(_LocationSuggestion(
+          name: recent.name,
+          address: recent.address,
+          latLng: recent.latLng,
+          placeId: recent.placeId,
+          icon: Icons.history_rounded,
+          fromRecent: true,
+        ));
+      }
+    }
+
+    if (suggestions.isEmpty) {
+      suggestions.addAll([
+        _LocationSuggestion(
+          name: 'U Block, DLF Phase 3',
+          address: 'Sector 24, Gurugram, Haryana',
+          latLng: const LatLng(28.4595, 77.0266),
+        ),
+        _LocationSuggestion(
+          name: 'Cyber Hub',
+          address: 'DLF Cyber City, Gurugram',
+          latLng: const LatLng(28.4949, 77.0887),
+        ),
+      ]);
+    }
+
+    if (!mounted) return;
+    setState(() => _suggestions = suggestions);
+  }
+
+  Future<LatLng?> _resolveBias() async {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.low,
+        timeLimit: const Duration(seconds: 3),
+      );
+      return LatLng(position.latitude, position.longitude);
+    } catch (_) {
+      final booking = ref.read(rideBookingProvider);
+      return booking.pickupLocation ??
+          booking.destinationLocation ??
+          const LatLng(25.45, 81.85);
+    }
+  }
+
+  Future<void> _runSearch(String query) async {
+    if (query.trim().isEmpty) {
+      _loadInitialList();
+      setState(() => _isLoading = false);
+      return;
+    }
+    setState(() => _isLoading = true);
+    final bias = await _resolveBias();
+    try {
+      final placesResults = await _placesService.searchPlacesWithFallback(
+        query,
+        location: bias,
+      );
+      if (!mounted) return;
+      if (placesResults.isNotEmpty) {
+        setState(() {
+          _suggestions = placesResults
+              .map(
+                (place) => _LocationSuggestion(
+                  name: place.name,
+                  address: place.address,
+                  latLng: place.latLng,
+                  placeId: place.placeId,
+                ),
+              )
+              .toList();
+          _isLoading = false;
+        });
+        return;
+      }
+
+      final locations = await locationFromAddress(
+        query,
+        localeIdentifier: 'en_IN',
+      );
+      if (!mounted) return;
+      if (locations.isNotEmpty) {
+        final suggestions = <_LocationSuggestion>[];
+        for (final location in locations.take(5)) {
+          try {
+            final placemarks = await placemarkFromCoordinates(
+              location.latitude,
+              location.longitude,
+            );
+            if (placemarks.isNotEmpty) {
+              final place = placemarks.first;
+              final name = place.name ?? place.street ?? query;
+              final address = [
+                place.subLocality,
+                place.locality,
+                place.administrativeArea,
+              ].where((e) => e != null && e.isNotEmpty).join(', ');
+              suggestions.add(_LocationSuggestion(
+                name: name,
+                address: address.isNotEmpty ? address : 'India',
+                latLng: LatLng(location.latitude, location.longitude),
+              ));
+            }
+          } catch (_) {
+            suggestions.add(_LocationSuggestion(
+              name: query,
+              address:
+                  '${location.latitude.toStringAsFixed(4)}, ${location.longitude.toStringAsFixed(4)}',
+              latLng: LatLng(location.latitude, location.longitude),
+            ));
+          }
+        }
+        if (suggestions.isNotEmpty) {
+          setState(() {
+            _suggestions = suggestions;
+            _isLoading = false;
+          });
+          return;
+        }
+      }
+
+      setState(() {
+        _suggestions = [
+          _LocationSuggestion(
+            name: query,
+            address: 'No results found. Try a more specific address.',
+            latLng: null,
+            icon: Icons.search_off,
+          ),
+        ];
+        _isLoading = false;
+      });
+    } catch (e) {
+      debugPrint('AddHome search error: $e');
+      if (mounted) {
+        setState(() {
+          _suggestions = [
+            _LocationSuggestion(
+              name: query,
+              address: 'Search error. Please try again.',
+              latLng: null,
+              icon: Icons.error_outline,
+            ),
+          ];
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  void _onSearchChanged(String q) {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 300), () {
+      _runSearch(q);
+    });
+  }
+
+  Future<void> _selectSuggestion(_LocationSuggestion s) async {
+    if (s.name == 'Current Location') return;
+
+    LatLng? latLng = s.latLng;
+    if (latLng == null && s.placeId != null) {
+      setState(() => _isLoading = true);
+      latLng = await _placesService.getPlaceDetails(s.placeId!);
+      if (latLng == null) {
+        try {
+          final locations = await locationFromAddress(
+            '${s.name}, ${s.address}',
+            localeIdentifier: 'en_IN',
+          );
+          if (locations.isNotEmpty) {
+            latLng =
+                LatLng(locations.first.latitude, locations.first.longitude);
+          }
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+    }
+
+    if (latLng == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not get coordinates for this place.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    final line =
+        '${s.name}${s.address.isNotEmpty ? ', ${s.address}' : ''}';
+    if (!mounted) return;
+    setState(() {
+      _selected = _LocationSuggestion(
+        name: s.name,
+        address: s.address,
+        latLng: latLng,
+        placeId: s.placeId,
+        icon: s.icon,
+        fromRecent: s.fromRecent,
+      );
+      _searchController.text = line;
+    });
+  }
+
+  Future<void> _commitSetHome() async {
+    final sel = _selected;
+    if (sel?.latLng == null) return;
+    final line =
+        '${sel!.name}${sel.address.isNotEmpty ? ', ${sel.address}' : ''}';
+    final label = sel.name.split(',').first.trim();
+    await ref.read(savedLocationsProvider.notifier).setHomeLocation(
+          name: label.isEmpty ? 'Home' : label,
+          address: line,
+          location: sel.latLng!,
+          placeId: sel.placeId,
+        );
+    if (!mounted) return;
+    setState(() {
+      _showSuccess = true;
+      _savedThisSession = true;
+    });
+  }
+
+  void _onChangeHomeTapped() {
+    setState(() {
+      _selected = null;
+      _searchController.clear();
+      _showSuccess = false;
+    });
+    _loadInitialList();
+    _searchFocus.requestFocus();
+  }
+
+  Widget _buildListTile(_LocationSuggestion s) {
+    final selected = _selected != null &&
+        _selected!.latLng != null &&
+        s.latLng != null &&
+        _latLngRoughlyEqual(_selected!.latLng!, s.latLng!);
+    return InkWell(
+      onTap: () => _selectSuggestion(s),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Colors.grey.shade200),
+          ),
+          color: selected ? const Color(0xFFF5F5F5) : null,
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              alignment: Alignment.center,
+              child: Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: _gold, width: 1.32),
+                ),
+                child: Icon(
+                  Icons.schedule_rounded,
+                  size: 14,
+                  color: Colors.grey.shade700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    s.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: 'Poppins',
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF000000),
+                      height: 1.5,
+                    ),
+                  ),
+                  if (s.address.isNotEmpty)
+                    Text(
+                      s.address,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        fontSize: 14.19,
+                        fontWeight: FontWeight.w400,
+                        color: Color(0xFF929292),
+                        height: 1.48,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Figma Group 39380: `bottom: 122px` — toast sits just above Set Home. Derive from footer stack.
+  double _successBannerBottomOffset(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    // Matches footer: SafeArea + `EdgeInsets.fromLTRB(..., 12 + bottomInset * 0.25)` + button block.
+    const footerBottomPad = 12.0;
+    const buttonVerticalPad = 15.0 * 2;
+    const buttonTextApprox = 22.0;
+    const gapToastAboveButton = 10.0;
+    return bottomInset +
+        footerBottomPad +
+        bottomInset * 0.25 +
+        buttonVerticalPad +
+        buttonTextApprox +
+        gapToastAboveButton;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final saved = ref.watch(savedLocationsProvider);
+    final home = saved.homeLocation;
+
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.88,
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8F0),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            offset: const Offset(0, -4),
+            blurRadius: 19.75,
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Positioned(
+            top: -44,
+            left: -4,
+            right: -4,
+            bottom: 0,
+            child: Image.asset(
+              _sheetBgAsset,
+              fit: BoxFit.cover,
+              alignment: const Alignment(0, -0.35),
+              filterQuality: FilterQuality.high,
+              errorBuilder: (_, __, ___) =>
+                  const ColoredBox(color: Color(0xFFFFF8F0)),
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.only(top: 6),
+                  width: 49,
+                  height: 3,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF424242),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 16, 0),
+                child: Row(
+                  children: [
+                    FigmaSquareBackButton(
+                      minTapSize: 40,
+                      onPressed: () => Navigator.pop(context, _savedThisSession),
+                    ),
+                    const SizedBox(width: 10),
+                    const Text(
+                      'Add Home',
+                      style: TextStyle(
+                        fontFamily: 'Poppins',
+                        fontWeight: FontWeight.w500,
+                        fontSize: 16,
+                        height: 24 / 16,
+                        color: Color(0xFF010101),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 22),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOut,
+                  constraints: const BoxConstraints(minHeight: 50),
+                  padding: const EdgeInsets.only(
+                    left: 18.41,
+                    right: 8.6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12.995),
+                    border: Border.all(
+                      width: _searchFocus.hasFocus ? 1.1 : 0.92,
+                      color: const Color(0xFFCBC6BB).withValues(
+                        alpha: _searchFocus.hasFocus ? 0.72 : 0.5,
+                      ),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        offset: const Offset(0, 3),
+                        blurRadius: 8,
+                      ),
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.06),
+                        offset: const Offset(0, 1),
+                        blurRadius: 2,
+                      ),
+                    ],
+                  ),
+                  alignment: Alignment.centerLeft,
+                  child: Theme(
+                    data: Theme.of(context).copyWith(
+                      inputDecorationTheme: const InputDecorationTheme(
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        focusedErrorBorder: InputBorder.none,
+                        filled: false,
+                        isDense: true,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: TextField(
+                        controller: _searchController,
+                        focusNode: _searchFocus,
+                        onChanged: _onSearchChanged,
+                        textAlignVertical: TextAlignVertical.center,
+                        style: const TextStyle(
+                          fontFamily: 'Poppins',
+                          fontWeight: FontWeight.w500,
+                          fontSize: 14,
+                          height: 21 / 14,
+                          color: Color(0xFF000000),
+                        ),
+                        decoration: const InputDecoration(
+                          hintText: 'Search',
+                          hintStyle: TextStyle(
+                            fontFamily: 'Poppins',
+                            fontWeight: FontWeight.w500,
+                            fontSize: 14,
+                            height: 21 / 14,
+                            color: Color(0xFF929292),
+                          ),
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          errorBorder: InputBorder.none,
+                          focusedErrorBorder: InputBorder.none,
+                          isDense: true,
+                          filled: false,
+                          contentPadding: EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (home != null) ...[
+                Padding(
+                  padding:
+                      const EdgeInsets.fromLTRB(22, 14, 22, 0),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(200),
+                          child: Stack(
+                            children: [
+                              const Positioned.fill(
+                                  child: ColoredBox(color: Colors.white)),
+                              Positioned.fill(
+                                child: CustomPaint(
+                                  painter: _DashedRoundedRectPainter(
+                                    color: const Color(0xFF292D32),
+                                    borderRadius: 200,
+                                    dashWidth: 3.2,
+                                    dashSpace: 2.8,
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 6),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.home_rounded,
+                                        size: 14, color: Color(0xFF000000)),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: RichText(
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        text: TextSpan(
+                                          style: const TextStyle(
+                                            fontFamily: 'Poppins',
+                                            fontSize: 12,
+                                            height: 18 / 12,
+                                            letterSpacing: -0.36,
+                                            color: Color(0xFF303030),
+                                          ),
+                                          children: [
+                                            const TextSpan(
+                                              text: 'Home: ',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w500,
+                                                color: Color(0xFF000000),
+                                              ),
+                                            ),
+                                            TextSpan(
+                                              text: home.address,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w400,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: _onChangeHomeTapped,
+                          borderRadius: BorderRadius.circular(200),
+                          child: Ink(
+                            decoration: BoxDecoration(
+                              color: Colors.transparent,
+                              borderRadius: BorderRadius.circular(200),
+                              border: Border.all(
+                                color: const Color(0xFF292D32),
+                                width: 0.92,
+                              ),
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
+                            child: const Text(
+                              'Change?',
+                              style: TextStyle(
+                                fontFamily: 'Poppins',
+                                fontWeight: FontWeight.w400,
+                                fontSize: 12,
+                                letterSpacing: -0.36,
+                                color: Color(0xFF000000),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  _searchController.text.trim().isEmpty
+                      ? 'Recent Locations'
+                      : 'Search Results',
+                  style: const TextStyle(
+                    fontFamily: 'Poppins',
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF5B5B5B),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: _isLoading
+                    ? const Center(
+                        child: CircularProgressIndicator(
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(_gold),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        itemCount: _suggestions.length,
+                        itemBuilder: (ctx, i) =>
+                            _buildListTile(_suggestions[i]),
+                      ),
+              ),
+              Material(
+                color: Colors.white,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.15),
+                        offset: const Offset(0, -3.92),
+                        blurRadius: 19.75,
+                      ),
+                    ],
+                  ),
+                  child: SafeArea(
+                    top: false,
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(
+                          16, 10, 16, 12 + bottomInset * 0.25),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AnimatedOpacity(
+                            duration: const Duration(milliseconds: 150),
+                            opacity:
+                                _selected?.latLng != null ? 1 : 0.45,
+                            child: Material(
+                              color: const Color(0xFF000000),
+                              borderRadius:
+                                  BorderRadius.circular(280),
+                              child: InkWell(
+                                borderRadius:
+                                    BorderRadius.circular(280),
+                                onTap: _selected?.latLng != null
+                                    ? _commitSetHome
+                                    : null,
+                                child: Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 15),
+                                  alignment: Alignment.center,
+                                  child: const Text(
+                                    'Set Home',
+                                    style: TextStyle(
+                                      fontFamily: 'Poppins',
+                                      fontSize: 16.65,
+                                      fontWeight: FontWeight.w500,
+                                      color: Color(0xFFFFFFFF),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_showSuccess)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: _successBannerBottomOffset(context),
+              child: Center(
+                child: Material(
+                  color: Colors.transparent,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(172),
+                    child: Container(
+                      width: 208,
+                      height: 30,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: const Color.fromRGBO(56, 163, 95, 0.1),
+                        borderRadius: BorderRadius.circular(172),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 10, right: 4),
+                        child: Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Home Set Successfully',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontFamily: 'Poppins',
+                                  fontWeight: FontWeight.w400,
+                                  fontSize: 14,
+                                  height: 21 / 14,
+                                  color: Color(0xFF38A35F),
+                                ),
+                              ),
+                            ),
+                            Material(
+                              color: Colors.transparent,
+                              child: InkWell(
+                                onTap: () =>
+                                    setState(() => _showSuccess = false),
+                                borderRadius: BorderRadius.circular(12),
+                                child: Container(
+                                  width: 24,
+                                  height: 24,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    color: const Color.fromRGBO(
+                                        56, 163, 95, 0.1),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: const Icon(
+                                    Icons.close,
+                                    size: 14,
+                                    color: Color(0xFF000000),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 // Location Search Bottom Sheet with saved places integration
 class _LocationSearchSheet extends ConsumerStatefulWidget {
   final bool isPickup;
@@ -3809,10 +5253,17 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
   final String initialValue;
   final LatLng? biasLocation;
   /// [asPickup] when non-null selects pickup vs destination in trip-overview mode; otherwise parent uses sheet [isPickup].
-  final void Function(String address, LatLng? latLng, {bool? asPickup})
-      onLocationSelected;
+  /// [stopIndex] when non-null updates intermediate stop at that index (inline plan-ride UI).
+  final void Function(String address, LatLng? latLng,
+      {bool? asPickup, int? stopIndex}) onLocationSelected;
   /// Parent pickup controller — required for editable pickup when [ showTripOverview ] is true.
   final TextEditingController? tripPickupController;
+  /// Trip overview only: primary CTA; parent should pop or show SnackBar.
+  final VoidCallback? onBookNowTap;
+  /// Visual emphasis when pickup + destination are ready (parent-owned state).
+  final bool bookNowEnabled;
+  /// Plan Your Ride: clear drop-off in parent + provider (× on destination field).
+  final VoidCallback? onTripDestinationClear;
 
   const _LocationSearchSheet({
     required this.isPickup,
@@ -3832,6 +5283,9 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
     this.biasLocation,
     required this.onLocationSelected,
     this.tripPickupController,
+    this.onBookNowTap,
+    this.bookNowEnabled = false,
+    this.onTripDestinationClear,
   });
 
   @override
@@ -3841,6 +5295,9 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
 
 class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   late TextEditingController _searchController;
+  List<TextEditingController> _stopControllers = [];
+  /// When set, suggestion / current-location apply to this intermediate stop index.
+  int? _editingStopIndex;
   List<_LocationSuggestion> _suggestions = [];
   bool _isLoading = false;
   Timer? _debounce;
@@ -3850,8 +5307,29 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   /// Which row last drove search / selection in trip-overview mode.
   bool _tripSelectionIsPickup = false;
 
-  /// In trip-overview mode, whether the **current suggestion list** came from a pickup search (`true`) or destination / default (`false`). Taps use this so choosing a result fills the correct field.
-  bool? _suggestionsForPickup;
+  /// Plan Your Ride: which field last had focus — recents/search taps fill that field (focus can be lost before tap).
+  bool _lastPlanRideFieldWasPickup = true;
+
+  /// Drop-off field: keep caret at start of address (pickup-style), not at end.
+  static TextEditingValue _destTextValue(String text) => TextEditingValue(
+        text: text,
+        selection: const TextSelection.collapsed(offset: 0),
+      );
+
+  void _syncStopControllerList() {
+    while (_stopControllers.length < widget.stops.length) {
+      final i = _stopControllers.length;
+      _stopControllers
+          .add(TextEditingController(text: widget.stops[i].address));
+    }
+    while (_stopControllers.length > widget.stops.length) {
+      _stopControllers.removeLast().dispose();
+    }
+    if (_editingStopIndex != null &&
+        _editingStopIndex! >= widget.stops.length) {
+      _editingStopIndex = null;
+    }
+  }
 
   bool get _tripOverviewMode =>
       widget.showTripOverview && !widget.selectingStop;
@@ -3859,17 +5337,29 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   /// Whether the next suggestion tap should update pickup (vs drop) in trip-overview mode.
   bool get _tapAppliesToPickup {
     if (!_tripOverviewMode) return widget.isPickup;
-    return _suggestionsForPickup ?? _tripSelectionIsPickup;
+    if (_editingStopIndex != null) return false;
+    return _lastPlanRideFieldWasPickup;
   }
 
   @override
   void initState() {
     super.initState();
-    _searchController = TextEditingController(text: widget.initialValue);
+    _stopControllers = widget.stops
+        .map((s) => TextEditingController(text: s.address))
+        .toList();
     _tripPickupFocusNode = FocusNode();
     _tripDestFocusNode = FocusNode();
     if (_tripOverviewMode) {
       _tripSelectionIsPickup = widget.isPickup;
+      _lastPlanRideFieldWasPickup = widget.isPickup;
+      _tripPickupFocusNode.addListener(_onTripPickupFocusChanged);
+      _tripDestFocusNode.addListener(_onTripDestFocusChanged);
+    }
+    _searchController = TextEditingController();
+    if (_tripOverviewMode || !widget.isPickup) {
+      _searchController.value = _destTextValue(widget.initialValue);
+    } else {
+      _searchController.text = widget.initialValue;
     }
     _loadInitialSuggestions();
   }
@@ -3878,11 +5368,24 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   void didUpdateWidget(covariant _LocationSearchSheet oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.initialValue != oldWidget.initialValue) {
-      _searchController.value = TextEditingValue(
-        text: widget.initialValue,
-        selection:
-            TextSelection.collapsed(offset: widget.initialValue.length),
-      );
+      if (_tripOverviewMode || !widget.isPickup) {
+        _searchController.value = _destTextValue(widget.initialValue);
+      } else {
+        _searchController.value = TextEditingValue(
+          text: widget.initialValue,
+          selection:
+              TextSelection.collapsed(offset: widget.initialValue.length),
+        );
+      }
+    }
+    if (widget.stops.length != oldWidget.stops.length) {
+      _syncStopControllerList();
+    } else {
+      for (var i = 0; i < widget.stops.length; i++) {
+        if (widget.stops[i].address != oldWidget.stops[i].address) {
+          _stopControllers[i].text = widget.stops[i].address;
+        }
+      }
     }
   }
 
@@ -3893,8 +5396,8 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
     // Current Location is the blue card above the list (avoids duplicate rows).
 
-    // Add Home if saved
-    if (savedLocationsState.homeLocation != null) {
+    // Home: use **Add Home** flow only in Plan Your Ride (avoid duplicate list row).
+    if (savedLocationsState.homeLocation != null && !_tripOverviewMode) {
       final home = savedLocationsState.homeLocation!;
       suggestions.add(_LocationSuggestion(
         name: 'Home',
@@ -3929,7 +5432,14 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     }
 
     // Add recent locations (up to 5)
+    final savedHomeLl = savedLocationsState.homeLocation?.latLng;
     for (final recent in savedLocationsState.recentLocations.take(5)) {
+      // Plan Your Ride: don’t repeat saved Home as a recent row (shown on Home pill).
+      if (_tripOverviewMode &&
+          savedHomeLl != null &&
+          _latLngRoughlyEqual(recent.latLng, savedHomeLl)) {
+        continue;
+      }
       // Skip if already in suggestions (Home/Work/Favorites)
       final alreadyAdded = suggestions.any((s) =>
           s.latLng != null &&
@@ -3965,16 +5475,35 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
     setState(() {
       _suggestions = suggestions;
-      if (_tripOverviewMode) {
-        // Recent/saved list: treat tap as destination unless user ran a pickup search after.
-        _suggestionsForPickup = false;
-      }
+    });
+  }
+
+  void _onTripPickupFocusChanged() {
+    if (!_tripOverviewMode || !_tripPickupFocusNode.hasFocus) return;
+    setState(() {
+      _lastPlanRideFieldWasPickup = true;
+      _tripSelectionIsPickup = true;
+    });
+  }
+
+  void _onTripDestFocusChanged() {
+    if (!_tripOverviewMode || !_tripDestFocusNode.hasFocus) return;
+    setState(() {
+      _lastPlanRideFieldWasPickup = false;
+      _tripSelectionIsPickup = false;
     });
   }
 
   @override
   void dispose() {
+    if (_tripOverviewMode) {
+      _tripPickupFocusNode.removeListener(_onTripPickupFocusChanged);
+      _tripDestFocusNode.removeListener(_onTripDestFocusChanged);
+    }
     _searchController.dispose();
+    for (final c in _stopControllers) {
+      c.dispose();
+    }
     _tripPickupFocusNode.dispose();
     _tripDestFocusNode.dispose();
     _debounce?.cancel();
@@ -3983,10 +5512,31 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     super.dispose();
   }
 
+  void _onTripStopSearchChanged(int index, String query) {
+    if (!_tripOverviewMode) return;
+    setState(() {
+      _editingStopIndex = index;
+      _tripSelectionIsPickup = false;
+    });
+    _debounce?.cancel();
+    if (query.isEmpty) {
+      _loadInitialSuggestions();
+      setState(() => _isLoading = false);
+      return;
+    }
+    setState(() => _isLoading = true);
+    _debounce = Timer(const Duration(milliseconds: 300), () {
+      _searchLocation(query, asPickupBias: false);
+    });
+  }
+
   void _onTripPickupSearchChanged(String query) {
     if (!_tripOverviewMode) return;
-    _tripSelectionIsPickup = true;
-    setState(() {});
+    setState(() {
+      _editingStopIndex = null;
+      _tripSelectionIsPickup = true;
+      _lastPlanRideFieldWasPickup = true;
+    });
     _debounce?.cancel();
 
     if (query.isEmpty) {
@@ -4003,7 +5553,11 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
   void _onSearchChanged(String query) {
     if (_tripOverviewMode) {
-      _tripSelectionIsPickup = false;
+      setState(() {
+        _editingStopIndex = null;
+        _tripSelectionIsPickup = false;
+        _lastPlanRideFieldWasPickup = false;
+      });
     }
     // Cancel previous debounce timer
     _debounce?.cancel();
@@ -4025,8 +5579,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   }
 
   Future<void> _searchLocation(String query, {bool? asPickupBias}) async {
-    final forPickupList =
-        _tripOverviewMode ? (asPickupBias ?? widget.isPickup) : null;
     try {
       debugPrint('🔍 Searching for: "$query" (length: ${query.length})');
 
@@ -4073,9 +5625,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                   ))
               .toList();
           _isLoading = false;
-          if (forPickupList != null) {
-            _suggestionsForPickup = forPickupList;
-          }
         });
         return;
       }
@@ -4128,9 +5677,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             setState(() {
               _suggestions = suggestions;
               _isLoading = false;
-              if (forPickupList != null) {
-                _suggestionsForPickup = forPickupList;
-              }
             });
             return;
           }
@@ -4150,9 +5696,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           ),
         ];
         _isLoading = false;
-        if (forPickupList != null) {
-          _suggestionsForPickup = forPickupList;
-        }
       });
     } catch (e) {
       debugPrint('Search error: $e');
@@ -4166,9 +5709,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           ),
         ];
         _isLoading = false;
-        if (forPickupList != null) {
-          _suggestionsForPickup = forPickupList;
-        }
       });
     }
   }
@@ -4216,21 +5756,32 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         ].where((e) => e != null && e.isNotEmpty).take(3).join(', ');
       }
 
-      final applyPickup = _tapAppliesToPickup;
-      widget.onLocationSelected(
-        address,
-        LatLng(position.latitude, position.longitude),
-        asPickup: _tripOverviewMode ? applyPickup : null,
-      );
+      final stopIdx = _editingStopIndex;
+      if (stopIdx != null && _tripOverviewMode) {
+        widget.onLocationSelected(
+          address,
+          LatLng(position.latitude, position.longitude),
+          stopIndex: stopIdx,
+        );
+      } else {
+        final applyPickup = _tapAppliesToPickup;
+        widget.onLocationSelected(
+          address,
+          LatLng(position.latitude, position.longitude),
+          asPickup: _tripOverviewMode ? applyPickup : null,
+        );
+      }
 
       if (mounted) {
         setState(() => _isLoading = false);
         if (_tripOverviewMode) {
-          if (!applyPickup) {
-            _searchController.value = TextEditingValue(
+          if (stopIdx != null) {
+            _stopControllers[stopIdx].value = TextEditingValue(
               text: address,
               selection: TextSelection.collapsed(offset: address.length),
             );
+          } else if (!_tapAppliesToPickup) {
+            _searchController.value = _destTextValue(address);
           }
           _loadInitialSuggestions();
         } else {
@@ -4253,341 +5804,590 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     required bool insetInTripCard,
     bool hideInnerPrefix = false,
     bool softInsetBorder = false,
+    bool plainTripField = false,
     FocusNode? focusNode,
     bool autofocus = true,
   }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: insetInTripCard ? Colors.white : const Color(0xFFF5F5F5),
-        borderRadius: BorderRadius.circular(12),
-        border: insetInTripCard
-            ? Border.all(
-                color: softInsetBorder
-                    ? const Color(0xFFE0E0E0)
-                    : const Color(0xFF424242),
-                width: 1,
-              )
-            : null,
+    final boxDecoration = plainTripField && insetInTripCard
+        ? null
+        : BoxDecoration(
+            color: insetInTripCard ? Colors.white : const Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.circular(12),
+            border: insetInTripCard
+                ? Border.all(
+                    color: softInsetBorder
+                        ? const Color(0xFFE0E0E0)
+                        : const Color(0xFF424242),
+                    width: 1,
+                  )
+                : null,
+          );
+
+    final field = TextField(
+      controller: _searchController,
+      focusNode: focusNode,
+      autofocus: autofocus,
+      onChanged: _onSearchChanged,
+      onTap: _tripOverviewMode
+          ? () => setState(() {
+                _editingStopIndex = null;
+                _tripSelectionIsPickup = false;
+                _lastPlanRideFieldWasPickup = false;
+              })
+          : null,
+      onSubmitted: (query) {
+        if (query.isNotEmpty) {
+          _searchLocation(query,
+              asPickupBias: _tripOverviewMode ? false : null);
+        }
+      },
+      minLines: plainTripField ? 1 : null,
+      maxLines: plainTripField ? 1 : null,
+      textAlignVertical: plainTripField ? TextAlignVertical.center : null,
+      style: plainTripField
+          ? const TextStyle(
+              fontFamily: 'Poppins',
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFF000000),
+              height: 1.35,
+            )
+          : null,
+      strutStyle: plainTripField
+          ? const StrutStyle(
+              fontFamily: 'Poppins',
+              fontSize: 14,
+              height: 1.35,
+              forceStrutHeight: true,
+              leading: 0,
+            )
+          : null,
+      decoration: InputDecoration(
+        hintText: plainTripField
+            ? 'Enter destination'
+            : 'Search any location (e.g., PVR Allahabad)',
+        hintStyle: TextStyle(
+          fontFamily: plainTripField ? 'Poppins' : null,
+          fontSize: plainTripField ? 14 : null,
+          fontWeight: plainTripField ? FontWeight.w500 : null,
+          color: plainTripField
+              ? const Color(0xFF929292)
+              : const Color(0xFFBDBDBD),
+        ),
+        isCollapsed: plainTripField,
+        prefixIcon: hideInnerPrefix
+            ? null
+            : Icon(
+                widget.isPickup ? Icons.circle : Icons.location_on,
+                color: widget.isPickup ? _planOrange : const Color(0xFF4CAF50),
+                size: 18,
+              ),
+        suffixIcon: plainTripField
+            ? (_searchController.text.trim().isNotEmpty
+                ? Tooltip(
+                    message: 'Clear destination',
+                    child: IconButton(
+                      icon: Icon(
+                        Icons.close_rounded,
+                        size: 18,
+                        color: Colors.grey.shade600,
+                      ),
+                      onPressed: () {
+                        _searchController.value = _destTextValue('');
+                        _onSearchChanged('');
+                        widget.onTripDestinationClear?.call();
+                      },
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 32,
+                        height: 24,
+                      ),
+                      alignment: Alignment.center,
+                      style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                  )
+                : null)
+            : (_searchController.text.isNotEmpty
+                ? GestureDetector(
+                    onTap: () {
+                      _searchController.clear();
+                      _onSearchChanged('');
+                    },
+                    child: const Icon(Icons.clear, color: Color(0xFFBDBDBD)),
+                  )
+                : null),
+        border: plainTripField ? InputBorder.none : InputBorder.none,
+        enabledBorder:
+            plainTripField ? InputBorder.none : InputBorder.none,
+        focusedBorder:
+            plainTripField ? InputBorder.none : InputBorder.none,
+        filled: plainTripField ? false : null,
+        fillColor: plainTripField ? Colors.transparent : null,
+        contentPadding: EdgeInsets.only(
+          left: hideInnerPrefix ? (plainTripField ? 0 : 12) : 8,
+          right: plainTripField ? 2 : 0,
+          top: plainTripField ? 0 : 12,
+          bottom: plainTripField ? 0 : 12,
+        ),
+        isDense: true,
+        suffixIconConstraints: plainTripField
+            ? const BoxConstraints.tightFor(width: 32, height: 24)
+            : const BoxConstraints(maxWidth: 36, maxHeight: 22),
       ),
-      child: TextField(
-        controller: _searchController,
-        focusNode: focusNode,
-        autofocus: autofocus,
-        onChanged: _onSearchChanged,
-        onTap: _tripOverviewMode
-            ? () => setState(() {
-                  _tripSelectionIsPickup = false;
-                  _suggestionsForPickup =
-                      false; // list taps fill destination
-                })
-            : null,
-        onSubmitted: (query) {
-          if (query.isNotEmpty) {
-            _searchLocation(query,
-                asPickupBias: _tripOverviewMode ? false : null);
-          }
-        },
-        decoration: InputDecoration(
-          hintText: 'Search any location (e.g., PVR Allahabad)',
-          hintStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-          prefixIcon: hideInnerPrefix
-              ? null
-              : Icon(
-                  widget.isPickup ? Icons.circle : Icons.location_on,
-                  color: widget.isPickup
-                      ? const Color(0xFFD4956A)
-                      : const Color(0xFF4CAF50),
-                  size: 18,
-                ),
-          suffixIcon: _searchController.text.isNotEmpty
-              ? GestureDetector(
-                  onTap: () {
-                    _searchController.clear();
-                    _onSearchChanged('');
-                  },
-                  child: const Icon(Icons.clear, color: Color(0xFFBDBDBD)),
-                )
-              : null,
-          border: InputBorder.none,
-          contentPadding: EdgeInsets.symmetric(
-            horizontal: hideInnerPrefix ? 12 : 8,
-            vertical: 12,
+    );
+
+    if (boxDecoration == null) {
+      return field;
+    }
+    return Container(
+      decoration: boxDecoration,
+      child: field,
+    );
+  }
+
+  /// User-provided full-sheet background (plan ride / Figma art).
+  static const _planRideSheetBgAsset =
+      'assets/images/plan_ride_sheet_background.png';
+  /// Figma accent gold
+  static const _planOrange = Color(0xFFCF923D);
+
+  Widget _buildPlanYourRideHeader() {
+    final schedule = widget.scheduleLabel();
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        FigmaSquareBackButton(
+          minTapSize: 40,
+          onPressed: () => Navigator.pop(context),
+        ),
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Text(
+            'Plan Your Ride',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: 'Poppins',
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFF010101),
+              height: 1.5,
+            ),
           ),
-          isDense: true,
+        ),
+        const SizedBox(width: 8),
+        Material(
+          color: const Color(0x80EDEDED),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(184),
+            side: BorderSide(
+              color: const Color(0x80CBC6BB),
+              width: 0.92,
+            ),
+          ),
+          child: InkWell(
+            onTap: widget.onScheduleTap,
+            borderRadius: BorderRadius.circular(184),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14.5, vertical: 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.access_time_rounded,
+                      size: 14.7, color: Color(0xFF000000)),
+                  const SizedBox(width: 7),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 120),
+                    child: Text(
+                      schedule,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        letterSpacing: -0.4,
+                        color: Color(0xFF000000),
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.keyboard_arrow_down_rounded,
+                      size: 16, color: Color(0xFF000000)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPlanRideTripCard() {
+    const labelStyle = TextStyle(
+      fontSize: 12,
+      fontWeight: FontWeight.w500,
+      color: Color(0xFF5B5B5B),
+      height: 1.5,
+    );
+
+    return Container(
+      constraints: const BoxConstraints(minHeight: 108),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12.96),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 4,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _PlanRideMultiStopRail(
+              gold: _planOrange,
+              stopCount: widget.stops.length,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Pick-up', style: labelStyle),
+                  const SizedBox(height: 2),
+                  if (widget.tripPickupController != null)
+                    TextField(
+                      controller: widget.tripPickupController,
+                      focusNode: _tripPickupFocusNode,
+                      autofocus: widget.isPickup,
+                      minLines: 1,
+                      maxLines: 2,
+                      onChanged: _onTripPickupSearchChanged,
+                      onTap: () => setState(() {
+                        _editingStopIndex = null;
+                        _tripSelectionIsPickup = true;
+                        _lastPlanRideFieldWasPickup = true;
+                      }),
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFF000000),
+                        height: 1.2,
+                      ),
+                      strutStyle: const StrutStyle(
+                        fontFamily: 'Poppins',
+                        fontSize: 14,
+                        height: 1.2,
+                        forceStrutHeight: true,
+                        leading: 0,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: 'My current location',
+                        hintStyle: const TextStyle(
+                          fontFamily: 'Poppins',
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF929292),
+                          height: 1.2,
+                        ),
+                        filled: false,
+                        fillColor: Colors.transparent,
+                        isDense: true,
+                        isCollapsed: true,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    )
+                  else
+                    InkWell(
+                      onTap: widget.onTripPickupTap,
+                      child: Text(
+                        widget.pickupDisplay.isEmpty
+                            ? 'My current location'
+                            : widget.pickupDisplay,
+                        style: TextStyle(
+                          fontFamily: 'Poppins',
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          height: 1.2,
+                          color: widget.pickupDisplay.isEmpty
+                              ? const Color(0xFF929292)
+                              : const Color(0xFF000000),
+                        ),
+                      ),
+                    ),
+                  if (widget.stops.isEmpty) ...[
+                    const SizedBox(height: 14),
+                    const Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: Color(0xFFB8B8B8),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  for (int i = 0; i < widget.stops.length; i++) ...[
+                    const SizedBox(height: 6),
+                    Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: Colors.grey.shade200,
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Add Stop', style: labelStyle),
+                              const SizedBox(height: 2),
+                              TextField(
+                                controller: _stopControllers[i],
+                                minLines: 1,
+                                maxLines: 2,
+                                onChanged: (q) =>
+                                    _onTripStopSearchChanged(i, q),
+                                onTap: () => setState(() {
+                                  _editingStopIndex = i;
+                                  _tripSelectionIsPickup = false;
+                                }),
+                                style: const TextStyle(
+                                  fontFamily: 'Poppins',
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xFF000000),
+                                  height: 1.2,
+                                ),
+                                strutStyle: const StrutStyle(
+                                  fontFamily: 'Poppins',
+                                  fontSize: 14,
+                                  height: 1.2,
+                                  forceStrutHeight: true,
+                                  leading: 0,
+                                ),
+                                decoration: InputDecoration(
+                                  hintText: 'Add a stop',
+                                  hintStyle: const TextStyle(
+                                    fontFamily: 'Poppins',
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFF929292),
+                                    height: 1.2,
+                                  ),
+                                  filled: false,
+                                  isDense: true,
+                                  isCollapsed: true,
+                                  border: InputBorder.none,
+                                  enabledBorder: InputBorder.none,
+                                  focusedBorder: InputBorder.none,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          icon: Icon(Icons.close,
+                              size: 18, color: Colors.grey.shade500),
+                          onPressed: () => widget.onTripRemoveStopTap(i),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 28,
+                            minHeight: 28,
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          style: IconButton.styleFrom(
+                            tapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          tooltip: 'Remove stop',
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (widget.stops.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    const Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: Color(0xFFB8B8B8),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  const Text('Drop off', style: labelStyle),
+                  const SizedBox(height: 4),
+                  _buildSearchTextField(
+                    insetInTripCard: true,
+                    hideInnerPrefix: true,
+                    softInsetBorder: true,
+                    plainTripField: true,
+                    focusNode: _tripDestFocusNode,
+                    autofocus: !widget.isPickup,
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: MediaQuery.of(context).size.height * 0.85,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      child: Column(
+  void _openAddHomeSheet() {
+    showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => const _AddHomeSheet(),
+    ).then((saved) {
+      if (saved == true && mounted) _loadInitialSuggestions();
+    });
+  }
+
+  Widget _buildPlanRideActionPills() {
+    if (!_tripOverviewMode || widget.selectingStop) {
+      return const SizedBox.shrink();
+    }
+    final addSpot = widget.onTripAddStopTap;
+    final home = ref.watch(savedLocationsProvider).homeLocation;
+    return Padding(
+      padding: const EdgeInsets.only(left: 12, right: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Handle
-          Container(
-            margin: const EdgeInsets.only(top: 12),
-            width: 40,
-            height: 4,
+          if (addSpot != null) ...[
+            _PlanRideChipAddSpot(onTap: addSpot),
+            const SizedBox(width: 6),
+          ],
+          if (home != null)
+            Expanded(
+              child: _PlanRideHomeSetChip(
+                address: home.address,
+                onTextTap: () {
+                  widget.onLocationSelected(
+                    home.address,
+                    home.latLng,
+                    asPickup: false,
+                  );
+                },
+                onEditHomeIconTap: _openAddHomeSheet,
+              ),
+            )
+          else
+            _PlanRideChipAddHome(onTap: _openAddHomeSheet),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlanRideHero() {
+    // Background image is painted behind the whole sheet in [build]; this is foreground only.
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Center(
+          child: Container(
+            margin: const EdgeInsets.only(top: 6),
+            width: 49,
+            height: 3,
             decoration: BoxDecoration(
-              color: const Color(0xFFE0E0E0),
-              borderRadius: BorderRadius.circular(2),
+              color: const Color(0xFF424242),
+              borderRadius: BorderRadius.circular(4),
             ),
           ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 12, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildPlanYourRideHeader(),
+              const SizedBox(height: 14),
+              _buildPlanRideTripCard(),
+              const SizedBox(height: 10),
+              _buildPlanRideActionPills(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 
-          if (_tripOverviewMode) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(4, 0, 16, 0),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.arrow_back_rounded,
-                        color: Color(0xFF1A1A1A)),
-                  ),
-                  const Spacer(),
-                  InkWell(
-                    onTap: widget.onScheduleTap,
-                    borderRadius: BorderRadius.circular(20),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF5F5F5),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: const Color(0xFFE0E0E0)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.access_time,
-                              size: 18, color: Colors.grey.shade700),
-                          const SizedBox(width: 6),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 180),
-                            child: Text(
-                              widget.scheduleLabel(),
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF1A1A1A),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final showBookBar =
+        _tripOverviewMode && widget.onBookNowTap != null;
+
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.85,
+      decoration: BoxDecoration(
+        color: _tripOverviewMode ? const Color(0xFFFFF8F0) : Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            offset: const Offset(0, -4),
+            blurRadius: 19.75,
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_tripOverviewMode)
+            // Bleed past top so rounded corners + any gap don’t show dark map behind.
+            Positioned(
+              top: -44,
+              left: -4,
+              right: -4,
+              bottom: 0,
+              child: Image.asset(
+                _planRideSheetBgAsset,
+                fit: BoxFit.cover,
+                alignment: const Alignment(0, -0.35),
+                filterQuality: FilterQuality.high,
+                errorBuilder: (_, __, ___) =>
+                    const ColoredBox(color: Color(0xFFFFF8F0)),
+              ),
+            )
+          else
+            const Positioned.fill(
+              child: ColoredBox(color: Colors.white),
+            ),
+          Column(
+            children: [
+          if (!_tripOverviewMode)
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              width: 49,
+              height: 3,
+              decoration: BoxDecoration(
+                color: const Color(0xFF424242),
+                borderRadius: BorderRadius.circular(4),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-              child: Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0xFFE8E8E8)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (widget.tripPickupController != null)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Icon(Icons.circle,
-                                size: 12, color: Colors.orange.shade700),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                      color: const Color(0xFFE0E0E0)),
-                                ),
-                                child: TextField(
-                                  controller: widget.tripPickupController,
-                                  focusNode: _tripPickupFocusNode,
-                                  autofocus: widget.isPickup,
-                                  onChanged: _onTripPickupSearchChanged,
-                                  onTap: () => setState(() {
-                                        _tripSelectionIsPickup = true;
-                                        _suggestionsForPickup =
-                                            true; // list taps fill pickup
-                                      }),
-                                  style: const TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF1A1A1A),
-                                  ),
-                                  decoration: InputDecoration(
-                                    hintText: 'Enter pickup',
-                                    hintStyle: TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                      color: Colors.grey.shade500,
-                                    ),
-                                    border: InputBorder.none,
-                                    isDense: true,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 12,
-                                    ),
-                                    suffixIcon:
-                                        widget.tripPickupController!.text
-                                                .isNotEmpty
-                                            ? GestureDetector(
-                                                onTap: () {
-                                                  widget.tripPickupController!
-                                                      .clear();
-                                                  _onTripPickupSearchChanged(
-                                                      '');
-                                                },
-                                                child: const Icon(Icons.clear,
-                                                    color: Color(0xFFBDBDBD),
-                                                    size: 20),
-                                              )
-                                            : null,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    else
-                      InkWell(
-                        onTap: widget.onTripPickupTap,
-                        borderRadius: BorderRadius.circular(10),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 6),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(Icons.circle,
-                                  size: 12, color: Colors.orange.shade700),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  widget.pickupDisplay.isEmpty
-                                      ? 'Set pickup'
-                                      : widget.pickupDisplay,
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                    color: widget.pickupDisplay.isEmpty
-                                        ? Colors.grey
-                                        : const Color(0xFF1A1A1A),
-                                  ),
-                                ),
-                              ),
-                              Icon(Icons.search,
-                                  size: 20, color: Colors.grey.shade600),
-                            ],
-                          ),
-                        ),
-                      ),
-                    for (int i = 0; i < widget.stops.length; i++) ...[
-                      Divider(height: 1, color: Colors.grey.shade300),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Icon(Icons.circle,
-                                size: 12, color: Colors.blue.shade400),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                widget.stops[i].address.isEmpty
-                                    ? 'Stop ${i + 1}'
-                                    : widget.stops[i].address,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
-                                  color: Color(0xFF1A1A1A),
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              icon: Icon(Icons.edit_outlined,
-                                  size: 18, color: Colors.grey.shade600),
-                              onPressed: () => widget.onTripEditStopTap(i),
-                              constraints: const BoxConstraints(
-                                  minWidth: 32, minHeight: 32),
-                              padding: EdgeInsets.zero,
-                            ),
-                            IconButton(
-                              icon: Icon(Icons.close,
-                                  size: 18, color: Colors.grey.shade500),
-                              onPressed: () => widget.onTripRemoveStopTap(i),
-                              constraints: const BoxConstraints(
-                                  minWidth: 32, minHeight: 32),
-                              padding: EdgeInsets.zero,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Expanded(
-                          child: Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: Colors.grey.shade300,
-                          ),
-                        ),
-                        if (widget.onTripAddStopTap != null)
-                          IconButton(
-                            onPressed: widget.onTripAddStopTap,
-                            icon: Icon(Icons.add_circle_outline,
-                                color: Colors.grey.shade700, size: 26),
-                            tooltip: 'Add stop',
-                            padding: EdgeInsets.zero,
-                            visualDensity: VisualDensity.compact,
-                            constraints: const BoxConstraints(
-                                minWidth: 36, minHeight: 36),
-                          ),
-                      ],
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Icon(Icons.place,
-                              size: 20, color: Colors.green.shade700),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: _buildSearchTextField(
-                              insetInTripCard: true,
-                              hideInnerPrefix: true,
-                              softInsetBorder: true,
-                              focusNode: _tripDestFocusNode,
-                              autofocus: !widget.isPickup,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ] else
+
+          if (_tripOverviewMode)
+            _buildPlanRideHero()
+          else
             Padding(
               padding: const EdgeInsets.all(16),
               child: Row(
@@ -4682,7 +6482,6 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           ] else
             const SizedBox(height: 4),
 
-          // Section header
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Align(
@@ -4691,10 +6490,13 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                 _searchController.text.isEmpty
                     ? 'Recent Locations'
                     : 'Search Results',
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF888888),
+                style: TextStyle(
+                  fontFamily: _tripOverviewMode ? 'Poppins' : null,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: _tripOverviewMode
+                      ? const Color(0xFF5B5B5B)
+                      : const Color(0xFF888888),
                 ),
               ),
             ),
@@ -4702,19 +6504,18 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
           const SizedBox(height: 8),
 
-          // Suggestions list
           Expanded(
             child: _isLoading
-                ? const Center(
+                ? Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        CircularProgressIndicator(
+                        const CircularProgressIndicator(
                           valueColor:
-                              AlwaysStoppedAnimation<Color>(Color(0xFFD4956A)),
+                              AlwaysStoppedAnimation<Color>(_planOrange),
                         ),
-                        SizedBox(height: 16),
-                        Text(
+                        const SizedBox(height: 16),
+                        const Text(
                           'Searching locations...',
                           style: TextStyle(color: Color(0xFF888888)),
                         ),
@@ -4743,13 +6544,71 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                         ),
                       )
                     : ListView.builder(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        padding: EdgeInsets.fromLTRB(
+                          16,
+                          0,
+                          16,
+                          showBookBar ? 20 + bottomInset : 16,
+                        ),
                         itemCount: _suggestions.length,
                         itemBuilder: (context, index) {
                           final suggestion = _suggestions[index];
                           return _buildSuggestionTile(suggestion);
                         },
                       ),
+          ),
+          if (showBookBar)
+            Material(
+              elevation: 0,
+              color: Colors.white,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.15),
+                      offset: const Offset(0, -3.92),
+                      blurRadius: 19.75,
+                    ),
+                  ],
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 180),
+                      opacity: widget.bookNowEnabled ? 1 : 0.45,
+                      child: Material(
+                        color: const Color(0xFF000000),
+                        borderRadius: BorderRadius.circular(280),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(280),
+                          onTap: widget.onBookNowTap,
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                            alignment: Alignment.center,
+                            child: const Text(
+                              'Book Now',
+                              style: TextStyle(
+                                fontFamily: 'Poppins',
+                                fontSize: 16.65,
+                                fontWeight: FontWeight.w500,
+                                color: Color(0xFFFFFFFF),
+                                height: 1.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            ],
           ),
         ],
       ),
@@ -4762,6 +6621,18 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     final latDiff = (home.latitude - suggestion.latLng!.latitude).abs();
     final lngDiff = (home.longitude - suggestion.latLng!.longitude).abs();
     return latDiff < 0.001 && lngDiff < 0.001;
+  }
+
+  bool _isFavorite(_LocationSuggestion suggestion) {
+    if (suggestion.latLng == null) return false;
+    for (final f in ref.read(savedLocationsProvider).favorites) {
+      final latDiff =
+          (f.latitude - suggestion.latLng!.latitude).abs();
+      final lngDiff =
+          (f.longitude - suggestion.latLng!.longitude).abs();
+      if (latDiff < 0.001 && lngDiff < 0.001) return true;
+    }
+    return false;
   }
 
   Future<void> _setRecentAsHome(_LocationSuggestion suggestion) async {
@@ -4814,35 +6685,53 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       setState(() => _isLoading = false);
 
       if (latLng != null) {
-        final applyPickup = _tapAppliesToPickup;
-        final destinationSide = !applyPickup;
-        if (destinationSide) {
+        final stopIdx = _editingStopIndex;
+        final tripOv = _tripOverviewMode;
+        if (stopIdx != null && tripOv) {
           ref.read(savedLocationsProvider.notifier).addRecentLocation(
                 name: suggestion.name,
                 address: suggestion.address,
                 location: latLng,
                 placeId: suggestion.placeId,
               );
-        }
+          final line = '${suggestion.name}, ${suggestion.address}';
+          widget.onLocationSelected(line, latLng, stopIndex: stopIdx);
+          if (mounted) {
+            _stopControllers[stopIdx].value = TextEditingValue(
+              text: line,
+              selection: TextSelection.collapsed(offset: line.length),
+            );
+            _debounce?.cancel();
+            _loadInitialSuggestions();
+          }
+        } else {
+          final applyPickup = _tapAppliesToPickup;
+          final destinationSide = !applyPickup;
+          if (destinationSide) {
+            ref.read(savedLocationsProvider.notifier).addRecentLocation(
+                  name: suggestion.name,
+                  address: suggestion.address,
+                  location: latLng,
+                  placeId: suggestion.placeId,
+                );
+          }
 
-        final asPickup = _tripOverviewMode ? applyPickup : null;
-        final line = '${suggestion.name}, ${suggestion.address}';
-        widget.onLocationSelected(
-          line,
-          latLng,
-          asPickup: asPickup,
-        );
-        if (_tripOverviewMode && !applyPickup) {
-          _searchController.value = TextEditingValue(
-            text: line,
-            selection: TextSelection.collapsed(offset: line.length),
+          final asPickup = tripOv ? applyPickup : null;
+          final line = '${suggestion.name}, ${suggestion.address}';
+          widget.onLocationSelected(
+            line,
+            latLng,
+            asPickup: asPickup,
           );
+          if (tripOv && !applyPickup) {
+            _searchController.value = _destTextValue(line);
+          }
+          if (tripOv && mounted) {
+            _debounce?.cancel();
+            _loadInitialSuggestions();
+          }
+          if (!tripOv && mounted) Navigator.pop(context);
         }
-        if (_tripOverviewMode && mounted) {
-          _debounce?.cancel();
-          _loadInitialSuggestions();
-        }
-        if (!_tripOverviewMode && mounted) Navigator.pop(context);
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -4862,55 +6751,141 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       return;
     }
 
-    final applyPickup = _tapAppliesToPickup;
-    final destinationSide = !applyPickup;
-    if (destinationSide &&
-        suggestion.latLng != null &&
-        suggestion.name != 'Current Location') {
+    final stopIdx = _editingStopIndex;
+    final tripOv = _tripOverviewMode;
+    if (stopIdx != null && tripOv) {
       ref.read(savedLocationsProvider.notifier).addRecentLocation(
             name: suggestion.name,
             address: suggestion.address,
             location: suggestion.latLng!,
             placeId: suggestion.placeId,
           );
-    }
-
-    final asPickup = _tripOverviewMode ? applyPickup : null;
-    final line =
-        '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}';
-    widget.onLocationSelected(
-      line,
-      suggestion.latLng,
-      asPickup: asPickup,
-    );
-    if (_tripOverviewMode && !applyPickup) {
-      _searchController.value = TextEditingValue(
-        text: line,
-        selection: TextSelection.collapsed(offset: line.length),
+      final line =
+          '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}';
+      widget.onLocationSelected(
+        line,
+        suggestion.latLng,
+        stopIndex: stopIdx,
       );
+      if (mounted) {
+        _stopControllers[stopIdx].value = TextEditingValue(
+          text: line,
+          selection: TextSelection.collapsed(offset: line.length),
+        );
+        _debounce?.cancel();
+        _loadInitialSuggestions();
+      }
+    } else {
+      final applyPickup = _tapAppliesToPickup;
+      final destinationSide = !applyPickup;
+      if (destinationSide &&
+          suggestion.latLng != null &&
+          suggestion.name != 'Current Location') {
+        ref.read(savedLocationsProvider.notifier).addRecentLocation(
+              name: suggestion.name,
+              address: suggestion.address,
+              location: suggestion.latLng!,
+              placeId: suggestion.placeId,
+            );
+      }
+
+      final asPickup = tripOv ? applyPickup : null;
+      final line =
+          '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}';
+      widget.onLocationSelected(
+        line,
+        suggestion.latLng,
+        asPickup: asPickup,
+      );
+      if (tripOv && !applyPickup) {
+        _searchController.value = _destTextValue(line);
+      }
+      if (tripOv && mounted) {
+        _debounce?.cancel();
+        _loadInitialSuggestions();
+      }
+      if (!tripOv && mounted) Navigator.pop(context);
     }
-    if (_tripOverviewMode && mounted) {
-      _debounce?.cancel();
-      _loadInitialSuggestions();
-    }
-    if (!_tripOverviewMode && mounted) Navigator.pop(context);
   }
 
   Widget _buildSuggestionTile(_LocationSuggestion suggestion) {
     final tripOverview = _tripOverviewMode;
-    final destinationSide =
-        tripOverview ? !_tapAppliesToPickup : !widget.isPickup;
+    final destinationSide = tripOverview
+        ? (_editingStopIndex != null || !_tapAppliesToPickup)
+        : !widget.isPickup;
     final showHomeHeart = destinationSide &&
+        !tripOverview &&
         !widget.selectingStop &&
         suggestion.fromRecent &&
         suggestion.latLng != null &&
         suggestion.name != 'Current Location';
     final homeMatch = showHomeHeart && _isSameAsSavedHome(suggestion);
-    final pickupEmpty = widget.tripPickupController == null ||
-        widget.tripPickupController!.text.trim().isEmpty;
+    final heartFilled = homeMatch || _isFavorite(suggestion);
+    final figmaRecentRow = tripOverview &&
+        suggestion.fromRecent &&
+        _searchController.text.trim().isEmpty;
     final usePill = suggestion.fromRecent &&
         _searchController.text.trim().isEmpty &&
-        (!_tripOverviewMode || pickupEmpty);
+        !_tripOverviewMode;
+
+    final titleStyle = figmaRecentRow
+        ? const TextStyle(
+            fontFamily: 'Poppins',
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+            color: Color(0xFF000000),
+            height: 1.5,
+          )
+        : const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF1A1A1A),
+          );
+    final subtitleStyle = figmaRecentRow
+        ? const TextStyle(
+            fontFamily: 'Poppins',
+            fontSize: 14.19,
+            fontWeight: FontWeight.w400,
+            color: Color(0xFF929292),
+            height: 1.48,
+          )
+        : const TextStyle(
+            fontSize: 13,
+            color: Color(0xFF888888),
+          );
+
+    final leading = figmaRecentRow
+        ? Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            child: Container(
+              width: 24,
+              height: 24,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: _planOrange, width: 1.32),
+              ),
+              child: Icon(
+                Icons.schedule_rounded,
+                size: 14,
+                color: Colors.grey.shade700,
+              ),
+            ),
+          )
+        : Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: _getIconBackgroundColor(suggestion.icon),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Icon(
+              suggestion.icon ?? Icons.location_on_outlined,
+              color: _getIconColor(suggestion.icon),
+              size: 20,
+            ),
+          );
 
     final row = Row(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -4920,53 +6895,39 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             onTap: () => _handleSuggestionTap(suggestion),
             child: Padding(
               padding: EdgeInsets.symmetric(
-                vertical: usePill ? 12 : 8,
+                vertical: usePill ? 12 : (figmaRecentRow ? 10 : 8),
                 horizontal: usePill ? 14 : 0,
               ),
               child: Row(
                 children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: _getIconBackgroundColor(suggestion.icon),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Icon(
-                      suggestion.icon ?? Icons.location_on_outlined,
-                      color: _getIconColor(suggestion.icon),
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
+                  leading,
+                  SizedBox(width: figmaRecentRow ? 10 : 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           suggestion.name,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF1A1A1A),
-                          ),
+                          style: titleStyle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                         if (suggestion.address.isNotEmpty)
                           Text(
                             suggestion.address,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: Color(0xFF888888),
-                            ),
+                            style: subtitleStyle,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
                       ],
                     ),
                   ),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    color: Color(0xFFBDBDBD),
-                    size: 16,
-                  ),
+                  if (!figmaRecentRow)
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      color: Color(0xFFBDBDBD),
+                      size: 16,
+                    ),
                 ],
               ),
             ),
@@ -4977,9 +6938,11 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             tooltip: 'Set as Home',
             onPressed: () => _setRecentAsHome(suggestion),
             icon: Icon(
-              homeMatch ? Icons.favorite : Icons.favorite_border,
-              color: const Color(0xFFE91E63),
-              size: 22,
+              heartFilled ? Icons.favorite : Icons.favorite_border,
+              color: heartFilled
+                  ? const Color(0xFFD14544)
+                  : const Color(0xFF292D32),
+              size: 15,
             ),
           ),
       ],
@@ -4999,9 +6962,13 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
 
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         border: Border(
-          bottom: BorderSide(color: Color(0xFFF0F0F0)),
+          bottom: BorderSide(
+            color: figmaRecentRow
+                ? const Color(0xFFE8E8E8)
+                : const Color(0xFFF0F0F0),
+          ),
         ),
       ),
       child: row,

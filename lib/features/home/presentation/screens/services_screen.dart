@@ -28,6 +28,8 @@ class ServicesScreen extends ConsumerStatefulWidget {
   // ── Raahi palette ──
   static const _beige = Color(0xFFF6EFE4);
   static const _accent = Color(0xFFD4956A);
+  /// Profile avatar circle (greeting row, left of “Hi,”).
+  static const _profileAvatarBg = Color(0xFFCF923D);
   static const _textPrimary = Color(0xFF1A1A1A);
   static const _textSecondary = Color(0xFF888888);
   static const _muted = Color(0xFFB8AFA0);
@@ -38,6 +40,8 @@ class ServicesScreen extends ConsumerStatefulWidget {
   static const _strokeMuted = Color(0xFFCBC6BB);
   static const _placesCardActive = Color(0xFFFFF8E4);
   static const _footerHeart = Color(0xFFFCD848);
+  /// “Places near you” section background.
+  static const _placesNearYouBg = Color(0xFF151513);
 
   // ── Service definitions (realtime - no static badges) ──
   static final _services = [
@@ -305,7 +309,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
         onTap: () => _navigateToFindTrip(),
         child: Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(18),
@@ -322,10 +326,11 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
             ref.tr('where_to'),
             style: const TextStyle(
               fontFamily: 'Poppins',
-              fontSize: 32,
+              fontSize: 18,
               fontWeight: FontWeight.w500,
-              color: ServicesScreen._textPrimary,
+              letterSpacing: 0.45,
               height: 1.2,
+              color: ServicesScreen._textPrimary,
             ),
           ),
         ),
@@ -453,7 +458,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                               width: 40,
                               height: 40,
                               decoration: const BoxDecoration(
-                                color: ServicesScreen._accent,
+                                color: ServicesScreen._profileAvatarBg,
                                 shape: BoxShape.circle,
                               ),
                               child: Center(
@@ -482,7 +487,15 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                             ),
                           ),
                           GestureDetector(
-                            onTap: _showSchedulePicker,
+                            onTap: () {
+                              if (_scheduledTime != null) {
+                                _showSchedulePicker();
+                              } else {
+                                context.push(
+                                  '${AppRoutes.findTrip}?autoSearch=true&scheduleAfterLocations=true',
+                                );
+                              }
+                            },
                             child: Container(
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 12, vertical: 8),
@@ -549,34 +562,35 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                     ),
                     const SizedBox(height: 20),
 
-                    // ── Promotional banner (single design asset, 24px radius) ──
+                    // ── Promotional banner (asset keeps aspect ratio; cap height to avoid stretch) ──
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 20),
                       child: GestureDetector(
                         onTap: () => _navigateToFindTrip(),
-                        child: Container(
-                          height: 160,
-                          width: double.infinity,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(24),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(24),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(24),
+                          child: SizedBox(
+                            height: 112,
+                            width: double.infinity,
                             child: Image.asset(
                               'assets/images/cashback_banner.png',
-                              fit: BoxFit.fill,
+                              width: double.infinity,
+                              height: 112,
+                              fit: BoxFit.cover,
+                              alignment: Alignment.center,
                               errorBuilder: (context, error, stackTrace) {
                                 return Container(
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF1A1A1A),
-                                    borderRadius: BorderRadius.circular(24),
+                                  width: double.infinity,
+                                  height: 112,
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFF1A1A1A),
                                   ),
                                   alignment: Alignment.center,
                                   child: const Text(
                                     '30% Cashback',
                                     style: TextStyle(
                                       fontFamily: 'Poppins',
-                                      fontSize: 22,
+                                      fontSize: 20,
                                       fontWeight: FontWeight.w700,
                                       color: Colors.white,
                                     ),
@@ -590,13 +604,13 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                     ),
                     const SizedBox(height: 24),
 
-                    // ── Places near you (realtime from device location) with black background container ──
+                    // ── Places near you (realtime from device location) ──
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 20),
                       child: Container(
                         padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
                         decoration: BoxDecoration(
-                          color: Colors.black,
+                          color: ServicesScreen._placesNearYouBg,
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Column(

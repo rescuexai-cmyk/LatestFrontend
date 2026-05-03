@@ -265,6 +265,8 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           final autoOpen = state.uri.queryParameters['autoSearch'] == 'true';
           final serviceType = state.uri.queryParameters['serviceType'];
           final scheduledTimeStr = state.uri.queryParameters['scheduledTime'];
+          final scheduleAfterLocations =
+              state.uri.queryParameters['scheduleAfterLocations'] == 'true';
           DateTime? scheduledTime;
           if (scheduledTimeStr != null && scheduledTimeStr.isNotEmpty) {
             try {
@@ -275,6 +277,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             autoOpenSearch: autoOpen, 
             initialServiceType: serviceType,
             scheduledTime: scheduledTime,
+            scheduleAfterLocations: scheduleAfterLocations,
           );
         },
       ),

@@ -710,11 +710,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     }
 
     try {
-      final waypoints = booking.stops.isNotEmpty
-          ? booking.stops
+      final completeStops =
+          booking.stops.where((s) => s.location != null).toList();
+      final waypoints = completeStops.isNotEmpty
+          ? completeStops
               .map((s) => {
-                    'lat': s.location.latitude,
-                    'lng': s.location.longitude,
+                    'lat': s.location!.latitude,
+                    'lng': s.location!.longitude,
                     'address': s.address,
                   })
               .toList()

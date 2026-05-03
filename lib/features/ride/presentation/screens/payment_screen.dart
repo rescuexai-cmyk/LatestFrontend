@@ -1664,11 +1664,14 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
       // Create ride request via the centralized API client (includes auth token)
       // Backend: POST /api/rides  body: { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod }
-      final waypoints = rideBookingState.stops.isNotEmpty
-          ? rideBookingState.stops
+      final completeStops = rideBookingState.stops
+          .where((s) => s.location != null)
+          .toList();
+      final waypoints = completeStops.isNotEmpty
+          ? completeStops
               .map((s) => {
-                    'lat': s.location.latitude,
-                    'lng': s.location.longitude,
+                    'lat': s.location!.latitude,
+                    'lng': s.location!.longitude,
                     'address': s.address,
                   })
               .toList()
