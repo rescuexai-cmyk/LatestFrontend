@@ -68,7 +68,13 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
   }
 
   void _handleBackNavigation() {
-    if (widget.returnToProfileOnBack) {
+    final onboardingState = ref.read(driverOnboardingProvider);
+    // If documents are rejected, ALWAYS go to personal info so driver
+    // can correct their aadhaar number, email, RC details — regardless
+    // of where they came from.
+    if (onboardingState.isRejected) {
+      context.go('${AppRoutes.driverOnboarding}?isUpdateMode=true');
+    } else if (widget.returnToProfileOnBack) {
       context.go(AppRoutes.driverHome);
     } else {
       context.pop();
@@ -202,9 +208,9 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     final hasExpiring = _hasExpiringDocuments(backendStatus);
 
     return PopScope(
-      canPop: !widget.returnToProfileOnBack,
+      canPop: false, // Always intercept — handle all back navigation ourselves
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && widget.returnToProfileOnBack) {
+        if (!didPop) {
           _handleBackNavigation();
         }
       },
@@ -232,6 +238,30 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                 const Text(
                   'Review and update your driver documents',
                   style: TextStyle(fontSize: 14, color: _textSecondary),
+                ),
+                const SizedBox(height: 12),
+
+                // Edit personal details (Aadhaar number, email)
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.push(
+                      '${AppRoutes.driverOnboarding}?isUpdateMode=true',
+                    ),
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                    label: const Text(
+                      'Edit Personal Details (Aadhaar, Email)',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _accent,
+                      side: const BorderSide(color: _accent),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 24),
 
@@ -708,9 +738,3 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                 ),
               ),
             ),
-          ],
-        ],
-      ),
-    );
-  }
-}
