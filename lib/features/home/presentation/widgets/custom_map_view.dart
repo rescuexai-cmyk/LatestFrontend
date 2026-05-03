@@ -10,6 +10,8 @@ import '../../../../core/models/location.dart';
 import '../../../../core/services/maps_service.dart';
 import '../../../../core/services/car_animation_service.dart';
 import '../../../../core/config/app_config.dart';
+import '../../../../core/utils/auto_map_icon.dart';
+import '../../../../core/utils/bike_map_icon.dart';
 
 /// Ride phase enum for determining route display
 enum RidePhase {
@@ -228,21 +230,25 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
           break;
         case 'cab-premium':
         case 'cab-xl':
-          assetPath = 'assets/map_icons/icon_cab_premium.png';
-          break;
         case 'cab':
         case 'cab-mini':
         default:
           assetPath = 'assets/map_icons/icon_cab.png';
           break;
       }
-      
-      // Uber/Rapido style: ~40-50 logical pixels, with device pixel ratio for crisp rendering
-      // The actual image is larger, Flutter will scale it down appropriately
-      _vehicleIcon = await BitmapDescriptor.asset(
-        const ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5),
-        assetPath,
-      );
+
+      const imageConfig =
+          ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5);
+      if (normalizedType == 'bike' || normalizedType == 'bike-rescue') {
+        _vehicleIcon = await loadBikeMapIconProcessed(assetPath,
+                debugLabel: normalizedType) ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
+      } else if (normalizedType == 'auto') {
+        _vehicleIcon = await loadAutoMapIconProcessed(debugLabel: 'auto') ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
+      } else {
+        _vehicleIcon = await BitmapDescriptor.asset(imageConfig, assetPath);
+      }
       _loadedVehicleType = normalizedType;
       if (mounted) _updateMarkers();
       debugPrint('🚗 Vehicle icon loaded from asset: $assetPath');

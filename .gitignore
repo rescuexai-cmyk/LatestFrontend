@@ -71,3 +71,7 @@ tmp_*/
 .env
 .env.*
 !.env.example
+
+# Local scratch / frame dumps (do not commit)
+tmp_video_frames*/
+tmp_video_frames_*/

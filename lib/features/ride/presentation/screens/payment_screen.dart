@@ -2,10 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
-import '../../../../core/widgets/upi_app_icon.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/ride_booking_provider.dart';
@@ -139,8 +137,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     final totalAmount = (baseAmount - discountAmount).toStringAsFixed(2);
 
     final transactionNote = 'Raahi Ride Payment';
-    final payeeVpa = AppConfig.companyUpiId; // Company UPI ID
-    final payeeName = AppConfig.companyDisplayName;
+    final payeeVpa = 'raahi@upi'; // This should come from merchant config
+    final payeeName = 'Raahi';
 
     // Construct UPI URL
     final upiUrl = Uri.parse(
@@ -455,11 +453,10 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                 ),
               ],
             ),
-            child: Center(
-              child: UpiAppIcon(
-                appName: app['name'] as String,
-                size: 26,
-              ),
+            child: Icon(
+              app['icon'] as IconData,
+              color: app['color'] as Color,
+              size: 26,
             ),
           ),
           const SizedBox(height: 6),

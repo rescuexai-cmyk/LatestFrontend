@@ -30,6 +30,14 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Firebase must be initialized before any Firebase API (including background handler).
+  try {
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  } catch (e, st) {
+    debugPrint('❌ Firebase init in main failed: $e\n$st');
+  }
+
   // Catch widget build errors (prevents blank screen from uncaught exceptions)
   ErrorWidget.builder = (FlutterErrorDetails details) {
     return Material(
@@ -138,11 +146,7 @@ class _AppInitializerState extends State<_AppInitializer> {
 
   Future<void> _initialize() async {
     try {
-
-      // Set up Firebase Messaging background handler
-      FirebaseMessaging.onBackgroundMessage(
-          _firebaseMessagingBackgroundHandler);
-
+      // Background handler is registered once in main(); avoid duplicate registration here.
       // Run init with 12s timeout to prevent blank screen if push/server hangs
       await _runInitWithTimeout();
     } catch (e, stack) {
@@ -168,34 +172,38 @@ class _AppInitializerState extends State<_AppInitializer> {
   }
 
   Future<void> _doInit() async {
-    // Firebase MUST be initialized before any Firebase API (Messaging, etc.)
-    try {
-      await Firebase.initializeApp().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => throw TimeoutException('Firebase init timed out'),
-      );
-      debugPrint('✅ Firebase initialized');
-      
-      // Initialize Firebase App Check for seamless phone auth (no reCAPTCHA)
-      await _initializeAppCheck();
-
-      // Prefer native verification (Play Integrity) over browser reCAPTCHA.
-      // Brave and some privacy-focused browsers block sessionStorage which
-      // breaks the reCAPTCHA handshake ("missing initial state" error).
-      if (Platform.isAndroid) {
-        try {
-          await FirebaseAuth.instance.setSettings(
-            forceRecaptchaFlow: false,
-            appVerificationDisabledForTesting: false,
-          );
-          debugPrint('✅ Firebase Auth: forceRecaptchaFlow=false (native preferred)');
-        } catch (e) {
-          debugPrint('⚠️ Firebase Auth setSettings failed (non-fatal): $e');
-        }
+    // Firebase is initialized in main(); ensure app is ready if init was deferred
+    if (Firebase.apps.isEmpty) {
+      try {
+        await Firebase.initializeApp().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => throw TimeoutException('Firebase init timed out'),
+        );
+        debugPrint('✅ Firebase initialized (fallback in _doInit)');
+      } catch (e) {
+        debugPrint('❌ Firebase init failed: $e');
+        rethrow;
       }
+    } else {
+      debugPrint('✅ Firebase already initialized');
+    }
+
+    // App Check + Auth settings (from main): improve phone auth on real devices
+    try {
+      await _initializeAppCheck();
     } catch (e) {
-      debugPrint('❌ Firebase init failed: $e');
-      rethrow;
+      debugPrint('⚠️ App Check in _doInit: $e');
+    }
+    if (Platform.isAndroid) {
+      try {
+        await FirebaseAuth.instance.setSettings(
+          forceRecaptchaFlow: false,
+          appVerificationDisabledForTesting: false,
+        );
+        debugPrint('✅ Firebase Auth: forceRecaptchaFlow=false (native preferred)');
+      } catch (e) {
+        debugPrint('⚠️ Firebase Auth setSettings failed (non-fatal): $e');
+      }
     }
 
     // Push notification (can block on iOS permission dialog)
@@ -242,41 +250,17 @@ class _SplashScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
     return Scaffold(
-      backgroundColor: const Color(0xFFF6EFE4),
+      backgroundColor: Colors.black,
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: const Color(0xFFD4956A),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Icon(Icons.directions_car,
-                  color: Colors.white, size: 40),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Raahi',
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF2C2C2C),
-              ),
-            ),
-            const SizedBox(height: 32),
-            const SizedBox(
-              width: 32,
-              height: 32,
-              child: CircularProgressIndicator(
-                strokeWidth: 3,
-                color: Color(0xFFD4956A),
-              ),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Image.asset(
+            'assets/images/splash_logo.png',
+            width: screenWidth * 0.85,
+            fit: BoxFit.contain,
+          ),
         ),
       ),
     );

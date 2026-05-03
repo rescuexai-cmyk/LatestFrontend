@@ -120,14 +120,7 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
   }
 
   void _setupMapElements() {
-    _markers = {
-      Marker(
-        markerId: const MarkerId('pickup'),
-        position: _pickupLocation,
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-        infoWindow: InfoWindow(title: _pickupAddress),
-      ),
-    };
+    _markers = {}; // Pickup marker removed per design
 
     _circles = {
       Circle(
@@ -461,8 +454,7 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(ctx);
-              // Navigate to services screen (ride booking), not findTrip or home
-              if (mounted) context.go(AppRoutes.services);
+              context.go(AppRoutes.findTrip);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF252525),

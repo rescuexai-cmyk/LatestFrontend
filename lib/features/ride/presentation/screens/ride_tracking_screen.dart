@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../../../../core/config/app_config.dart';
 import '../../../../core/models/driver.dart';
 import '../../../../core/models/location.dart';
 import '../../../../core/models/ride.dart';
@@ -21,7 +20,6 @@ import '../../../chat/presentation/screens/ride_chat_screen.dart';
 import '../../../chat/providers/chat_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
-import '../../../../core/widgets/upi_app_icon.dart';
 import '../../providers/ride_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 
@@ -493,7 +491,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
+      builder: (context) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text(ref.tr('ride_cancelled')),
         content:
@@ -501,9 +499,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
         actions: [
           ElevatedButton(
             onPressed: () {
-              Navigator.pop(ctx);
-              // Navigate to services screen (ride booking), not findTrip or home
-              if (mounted) context.go(AppRoutes.services);
+              Navigator.pop(context);
+              context.go(AppRoutes.findTrip);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.primary,
@@ -543,8 +540,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
           ref.read(activeRideProvider.notifier).clearActiveRide();
           ref.read(rideBookingProvider.notifier).reset();
           _ratingSheetOpen = false;
-          // Navigate to services screen (ride booking) for easy rebooking
-          nav.go(AppRoutes.services);
+          nav.go(AppRoutes.home);
         },
         onSkip: () {
           final nav = GoRouter.of(context);
@@ -553,8 +549,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
           ref.read(activeRideProvider.notifier).clearActiveRide();
           ref.read(rideBookingProvider.notifier).reset();
           _ratingSheetOpen = false;
-          // Navigate to services screen (ride booking) for easy rebooking
-          nav.go(AppRoutes.services);
+          nav.go(AppRoutes.home);
         },
       ),
     ).whenComplete(() {
@@ -713,11 +708,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
         // Cancel via REST API (this also triggers server-side events to driver)
         await apiClient.cancelRide(widget.rideId, reason: 'Cancelled by rider');
         if (mounted) {
-          // Clear ride state before navigation
-          ref.read(activeRideProvider.notifier).clearActiveRide();
-          ref.read(rideBookingProvider.notifier).reset();
-          // Navigate to services screen (ride booking), not findTrip or home
-          context.go(AppRoutes.services);
+          context.go(AppRoutes.findTrip);
         }
       } catch (e) {
         debugPrint('Error cancelling ride: $e');
@@ -1362,9 +1353,10 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
   Future<void> _launchUpiPayment(Map<String, dynamic> app) async {
     final amount = widget.ride.fare.toStringAsFixed(2);
     final transactionNote = 'Raahi Ride Payment - ${widget.ride.id}';
-    // Use company UPI ID for all ride payments
-    final payeeVpa = AppConfig.companyUpiId;
-    final payeeName = AppConfig.companyDisplayName;
+    // Use driver's UPI ID if available, otherwise use a default merchant UPI
+    final payeeVpa =
+        'raahi@upi'; // This should come from driver/merchant config
+    final payeeName = 'Raahi';
 
     // Construct UPI URL
     // Format: upi://pay?pa=<payee_vpa>&pn=<payee_name>&am=<amount>&cu=INR&tn=<note>
@@ -1451,11 +1443,10 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
                 width: 1.5,
               ),
             ),
-            child: Center(
-              child: UpiAppIcon(
-                appName: app['name'] as String,
-                size: 28,
-              ),
+            child: Icon(
+              app['icon'] as IconData,
+              color: app['color'] as Color,
+              size: 28,
             ),
           ),
           const SizedBox(height: 6),

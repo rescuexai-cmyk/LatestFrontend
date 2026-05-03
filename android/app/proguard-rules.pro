@@ -1,3 +1,12 @@
+# Firebase / Play Services — avoid R8 stripping classes used via reflection (release crashes)
+-keepattributes *Annotation*
+-keepattributes Signature
+-keepattributes Exceptions
+-keep class com.google.firebase.** { *; }
+-keep class com.google.android.gms.** { *; }
+-dontwarn com.google.firebase.**
+-dontwarn com.google.android.gms.**
+
 # Geolocator - prevent R8 from failing on missing class references
 -dontwarn com.baseflow.geolocator.GeolocatorLocationService$LocalBinder
 -dontwarn com.baseflow.geolocator.GeolocatorLocationService

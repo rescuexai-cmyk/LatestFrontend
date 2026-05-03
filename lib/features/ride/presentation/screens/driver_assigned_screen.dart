@@ -16,6 +16,8 @@ import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/sse_service.dart';
 import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/utils/auto_map_icon.dart';
+import '../../../../core/utils/bike_map_icon.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
@@ -679,8 +681,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(ctx);
-              // Navigate to services screen (ride booking), not home/landing
-              if (mounted) context.go(AppRoutes.services);
+              if (mounted) context.go(AppRoutes.home);
             },
             child: Text(ref.tr('ok')),
           ),
@@ -703,8 +704,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
               content: Text(ref.tr('unable_find_driver')),
               backgroundColor: Colors.orange),
         );
-        // Navigate to services screen (ride booking), not home/landing
-        context.go(AppRoutes.services);
+        context.go(AppRoutes.home);
       }
       return;
     }
@@ -767,8 +767,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.orange),
     );
-    // Navigate to services screen (ride booking), not home/landing
-    context.go(AppRoutes.services);
+    context.go(AppRoutes.home);
   }
 
   // ─── Phase transitions ───────────────────────────────────────
@@ -825,8 +824,6 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           break;
         case 'cab-premium':
         case 'cab-xl':
-          assetPath = 'assets/map_icons/icon_cab_premium.png';
-          break;
         case 'cab':
         case 'cab-mini':
         default:
@@ -834,11 +831,19 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           break;
       }
 
-      // Uber/Rapido style: ~40-50 logical pixels, with device pixel ratio for crisp rendering
-      _vehicleIcon = await BitmapDescriptor.asset(
-        const ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5),
-        assetPath,
-      );
+      const imageConfig =
+          ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5);
+      // Bike: flood-remove black plate connected to edges.
+      if (normalizedType == 'bike' || normalizedType == 'bike-rescue') {
+        _vehicleIcon = await loadBikeMapIconProcessed(assetPath,
+                debugLabel: normalizedType) ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
+      } else if (normalizedType == 'auto') {
+        _vehicleIcon = await loadAutoMapIconProcessed(debugLabel: 'auto') ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
+      } else {
+        _vehicleIcon = await BitmapDescriptor.asset(imageConfig, assetPath);
+      }
       debugPrint('🚗 Vehicle icon loaded from asset: $assetPath');
       if (mounted) _updateDriverMarker();
     } catch (e) {
@@ -1479,13 +1484,10 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   }
 
   /// Clear all ride-related state and navigate to the services / vehicle selection screen.
-  /// 
-  /// IMPORTANT: Always navigate to services screen (ride booking), NOT home/landing screen.
-  /// This ensures users can immediately book another ride after cancellation.
   void _clearRideStateAndNavigate() {
     ref.read(activeRideProvider.notifier).clearActiveRide();
     ref.read(rideBookingProvider.notifier).reset();
-    if (mounted) context.go(AppRoutes.services);
+    if (mounted) context.go(AppRoutes.home);
   }
 
   Future<void> _submitRating(double rating, String? feedback) async {
