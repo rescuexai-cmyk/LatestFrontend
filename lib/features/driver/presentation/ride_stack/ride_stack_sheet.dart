@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/driver_rides_provider.dart';
-import 'state/ride_queue_provider.dart';
 import 'widgets/ride_stack_view.dart';
 
+/// Bottom sheet for displaying ride offers in a stack.
+/// Uses driverRidesProvider directly for state management.
 class RideStackSheet extends ConsumerStatefulWidget {
   final Future<void> Function(RideOffer ride) onAccept;
   final Future<void> Function(RideOffer ride) onDecline;
@@ -23,9 +24,9 @@ class RideStackSheet extends ConsumerStatefulWidget {
 class _RideStackSheetState extends ConsumerState<RideStackSheet> {
   @override
   Widget build(BuildContext context) {
-    final queueState = ref.watch(rideQueueProvider);
+    final driverRidesState = ref.watch(driverRidesProvider);
 
-    if (queueState.isEmpty) {
+    if (!driverRidesState.hasActiveOffer) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         widget.onDismiss();
       });
@@ -102,6 +103,10 @@ Future<void> showRideStackSheet({
   );
 }
 
+/// Overlay widget for displaying ride offers as a stack from the bottom.
+/// 
+/// Uses driverRidesProvider.hasActiveOffer to determine visibility.
+/// Animates in from bottom when offers are available.
 class RideStackOverlay extends ConsumerStatefulWidget {
   final Future<void> Function(RideOffer ride) onAccept;
   final Future<void> Function(RideOffer ride) onDecline;
@@ -144,11 +149,11 @@ class _RideStackOverlayState extends ConsumerState<RideStackOverlay>
     super.dispose();
   }
 
-  void _updateVisibility(bool hasRides) {
-    if (hasRides && !_isVisible) {
+  void _updateVisibility(bool hasActiveOffer) {
+    if (hasActiveOffer && !_isVisible) {
       _isVisible = true;
       _slideController.forward();
-    } else if (!hasRides && _isVisible) {
+    } else if (!hasActiveOffer && _isVisible) {
       _isVisible = false;
       _slideController.reverse();
     }
@@ -156,10 +161,10 @@ class _RideStackOverlayState extends ConsumerState<RideStackOverlay>
 
   @override
   Widget build(BuildContext context) {
-    final queueState = ref.watch(rideQueueProvider);
+    final driverRidesState = ref.watch(driverRidesProvider);
     
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _updateVisibility(queueState.hasRides);
+      _updateVisibility(driverRidesState.hasActiveOffer);
     });
 
     return SlideTransition(

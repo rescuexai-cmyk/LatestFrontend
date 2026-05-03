@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:truecaller_sdk/truecaller_sdk.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../providers/auth_provider.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -12,20 +16,338 @@ class LoginScreen extends ConsumerStatefulWidget {
 }
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
+  bool _isSocialLoading = false;
+
   void _navigateToMobileOTP() {
     context.push(AppRoutes.signup);
   }
 
-  void _handleTruecallerLogin() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(ref.tr('truecaller_coming'))),
+  Future<void> _handleTruecallerLogin() async {
+    if (_isSocialLoading) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Truecaller login is available on Android only.')),
+      );
+      return;
+    }
+    final phone = await _askPhoneNumber(
+      title: 'Login with Truecaller',
+      hint: 'Enter 10-digit mobile number',
     );
+    if (!mounted || phone == null) return;
+
+    setState(() => _isSocialLoading = true);
+    final tcPayload = await _runTruecallerFlow(phone);
+    if (!mounted) return;
+    if (!tcPayload.success) {
+      setState(() => _isSocialLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(tcPayload.error ?? 'Truecaller verification failed')),
+      );
+      return;
+    }
+
+    final result = await ref.read(authStateProvider.notifier).signInWithTruecaller(
+          phone: tcPayload.phone,
+          profile: tcPayload.profile,
+          accessToken: tcPayload.accessToken,
+          truecallerToken: tcPayload.truecallerToken,
+        );
+    if (!mounted) return;
+    setState(() => _isSocialLoading = false);
+
+    if (!result.success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result.error ?? 'Truecaller login failed')),
+      );
+      return;
+    }
+
+    if (result.requiresPhone) {
+      context.go('${AppRoutes.phoneNumber}?mode=linkPhone');
+      return;
+    }
+
+    if (result.isNewUser) {
+      final phoneValue = ref.read(currentUserProvider)?.phone ?? '';
+      context.go('${AppRoutes.nameEntry}?phone=$phoneValue');
+    } else {
+      context.go(AppRoutes.home);
+    }
   }
 
-  void _handleGoogleLogin() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(ref.tr('google_coming'))),
+  Future<_TruecallerPayloadResult> _runTruecallerFlow(String phone) async {
+    StreamSubscription<TcSdkCallback>? subscription;
+    Completer<_TruecallerPayloadResult>? completer;
+
+    void completeOnce(_TruecallerPayloadResult value) {
+      if (completer != null && !completer!.isCompleted) {
+        completer!.complete(value);
+      }
+    }
+
+    try {
+      await TcSdk.initializeSDK(
+        sdkOption: TcSdkOptions.OPTION_VERIFY_ALL_USERS,
+      );
+
+      completer = Completer<_TruecallerPayloadResult>();
+      final state = DateTime.now().millisecondsSinceEpoch.toString();
+
+      subscription = TcSdk.streamCallbackData.listen((callback) async {
+        switch (callback.result) {
+          case TcSdkCallbackResult.verifiedBefore:
+            final profile = callback.profile;
+            if (profile != null) {
+              completeOnce(_TruecallerPayloadResult(
+                success: true,
+                phone: profile.phoneNumber,
+                accessToken: profile.accessToken,
+                profile: {
+                  'firstName': profile.firstName,
+                  'lastName': profile.lastName,
+                  'phoneNumber': profile.phoneNumber,
+                  'email': profile.email,
+                  'avatarUrl': profile.avatarUrl,
+                },
+              ));
+            } else {
+              completeOnce(const _TruecallerPayloadResult(
+                success: false,
+                error: 'Truecaller profile not available',
+              ));
+            }
+            break;
+          case TcSdkCallbackResult.verificationComplete:
+            completeOnce(_TruecallerPayloadResult(
+              success: true,
+              phone: phone,
+              accessToken: callback.accessToken,
+            ));
+            break;
+          case TcSdkCallbackResult.otpReceived:
+          case TcSdkCallbackResult.imOtpReceived:
+            final otp = callback.otp;
+            if (otp != null && otp.isNotEmpty) {
+              await TcSdk.verifyOtp(
+                firstName: 'Raahi',
+                lastName: 'User',
+                otp: otp,
+              );
+            }
+            break;
+          case TcSdkCallbackResult.otpInitiated:
+          case TcSdkCallbackResult.imOtpInitiated:
+            final otp = await _askOtpCode();
+            if (otp == null) {
+              completeOnce(const _TruecallerPayloadResult(
+                success: false,
+                error: 'OTP verification cancelled',
+              ));
+              break;
+            }
+            await TcSdk.verifyOtp(
+              firstName: 'Raahi',
+              lastName: 'User',
+              otp: otp,
+            );
+            break;
+          case TcSdkCallbackResult.missedCallReceived:
+            await TcSdk.verifyMissedCall(
+              firstName: 'Raahi',
+              lastName: 'User',
+            );
+            break;
+          case TcSdkCallbackResult.verification:
+            await TcSdk.requestVerification(phoneNumber: phone);
+            break;
+          case TcSdkCallbackResult.success:
+            final authCode = callback.tcOAuthData?.authorizationCode;
+            if (authCode == null || authCode.isEmpty) {
+              completeOnce(const _TruecallerPayloadResult(
+                success: false,
+                error: 'Truecaller authorization code missing',
+              ));
+              break;
+            }
+            completeOnce(_TruecallerPayloadResult(
+              success: true,
+              phone: phone,
+              truecallerToken: authCode,
+            ));
+            break;
+          case TcSdkCallbackResult.failure:
+            completeOnce(_TruecallerPayloadResult(
+              success: false,
+              error: callback.error?.message ?? 'Truecaller verification failed',
+            ));
+            break;
+          case TcSdkCallbackResult.exception:
+            completeOnce(_TruecallerPayloadResult(
+              success: false,
+              error: callback.exception?.message ??
+                  'Truecaller verification exception',
+            ));
+            break;
+          case TcSdkCallbackResult.missedCallInitiated:
+            // Waiting for call verification callback.
+            break;
+        }
+      });
+
+      final isUsable = (await TcSdk.isOAuthFlowUsable) == true;
+      if (isUsable) {
+        await TcSdk.setOAuthState(state);
+        await TcSdk.setOAuthScopes(['profile', 'phone', 'openid']);
+        final verifier = await TcSdk.generateRandomCodeVerifier as String?;
+        if (verifier != null && verifier.isNotEmpty) {
+          final challenge = await TcSdk.generateCodeChallenge(verifier) as String?;
+          if (challenge != null && challenge.isNotEmpty) {
+            await TcSdk.setCodeChallenge(challenge);
+          }
+        }
+        await TcSdk.getAuthorizationCode;
+      } else {
+        await TcSdk.requestVerification(phoneNumber: phone);
+      }
+
+      return await completer.future.timeout(
+        const Duration(seconds: 90),
+        onTimeout: () => const _TruecallerPayloadResult(
+          success: false,
+          error: 'Truecaller verification timed out. Please try again.',
+        ),
+      );
+    } catch (e) {
+      return _TruecallerPayloadResult(success: false, error: e.toString());
+    } finally {
+      await subscription?.cancel();
+    }
+  }
+
+  Future<String?> _askOtpCode() async {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final value = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Enter Truecaller OTP'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            maxLength: 6,
+            decoration: const InputDecoration(
+              hintText: '6-digit OTP',
+              counterText: '',
+            ),
+            validator: (value) {
+              final digits = (value ?? '').replaceAll(RegExp(r'[^\d]'), '');
+              if (digits.length != 6) return 'Enter a valid 6-digit OTP';
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (formKey.currentState?.validate() != true) return;
+              final digits = controller.text.replaceAll(RegExp(r'[^\d]'), '');
+              Navigator.of(context).pop(digits);
+            },
+            child: const Text('Verify'),
+          ),
+        ],
+      ),
     );
+    controller.dispose();
+    return value;
+  }
+
+  Future<void> _handleGoogleLogin() async {
+    if (_isSocialLoading) return;
+    setState(() => _isSocialLoading = true);
+    final result = await ref.read(authStateProvider.notifier).signInWithGoogle();
+    if (!mounted) return;
+    setState(() => _isSocialLoading = false);
+
+    if (!result.success) {
+      final raw = result.error ?? 'Google login failed';
+      final message = raw.contains('GOOGLE_SERVER_CLIENT_ID')
+          ? 'Google login not configured. Please set GOOGLE_SERVER_CLIENT_ID (Web client ID) in build settings.'
+          : raw;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+      return;
+    }
+
+    if (result.requiresPhone) {
+      context.go('${AppRoutes.phoneNumber}?mode=linkPhone');
+      return;
+    }
+
+    if (result.isNewUser) {
+      final phoneValue = ref.read(currentUserProvider)?.phone ?? '';
+      context.go('${AppRoutes.nameEntry}?phone=$phoneValue');
+    } else {
+      context.go(AppRoutes.home);
+    }
+  }
+
+  Future<String?> _askPhoneNumber({
+    required String title,
+    required String hint,
+  }) async {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Form(
+            key: formKey,
+            child: TextFormField(
+              controller: controller,
+              keyboardType: TextInputType.phone,
+              autofocus: true,
+              decoration: InputDecoration(hintText: hint),
+              validator: (value) {
+                final normalized = (value ?? '').replaceAll(RegExp(r'[^\d]'), '');
+                if (!RegExp(r'^[6-9]\d{9}$').hasMatch(normalized)) {
+                  return 'Enter a valid 10-digit mobile number';
+                }
+                return null;
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (formKey.currentState?.validate() != true) return;
+                final normalized =
+                    controller.text.replaceAll(RegExp(r'[^\d]'), '');
+                Navigator.of(context).pop(normalized);
+              },
+              child: const Text('Continue'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    return value;
   }
 
   @override
@@ -85,8 +407,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     const Spacer(),
                     
                     // Buttons
-                    _buildTruecallerButton(),
-                    const SizedBox(height: 14),
                     _buildGoogleButton(),
                     const SizedBox(height: 24),
                     _buildMobileOTPButton(),
@@ -122,7 +442,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         color: const Color(0xFF2C2C2C),
         borderRadius: BorderRadius.circular(28),
         child: InkWell(
-          onTap: _handleTruecallerLogin,
+          onTap: _isSocialLoading ? null : _handleTruecallerLogin,
           borderRadius: BorderRadius.circular(28),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -166,7 +486,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         color: const Color(0xFFDFD4C0),
         borderRadius: BorderRadius.circular(28),
         child: InkWell(
-          onTap: _handleGoogleLogin,
+          onTap: _isSocialLoading ? null : _handleGoogleLogin,
           borderRadius: BorderRadius.circular(28),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -317,5 +637,23 @@ class _GoogleLogoPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _TruecallerPayloadResult {
+  final bool success;
+  final String? phone;
+  final String? accessToken;
+  final String? truecallerToken;
+  final Map<String, dynamic>? profile;
+  final String? error;
+
+  const _TruecallerPayloadResult({
+    required this.success,
+    this.phone,
+    this.accessToken,
+    this.truecallerToken,
+    this.profile,
+    this.error,
+  });
 }
 

@@ -10,6 +10,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vibration/vibration.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/server_config_service.dart';
@@ -18,13 +20,14 @@ import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
+import '../../../../core/widgets/upi_app_icon.dart';
 import '../../../../core/models/pricing_v2.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../providers/driver_rides_provider.dart';
-import '../widgets/incoming_ride_fullscreen.dart';
+import '../../providers/driver_subscription_provider.dart';
+import '../../providers/driver_penalty_provider.dart';
 import '../ride_stack/ride_stack_sheet.dart';
-import '../ride_stack/state/ride_queue_provider.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
   const DriverHomeScreen({super.key});
@@ -76,6 +79,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
   // Real-time countdown for ride offer cards (15s timer ticks every second)
   Timer? _countdownTimer;
+  Timer? _offerCleanupTimer;
 
   // Location stream for real-time updates
   StreamSubscription<Position>? _positionStream;
@@ -88,6 +92,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   StreamSubscription<RemoteMessage>? _pushForegroundSubscription;
   String? _activeIncomingRideId;
   final Map<String, DateTime> _recentIncomingRides = {};
+  // Set after early stop confirmation; next online attempt should resolve penalty first.
+  bool _penaltyLikelyAfterEarlyStop = false;
   AppLifecycleState _lastLifecycleState = AppLifecycleState.resumed;
   DateTime? _lastStatusSyncAt;
   String? _driverRecordId;
@@ -101,12 +107,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Fresh screen session: never render stale in-memory offers from previous logins.
+    ref.read(driverRidesProvider.notifier).resetForNewSession();
     _hydrateDriverRecordId();
     _getCurrentLocation();
     _setupWebSocketSubscription();
     _fetchEarnings();
     _fetchRideHistory();
     _fetchVerificationStatus();
+    _fetchSubscriptionStatus();
     _restoreSessionState();
     _syncDriverLanguageToApp();
     _loadMapStyle();
@@ -194,6 +203,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     }
   }
 
+  /// Fetch subscription status from backend on screen load.
+  Future<void> _fetchSubscriptionStatus() async {
+    try {
+      await ref.read(driverSubscriptionProvider.notifier).checkSubscriptionStatus();
+      debugPrint('📅 Subscription status fetched');
+    } catch (e) {
+      debugPrint('Failed to fetch subscription status: $e');
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
@@ -201,8 +220,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     debugPrint('📱 App lifecycle state changed: $state');
 
     if (state == AppLifecycleState.resumed) {
-      // Re-check verification on every resume
+      // Re-check verification and subscription on every resume
       _fetchVerificationStatus();
+      _fetchSubscriptionStatus();
       if (_isOnline) {
         _ensureSocketConnection();
       }
@@ -326,6 +346,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         debugPrint('⚠️ Could not check verification during restore: $e');
       }
 
+      // Ensure no stale offers are shown after app relaunch/re-login.
+      final ridesNotifier = ref.read(driverRidesProvider.notifier);
+      ridesNotifier.resetForNewSession();
+      // Fresh connection attempt: drop any previous transport state first.
+      realtimeService.disconnectDriver();
+
       setState(() => _isConnecting = true);
 
       final secureStorage = ref.read(secureStorageProvider);
@@ -381,6 +407,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       });
 
       _startCountdownTimer();
+      _startOfferCleanupTimer();
 
       // Initial fetch when going online
       _fetchRideOffers();
@@ -431,7 +458,81 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Platform fee dialog (₹39)
+  // Subscription check before going online (backend-driven)
+  // ---------------------------------------------------------------------------
+
+  /// Check subscription status from backend and navigate to payment if needed.
+  /// Returns true if driver can go online, false otherwise.
+  Future<bool> _checkSubscriptionBeforeGoingOnline() async {
+    try {
+      // Check subscription status from backend
+      final canGoOnline = await ref
+          .read(driverSubscriptionProvider.notifier)
+          .checkSubscriptionStatus();
+
+      if (canGoOnline) {
+        // Subscription is active, persist locally for session expiry checker
+        await _persistFeePaidAt();
+        return true;
+      }
+
+      // Subscription expired or never purchased - navigate to payment screen
+      if (mounted) {
+        final result = await context.push<bool>(AppRoutes.driverSubscriptionPayment);
+        if (result == true) {
+          // Payment successful, persist locally
+          await _persistFeePaidAt();
+          return true;
+        }
+      }
+      return false;
+    } catch (e) {
+      debugPrint('❌ Failed to check subscription status: $e');
+      // Fallback to local check if backend is unavailable
+      final localFeePaid = await _isFeePaidWithin24h();
+      if (localFeePaid) return true;
+
+      // Show payment screen as fallback
+      if (mounted) {
+        final result = await context.push<bool>(AppRoutes.driverSubscriptionPayment);
+        if (result == true) {
+          await _persistFeePaidAt();
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  /// Pre-check penalty before going online so we can show payment options
+  /// instead of the generic "Cannot Go Online" blocker.
+  Future<bool> _resolvePenaltyBeforeGoingOnline() async {
+    try {
+      final notifier = ref.read(driverPenaltyProvider.notifier);
+      final hasPending = await notifier.checkPenaltyStatus();
+      final st = ref.read(driverPenaltyProvider);
+      final shouldForcePenaltyFlow = _penaltyLikelyAfterEarlyStop;
+      final hasActionablePenalty =
+          hasPending || st.hasPendingPenalty || st.penaltyAmount > 0;
+      if (hasActionablePenalty || shouldForcePenaltyFlow) {
+        final resolved = await _showPendingPenaltyDialog(
+          allowEstimatedAmountIfMissing: shouldForcePenaltyFlow,
+        );
+        if (resolved) {
+          _penaltyLikelyAfterEarlyStop = false;
+          return true;
+        }
+        return false;
+      }
+      _penaltyLikelyAfterEarlyStop = false;
+    } catch (e) {
+      debugPrint('⚠️ Penalty pre-check failed: $e');
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Platform fee dialog (₹39) - LEGACY, kept for session expiry
   // ---------------------------------------------------------------------------
 
   /// Show the platform fee popup. Returns true if the user confirmed payment.
@@ -584,6 +685,299 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   // ---------------------------------------------------------------------------
+  // Pending penalty dialog with payment options
+  // ---------------------------------------------------------------------------
+
+  /// Show pending penalty payment in a bottom sheet (wallet / UPI).
+  /// Returns true only when penalty is successfully cleared.
+  Future<bool> _showPendingPenaltyDialog(
+      {bool allowEstimatedAmountIfMissing = false}) async {
+    // Fetch penalty status first
+    final penaltyNotifier = ref.read(driverPenaltyProvider.notifier);
+    await penaltyNotifier.checkPenaltyStatus();
+    final penaltyState = ref.read(driverPenaltyProvider);
+
+    if (!mounted) return false;
+
+    // Amount for UI / UPI: use API value, or ₹10 when backend flags pending but omits amount
+    var displayPenalty = penaltyState.penaltyAmount > 0
+        ? penaltyState.penaltyAmount
+        : 0.0;
+    if (displayPenalty <= 0 &&
+        (allowEstimatedAmountIfMissing || penaltyState.hasPendingPenalty)) {
+      displayPenalty = 10.0;
+    }
+
+    if (displayPenalty <= 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Could not load penalty details. Please try again or contact support.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return false;
+    }
+
+    final canPayWallet = penaltyState.walletBalance > 10 &&
+        penaltyState.walletBalance >= displayPenalty &&
+        displayPenalty > 0;
+
+    final txController = TextEditingController();
+    bool paymentInitiated = false;
+    bool processing = false;
+
+    final resolved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          Future<void> launchUpi([String? appScheme]) async {
+            final note = Uri.encodeComponent('Driver penalty payment');
+            final amount = displayPenalty.toStringAsFixed(2);
+            final uri = Uri.parse(
+              appScheme == null
+                  ? 'upi://pay?pa=${AppConfig.companyUpiId}&pn=${Uri.encodeComponent(AppConfig.companyName)}&am=$amount&cu=INR&tn=$note'
+                  : '$appScheme://pay?pa=${AppConfig.companyUpiId}&pn=${Uri.encodeComponent(AppConfig.companyName)}&am=$amount&cu=INR&tn=$note',
+            );
+            final launched =
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+            if (launched) {
+              setSheetState(() => paymentInitiated = true);
+            } else if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Unable to open UPI app')),
+              );
+            }
+          }
+
+          Future<void> payWithWallet() async {
+            setSheetState(() => processing = true);
+            final success = await penaltyNotifier.clearPenaltyWithWallet();
+            setSheetState(() => processing = false);
+            if (success && mounted) {
+              Navigator.of(sheetCtx).pop(true);
+            } else if (mounted) {
+              final error = ref.read(driverPenaltyProvider).error;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(error ?? 'Failed to clear penalty'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+          }
+
+          Future<void> confirmUpiPayment() async {
+            setSheetState(() => processing = true);
+            final success = await penaltyNotifier.clearPenaltyWithUpi(
+              transactionId: txController.text.trim().isEmpty
+                  ? null
+                  : txController.text.trim(),
+            );
+            setSheetState(() => processing = false);
+            if (success && mounted) {
+              Navigator.of(sheetCtx).pop(true);
+            } else if (mounted) {
+              final error = ref.read(driverPenaltyProvider).error;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(error ?? 'Failed to verify payment'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+          }
+
+          return Padding(
+            padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              top: 16,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE0E0E0),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Complete Payment to Go Online',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF3F3),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFFD4D4)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Penalty: ₹${displayPenalty.toInt()}',
+                        style: const TextStyle(
+                          color: Color(0xFFB71C1C),
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        penaltyState.penaltyReason ?? 'Pending penalty',
+                        style: const TextStyle(color: Color(0xFF666666)),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                if (canPayWallet) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: processing ? null : payWithWallet,
+                      icon: const Icon(Icons.account_balance_wallet),
+                      label: Text('Pay ₹${displayPenalty.toInt()} from Wallet'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                if (!canPayWallet) ...[
+                  const Text(
+                    'Pay via UPI',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton(
+                      onPressed: processing ? null : () => launchUpi('gpay'),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          UpiAppIcon(appName: 'GPay', size: 18),
+                          SizedBox(width: 6),
+                          Text('GPay'),
+                        ],
+                      ),
+                    ),
+                    OutlinedButton(
+                      onPressed: processing ? null : () => launchUpi('phonepe'),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          UpiAppIcon(appName: 'PhonePe', size: 18),
+                          SizedBox(width: 6),
+                          Text('PhonePe'),
+                        ],
+                      ),
+                    ),
+                    OutlinedButton(
+                      onPressed: processing ? null : () => launchUpi('paytm'),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          UpiAppIcon(appName: 'Paytm', size: 18),
+                          SizedBox(width: 6),
+                          Text('Paytm'),
+                        ],
+                      ),
+                    ),
+                    OutlinedButton(
+                      onPressed: processing ? null : () => launchUpi(),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          UpiAppIcon(appName: 'UPI', size: 18),
+                          SizedBox(width: 6),
+                          Text('Any UPI App'),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                if (paymentInitiated) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: txController,
+                    decoration: const InputDecoration(
+                      labelText: 'Transaction ID (optional)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: processing ? null : confirmUpiPayment,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1A1A1A),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      child: processing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Confirm Payment'),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () => Navigator.of(sheetCtx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    txController.dispose();
+    if (resolved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Penalty cleared. You can go online now.'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Connection error dialog with retry option
   // ---------------------------------------------------------------------------
 
@@ -614,14 +1008,19 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         affectsEligibility: true,
       );
     }
-    if (lower.contains('penalty') || lower.contains('penalty_unpaid')) {
+    if (lower.contains('penalty') ||
+        lower.contains('penalty_unpaid') ||
+        lower.contains('unpaid_penalty') ||
+        lower.contains('penalty_pending') ||
+        lower.contains('pending_penalty')) {
       return _BackendError(
-        title: 'Unpaid Penalty',
+        title: 'Pending Penalty',
         body:
-            'You have an outstanding penalty. Please clear it before going online.',
-        cta: 'OK',
+            'You have a pending penalty. How would you like to clear it?',
+        cta: 'Clear Penalty',
         allowRetry: false,
         affectsEligibility: false,
+        isPenalty: true,
       );
     }
     if (lower.contains('suspended') ||
@@ -636,7 +1035,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         affectsEligibility: true,
       );
     }
-    if (lower.contains('status code of 403') || lower.contains('forbidden')) {
+    if (lower.contains('status code of 403') ||
+        lower.contains('forbidden') ||
+        lower.contains(' 403 ') ||
+        lower.endsWith(' 403')) {
       return _BackendError(
         title: 'Cannot Go Online',
         body:
@@ -644,6 +1046,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         cta: 'OK',
         allowRetry: false,
         affectsEligibility: false,
+        offerPenaltyResolution: true,
       );
     }
     return _BackendError(
@@ -660,6 +1063,21 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         registrationMessage != null && registrationMessage.isNotEmpty;
     final classified =
         hasBackendReason ? _classifyBackendError(registrationMessage) : null;
+
+    // Handle penalty case specially - show penalty payment dialog
+    if (classified != null && classified.isPenalty) {
+      _penaltyLikelyAfterEarlyStop = true;
+      final resolved =
+          await _showPendingPenaltyDialog(allowEstimatedAmountIfMissing: true);
+      if (resolved) return;
+    }
+
+    // 403 / "not eligible" often means unpaid penalty but socket message omits the word "penalty"
+    if (classified != null && classified.offerPenaltyResolution) {
+      _penaltyLikelyAfterEarlyStop = true;
+      final resolved = await _tryShowPenaltyFlowForBlockedDriver();
+      if (resolved) return;
+    }
 
     // Only eligibility-related failures should disable start rides.
     if (classified != null && classified.affectsEligibility) {
@@ -757,6 +1175,46 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     if (shouldRetry == true && mounted) {
       _toggleOnlineStatus();
     }
+  }
+
+  /// If backend reports a pending penalty (GET /api/driver/penalty/status), show wallet/UPI flow.
+  /// Returns true if we handled it (driver saw penalty UI).
+  Future<bool> _tryShowPenaltyFlowForBlockedDriver() async {
+    if (!mounted) return false;
+    try {
+      final notifier = ref.read(driverPenaltyProvider.notifier);
+      final hasPending = await notifier.checkPenaltyStatus();
+      final st = ref.read(driverPenaltyProvider);
+      if (!mounted) return false;
+      if (hasPending || st.hasPendingPenalty || st.penaltyAmount > 0) {
+        debugPrint(
+            '📛 Penalty flow: hasPending=$hasPending amount=${st.penaltyAmount}');
+        return await _showPendingPenaltyDialog();
+      }
+      debugPrint(
+          '📛 Penalty API: no pending penalty (403 may be onboarding/subscription)');
+    } catch (e) {
+      debugPrint('⚠️ Penalty resolution check failed: $e');
+    }
+    return false;
+  }
+
+  /// After [updateDriverStatus] fails: offer penalty payment when applicable.
+  Future<void> _handleDriverBlockedAfterStatusUpdate(
+      _BackendError classified) async {
+    if (!mounted) return;
+    if (classified.isPenalty) {
+      _penaltyLikelyAfterEarlyStop = true;
+      final resolved =
+          await _showPendingPenaltyDialog(allowEstimatedAmountIfMissing: true);
+      if (resolved) return;
+    }
+    if (classified.offerPenaltyResolution) {
+      _penaltyLikelyAfterEarlyStop = true;
+      final resolved = await _tryShowPenaltyFlowForBlockedDriver();
+      if (resolved) return;
+    }
+    await _showStartRideBlockedDialog(classified);
   }
 
   Future<void> _showStartRideBlockedDialog(_BackendError classified) async {
@@ -899,72 +1357,20 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   Future<void> _handleSessionExpiry() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            const Icon(Icons.timer_off, color: Color(0xFFFF9800)),
-            const SizedBox(width: 8),
-            Text(ref.tr('session_expired'),
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF8E1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                children: const [
-                  Text('₹39',
-                      style: TextStyle(
-                          fontSize: 36,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1A1A1A))),
-                  SizedBox(height: 8),
-                  Text(
-                    'Your 24-hour session has expired.\nPay ₹39 to continue riding.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 14, color: Color(0xFF666666)),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(ref.tr('go_offline'),
-                style: const TextStyle(color: Color(0xFF999999))),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF1A1A1A),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-            ),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(ref.tr('pay_continue'),
-                style: const TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      await _persistFeePaidAt();
-      await _persistSessionStart();
-      _startSessionExpiryChecker();
+    // Navigate to subscription payment screen
+    if (mounted) {
+      final result = await context.push<bool>(AppRoutes.driverSubscriptionPayment);
+      
+      if (result == true) {
+        // Payment successful
+        await _persistFeePaidAt();
+        await _persistSessionStart();
+        _startSessionExpiryChecker();
+      } else {
+        // User cancelled or payment failed - go offline
+        await _goOffline();
+      }
     } else {
-      // Go offline without penalty (session already expired)
       await _goOffline();
     }
   }
@@ -976,8 +1382,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     setState(() => _isOnline = false);
     
-    // Clear ride stack queue when going offline
-    ref.read(rideQueueProvider.notifier).clear();
+    // Clear all offers when going offline
+    ref.read(driverRidesProvider.notifier).clearAllOffers();
     
     await _clearSessionData();
 
@@ -994,6 +1400,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _sessionExpiryTimer = null;
     _countdownTimer?.cancel();
     _countdownTimer = null;
+    _offerCleanupTimer?.cancel();
+    _offerCleanupTimer = null;
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1027,7 +1435,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
         setState(() {
           _activeQuests = questsList
-              .map((q) => DriverQuest.fromJson(q as Map<String, dynamic>))
+              .whereType<Map>()
+              .map((q) => DriverQuest.fromJson(
+                    Map<String, dynamic>.from(q),
+                  ))
               .where((q) => !q.isCompleted)
               .toList();
         });
@@ -1154,6 +1565,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _reconnectTimer?.cancel();
     _sessionExpiryTimer?.cancel();
     _countdownTimer?.cancel();
+    _offerCleanupTimer?.cancel();
     _positionStream?.cancel();
     _rideOffersSubscription?.call();
     _connectionStatusSubscription?.cancel();
@@ -1170,6 +1582,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _countdownTimer?.cancel();
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && _isOnline) setState(() {});
+    });
+  }
+
+  /// Periodically removes stale/invalid offers so cards auto-expire even if UI timers miss.
+  void _startOfferCleanupTimer() {
+    _offerCleanupTimer?.cancel();
+    _offerCleanupTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted || !_isOnline) return;
+      ref.read(driverRidesProvider.notifier).cleanupStaleOffers();
     });
   }
 
@@ -1315,13 +1736,27 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
   RideOffer? _resolveRideOfferForAction(Map<String, dynamic> data) {
     final rideId = (data['rideId'] ?? data['id'] ?? '').toString();
-    final currentOffers = ref.read(driverRidesProvider).rideOffers;
-    for (final offer in currentOffers) {
-      if (offer.id == rideId) return offer;
+    final state = ref.read(driverRidesProvider);
+    
+    // Check active offer first
+    if (state.activeOffer?.id == rideId) {
+      final offer = state.activeOffer!;
+      return _isIncomingOfferActiveAndFresh(offer) ? offer : null;
+    }
+    
+    // Check pending offers
+    for (final offer in state.pendingOffers) {
+      if (offer.id == rideId) {
+        return _isIncomingOfferActiveAndFresh(offer) ? offer : null;
+      }
     }
 
     try {
       final hydrated = _rideOfferFromPushPayload(data);
+      if (!_isIncomingOfferActiveAndFresh(hydrated)) {
+        debugPrint('🧹 Ignoring stale notification action offer ${hydrated.id}');
+        return null;
+      }
       ref.read(driverRidesProvider.notifier).addRideOffer(hydrated);
       return hydrated;
     } catch (e) {
@@ -1368,7 +1803,20 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       riderName:
           data['riderName']?.toString() ?? data['passengerName']?.toString(),
       createdAt: DateTime.now(),
+      status: 'searching',
     );
+  }
+
+  bool _isOfferStatusActive(String status) {
+    final s = status.toLowerCase();
+    if (s == 'cancelled' || s == 'completed' || s == 'expired') return false;
+    return s == 'searching' || s == 'pending';
+  }
+
+  bool _isIncomingOfferActiveAndFresh(RideOffer offer, {int maxAgeSeconds = 90}) {
+    if (!_isOfferStatusActive(offer.status)) return false;
+    final age = DateTime.now().difference(offer.createdAt).inSeconds;
+    return age <= maxAgeSeconds;
   }
 
   Map<String, dynamic> _ridePayloadFromOffer(RideOffer offer) {
@@ -1389,6 +1837,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     try {
       final offer = _rideOfferFromPushPayload(message.data);
+      if (!_isIncomingOfferActiveAndFresh(offer)) {
+        debugPrint(
+            '🧹 Push offer ignored (stale/invalid): id=${offer.id} status=${offer.status}');
+        return;
+      }
       ref.read(driverRidesProvider.notifier).addRideOffer(offer);
       await _showIncomingRideOverlay(offer, source: 'push');
     } catch (e) {
@@ -1398,9 +1851,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
   Future<void> _declineRideOffer(RideOffer offer,
       {String reason = 'Declined by driver'}) async {
-    ref.read(driverRidesProvider.notifier).removeRide(offer.id);
-    // Also remove from ride stack queue
-    ref.read(rideQueueProvider.notifier).removeRide(offer.id);
+    final notifier = ref.read(driverRidesProvider.notifier);
+    // Persist local rejection so replayed duplicate events are ignored.
+    notifier.markOfferRejected(offer.id);
+    // If it's the active card, decline normally; otherwise remove from queue.
+    final activeId = ref.read(driverRidesProvider).activeOffer?.id;
+    if (activeId == offer.id) {
+      notifier.declineActiveOffer();
+    } else {
+      notifier.removeRide(offer.id);
+    }
     try {
       await apiClient.declineRide(offer.id, reason: reason);
     } catch (e) {
@@ -1427,10 +1887,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     );
 
     if (!mounted) return;
-    debugPrint('📣 Adding ride to stack (${offer.id}) from $source');
+    debugPrint('📣 Processing ride offer (${offer.id}) from $source');
     
-    // Add ride to the stack queue instead of showing fullscreen overlay
-    ref.read(rideQueueProvider.notifier).addRide(offer);
+    // The offer is already added to the provider via addRideOffer
+    // The provider handles the activeOffer/pendingOffers queue logic
   }
 
   /// Schedule reconnect with exponential backoff when connection drops.
@@ -1479,27 +1939,25 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         // No REST call needed - this is O(1) instead of O(n) network overhead
         try {
           final offer = RideOffer.fromJson(rideData);
+          if (!_isIncomingOfferActiveAndFresh(offer)) {
+            debugPrint(
+                '🧹 Realtime offer ignored (stale/invalid): id=${offer.id} status=${offer.status}');
+            return;
+          }
           final driverRidesNotifier = ref.read(driverRidesProvider.notifier);
           driverRidesNotifier.addRideOffer(offer);
           unawaited(_showIncomingRideOverlay(offer, source: 'realtime'));
           debugPrint('✅ Ride offer added from real-time event: ${offer.id}');
         } catch (e) {
-          debugPrint(
-              '⚠️ Failed to parse ride from event, falling back to REST: $e');
-          // Fallback to REST only if parsing fails
-          ref.read(driverRidesProvider.notifier).fetchAvailableRides(
-                lat: _currentLocation.latitude,
-                lng: _currentLocation.longitude,
-              );
+          debugPrint('⚠️ Failed to parse ride from realtime event: $e');
         }
       }
     } else if (type == 'ride_taken') {
       final rideId = data['rideId'] as String?;
       debugPrint('🚫 Ride taken by another driver: $rideId');
       if (mounted && rideId != null) {
+        // Remove from offers (handles both active and pending)
         ref.read(driverRidesProvider.notifier).removeRide(rideId);
-        // Also remove from ride stack queue
-        ref.read(rideQueueProvider.notifier).removeRide(rideId);
         // Show subtle feedback
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1514,10 +1972,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       debugPrint('❌ Ride cancelled: $rideId');
       if (mounted && rideId != null) {
         final notifier = ref.read(driverRidesProvider.notifier);
+        // Remove from offers (handles both active and pending)
         notifier.removeRide(rideId);
-        // Also remove from ride stack queue
-        ref.read(rideQueueProvider.notifier).removeRide(rideId);
-        // If the cancelled ride was our accepted ride (e.g. rider cancelled before OTP), clear it
+        // If the cancelled ride was our accepted ride, clear it
         final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
         if (acceptedRide != null && acceptedRide.id == rideId) {
           notifier.clearAcceptedRide();
@@ -1542,13 +1999,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       }
     } else if (type == 'connected') {
       debugPrint('✅ Real-time connection established');
-      // On reconnect, do a single REST fetch to sync state
-      if (mounted) {
-        ref.read(driverRidesProvider.notifier).fetchAvailableRides(
-              lat: _currentLocation.latitude,
-              lng: _currentLocation.longitude,
-            );
-      }
+      // Do not replay historical offers on reconnect.
+      ref.read(driverRidesProvider.notifier).cleanupStaleOffers();
     }
   }
 
@@ -1577,13 +2029,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     if (!_isOnline) {
       // ---- GOING ONLINE ----
 
-      // 1. Check if platform fee was paid in the last 24 hours
-      final feePaid = await _isFeePaidWithin24h();
-      if (!feePaid) {
-        final confirmed = await _showPlatformFeeDialog();
-        if (!confirmed) return; // User cancelled – stay offline
-        await _persistFeePaidAt();
-      }
+      // 1. Check subscription status from backend
+      final subscriptionAllowed = await _checkSubscriptionBeforeGoingOnline();
+      if (!subscriptionAllowed) return; // User needs to pay or cancelled
+
+      // 1.1 Resolve pending penalty via dynamic payment sheet.
+      final penaltyResolved = await _resolvePenaltyBeforeGoingOnline();
+      if (!penaltyResolved) return;
 
       // CRITICAL: Get driver ID FIRST before any async operations
       if (_driverId == 'unknown' || _driverId.isEmpty) {
@@ -1602,6 +2054,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         }
         return;
       }
+
+      // Fresh online session: clear stale in-memory offers before any replay.
+      final ridesNotifier = ref.read(driverRidesProvider.notifier);
+      ridesNotifier.resetForNewSession();
+      // Disconnect any previous transport to avoid duplicate listeners/replayed events.
+      realtimeService.disconnectDriver();
 
       // CRITICAL: Block UI while connecting
       setState(() => _isConnecting = true);
@@ -1670,7 +2128,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               _verificationBannerMsg = classified.body;
             });
           }
-          await _showStartRideBlockedDialog(classified);
+          await _handleDriverBlockedAfterStatusUpdate(classified);
         }
         return;
       }
@@ -1698,6 +2156,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         );
       }
       _startCountdownTimer();
+      _startOfferCleanupTimer();
       await _persistOnlineState(true);
       await _persistSessionStart();
 
@@ -1724,6 +2183,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       if (within24h) {
         final confirmStop = await _showPenaltyWarningDialog();
         if (!confirmStop) return; // User chose to continue riding
+        _penaltyLikelyAfterEarlyStop = true;
+      } else {
+        _penaltyLikelyAfterEarlyStop = false;
       }
 
       await _goOffline();
@@ -1735,6 +2197,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           lat: _currentLocation.latitude,
           lng: _currentLocation.longitude,
         );
+  }
+
+  Future<void> _openActiveRideAndRefresh() async {
+    await context.push(AppRoutes.driverActiveRide);
+    if (!mounted) return;
+    await _fetchDriverQuests();
   }
 
   Future<void> _acceptRide(RideOffer offer) async {
@@ -1753,15 +2221,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           .acceptRide(offer.id, driverId: _driverId);
 
       if (success && mounted) {
-        // Clear the entire ride queue on successful accept
-        ref.read(rideQueueProvider.notifier).clear();
+        // Provider already clears all offers on successful accept
         // Navigate to active ride screen
         debugPrint('✅ Ride accepted successfully, navigating to active ride');
-        context.push(AppRoutes.driverActiveRide);
+        await _openActiveRideAndRefresh();
       } else if (mounted) {
-        // Remove the failed ride from queue
-        ref.read(rideQueueProvider.notifier).removeRide(offer.id);
-        
         // Get specific error from provider state
         final error = ref.read(driverRidesProvider).error;
         String errorMessage = 'Failed to accept ride';
@@ -1796,8 +2260,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
   @override
   Widget build(BuildContext context) {
-    final rideQueueState = ref.watch(rideQueueProvider);
-    final hasRideRequests = rideQueueState.hasRides && _isOnline;
+    final driverRidesState = ref.watch(driverRidesProvider);
+    final hasActiveOffer = driverRidesState.hasActiveOffer && _isOnline;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -1818,7 +2282,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
                       // Start Ride / Stop Riding button - always centered at bottom
                       // Hide when ride stack is visible
-                      if (!hasRideRequests)
+                      if (!hasActiveOffer)
                         Positioned(
                           left: 0,
                           right: 0,
@@ -1837,12 +2301,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                 if (_verificationBannerMsg != null && !_isOnline)
                   _buildVerificationBanner(),
                 // Hide bottom section when ride stack is visible
-                if (!hasRideRequests) _buildBottomSection(),
+                if (!hasActiveOffer) _buildBottomSection(),
               ],
             ),
             
-            // Ride Stack Overlay - 50% height from bottom
-            if (hasRideRequests)
+            // Ride Stack Overlay - 50% height from bottom (SINGLE OFFER CARD UI)
+            if (hasActiveOffer)
               RideStackOverlay(
                 onAccept: (ride) => _acceptRide(ride),
                 onDecline: (ride) => _declineRideOffer(ride),
@@ -1877,6 +2341,166 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     );
   }
 
+  Widget _buildSubscriptionStatusBadge() {
+    final subscriptionState = ref.watch(driverSubscriptionProvider);
+    final subscription = subscriptionState.subscription;
+
+    if (subscription == null || !subscription.isActive) {
+      // Not active - show expired/pay badge
+      return GestureDetector(
+        onTap: () => context.push(AppRoutes.driverSubscriptionPayment),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.red.shade100,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.red.shade300),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.warning_amber_rounded,
+                  color: Colors.red.shade700, size: 16),
+              const SizedBox(width: 4),
+              Text(
+                'Pass Expired',
+                style: TextStyle(
+                  color: Colors.red.shade700,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Active subscription - show countdown
+    final validTill = subscription.validTillFormatted;
+    return GestureDetector(
+      onTap: () => _showSubscriptionInfo(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.green.shade100,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.green.shade300),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check_circle, color: Colors.green.shade700, size: 16),
+            const SizedBox(width: 4),
+            Text(
+              'Till $validTill',
+              style: TextStyle(
+                color: Colors.green.shade700,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSubscriptionInfo() {
+    final subscriptionState = ref.read(driverSubscriptionProvider);
+    final subscription = subscriptionState.subscription;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.verified, color: Colors.green.shade600),
+            const SizedBox(width: 8),
+            const Text('Daily Pass Active',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Status:',
+                          style: TextStyle(color: Colors.grey)),
+                      Row(
+                        children: [
+                          Icon(Icons.check_circle,
+                              color: Colors.green.shade600, size: 18),
+                          const SizedBox(width: 4),
+                          Text('Active',
+                              style: TextStyle(
+                                  color: Colors.green.shade700,
+                                  fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Valid Till:',
+                          style: TextStyle(color: Colors.grey)),
+                      Text(
+                        subscription?.validTillFormatted ?? 'N/A',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Remaining:',
+                          style: TextStyle(color: Colors.grey)),
+                      Text(
+                        subscription?.remainingTimeFormatted ?? 'N/A',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: Colors.green.shade700),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'You can accept unlimited rides during this period.',
+              style: TextStyle(fontSize: 13, color: Colors.grey),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1904,6 +2528,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           ),
 
           const Spacer(),
+
+          // Subscription status badge
+          _buildSubscriptionStatusBadge(),
+          const SizedBox(width: 8),
 
           // Earnings badge
           GestureDetector(
@@ -2107,8 +2735,45 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             _buildBoostIndicator(),
           // Return to active ride card when driver went back during ongoing ride
           if (hasActiveRide) _buildActiveRideReturnCard(),
-          // Ride offers (hidden when has active ride - they should return to ride)
-          if (!hasActiveRide) _buildRideOffersSection(),
+          // Idle state message when online but no active offer
+          // (Ride offers are now shown as single card overlay, not tiles)
+          if (!hasActiveRide && _isOnline) _buildIdleStateSection(),
+        ],
+      ),
+    );
+  }
+
+  /// Build idle state section when driver is online but no active offer
+  Widget _buildIdleStateSection() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.hourglass_empty,
+            size: 48,
+            color: Color(0xFFCCCCCC),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Waiting for ride requests...',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Color(0xFF888888),
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'New rides will appear automatically',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.grey.shade500,
+              fontSize: 13,
+            ),
+          ),
         ],
       ),
     );
@@ -2334,7 +2999,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final acceptedRide = ref.watch(driverRidesProvider).acceptedRide;
     if (acceptedRide == null) return const SizedBox.shrink();
     return GestureDetector(
-      onTap: () => context.push(AppRoutes.driverActiveRide),
+      onTap: _openActiveRideAndRefresh,
       child: Container(
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         padding: const EdgeInsets.all(20),
@@ -2413,459 +3078,6 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ],
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildRideOffersSection() {
-    final driverRidesState = ref.watch(driverRidesProvider);
-    final rideOffers = driverRidesState.rideOffers;
-    final isLoading = driverRidesState.isLoading;
-
-    return GestureDetector(
-      onHorizontalDragEnd: (details) {
-        // Detect right swipe (positive velocity)
-        if (details.primaryVelocity != null && details.primaryVelocity! > 500) {
-          if (_isOnline && !isLoading) {
-            debugPrint('🚗 Swipe right detected - loading more ride offers');
-            // Add haptic feedback
-            Vibration.vibrate(duration: 50);
-            _fetchRideOffers();
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(ref.tr('loading_ride_offers')),
-                duration: const Duration(seconds: 1),
-              ),
-            );
-          }
-        }
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _isOnline
-                            ? 'Ride Offers'
-                            : 'Ride Offers, Start Ride Now!',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF888888),
-                        ),
-                      ),
-                      if (_isOnline && rideOffers.isNotEmpty)
-                        Text(
-                          'Swipe right to load more',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Color(0xFF4285F4).withOpacity(0.7),
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                if (_isOnline)
-                  GestureDetector(
-                    onTap: () {
-                      _fetchRideOffers();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text(ref.tr('refreshing_offers'))),
-                      );
-                    },
-                    child: Row(
-                      children: [
-                        const Text(
-                          'Refresh',
-                          style: TextStyle(
-                            color: Color(0xFF4285F4),
-                            fontSize: 12,
-                          ),
-                        ),
-                        if (isLoading) ...[
-                          const SizedBox(width: 8),
-                          const UberShimmer(
-                            child: UberShimmerBox(
-                              width: 28,
-                              height: 10,
-                              borderRadius:
-                                  BorderRadius.all(Radius.circular(8)),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-
-            const SizedBox(height: 8),
-
-            // Ride offer cards - horizontal scroll
-            // Use smaller height when offline to give more space for the map/Start button
-            SizedBox(
-              height: _isOnline ? 250 : 100,
-              child: (_isOnline && isLoading && rideOffers.isEmpty)
-                  ? UberShimmer(
-                      child: ListView.builder(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: 3,
-                        itemBuilder: (context, index) => Padding(
-                          padding: EdgeInsets.only(right: index < 2 ? 10 : 0),
-                          child: Container(
-                            width: 170,
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                              border:
-                                  Border.all(color: const Color(0xFFE8E8E8)),
-                            ),
-                            child: const Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                UberShimmerBox(width: 80, height: 10),
-                                SizedBox(height: 10),
-                                UberShimmerBox(width: 90, height: 18),
-                                SizedBox(height: 10),
-                                UberShimmerBox(width: 130, height: 10),
-                                SizedBox(height: 8),
-                                UberShimmerBox(width: 120, height: 10),
-                                Spacer(),
-                                UberShimmerBox(
-                                    width: double.infinity, height: 32),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    )
-                  : rideOffers.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                _isOnline
-                                    ? Icons.hourglass_empty
-                                    : Icons.power_settings_new,
-                                size: _isOnline ? 48 : 32,
-                                color: const Color(0xFFCCCCCC),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                _isOnline
-                                    ? 'No ride requests available\nWaiting for new bookings...'
-                                    : 'Tap Start Ride above to go online',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  color: Color(0xFF888888),
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
-                          ),
-                        )
-                      : ListView.builder(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: rideOffers.length,
-                          itemBuilder: (context, index) {
-                            return Padding(
-                              padding: EdgeInsets.only(
-                                right: index < rideOffers.length - 1 ? 10 : 0,
-                              ),
-                              child: _buildRideOfferCard(rideOffers[index]),
-                            );
-                          },
-                        ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildRideOfferCard(RideOffer offer) {
-    final isGolden = offer.isGolden;
-    final secondsLeft =
-        15 - DateTime.now().difference(offer.createdAt).inSeconds;
-    final isExpiring = secondsLeft <= 5;
-
-    // Don't show expired offers
-    if (secondsLeft <= 0) return const SizedBox.shrink();
-
-    return Container(
-      width: 170,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: isGolden ? const Color(0xFFD4956A) : const Color(0xFFE8E8E8),
-          width: isGolden ? 2 : 1,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 8,
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Type badge + countdown timer
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                offer.type,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: isGolden
-                      ? const Color(0xFFD4956A)
-                      : const Color(0xFF666666),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: isExpiring
-                      ? Colors.red.withOpacity(0.1)
-                      : Colors.green.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  '${secondsLeft}s',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    color: isExpiring ? Colors.red : Colors.green[700],
-                  ),
-                ),
-              ),
-            ],
-          ),
-
-          // Earning label and amount
-          const Text(
-            'Earning',
-            style: TextStyle(
-              fontSize: 10,
-              color: Color(0xFF888888),
-            ),
-          ),
-          Text(
-            '₹${offer.earning.toStringAsFixed(2)}',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color:
-                  isGolden ? const Color(0xFFD4956A) : const Color(0xFF4CAF50),
-            ),
-          ),
-
-          const SizedBox(height: 6),
-
-          // Pickup distance row
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Pickup\nDistance',
-                style: TextStyle(
-                    fontSize: 9, color: Color(0xFF888888), height: 1.2),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    offer.pickupDistance,
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600),
-                  ),
-                  Text(
-                    offer.pickupTime,
-                    style:
-                        const TextStyle(fontSize: 8, color: Color(0xFF888888)),
-                  ),
-                ],
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 4),
-
-          // Drop distance row
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Drop\nDistance',
-                style: TextStyle(
-                    fontSize: 9, color: Color(0xFF888888), height: 1.2),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    offer.dropDistance,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF4CAF50),
-                    ),
-                  ),
-                  Text(
-                    offer.dropTime,
-                    style:
-                        const TextStyle(fontSize: 8, color: Color(0xFF888888)),
-                  ),
-                ],
-              ),
-            ],
-          ),
-
-          const Divider(height: 12),
-
-          // Pickup/Drop addresses
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Pickup',
-                      style: TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1A1A1A)),
-                    ),
-                    Text(
-                      offer.pickupAddress,
-                      style: const TextStyle(
-                          fontSize: 8, color: Color(0xFF666666)),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Icon(Icons.arrow_forward,
-                    size: 10, color: Colors.grey[400]),
-              ),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Drop',
-                      style: TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1A1A1A)),
-                    ),
-                    Text(
-                      offer.dropAddress,
-                      style: const TextStyle(
-                          fontSize: 8, color: Color(0xFF666666)),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 8),
-
-          // Accept button - CRITICAL: Disable while accepting
-          SizedBox(
-            width: double.infinity,
-            height: 32,
-            child: ElevatedButton(
-              // CRITICAL: Disable if not online OR if this ride is being accepted
-              onPressed: (_isOnline && _acceptingRideId == null)
-                  ? () => _acceptRide(offer)
-                  : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isGolden
-                    ? const Color(0xFFD4956A)
-                    : const Color(0xFFD4956A),
-                disabledBackgroundColor: _acceptingRideId == offer.id
-                    ? const Color(0xFF888888) // Gray when accepting this ride
-                    : const Color(0xFFFFE4D6),
-                padding: EdgeInsets.zero,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-              ),
-              child: _acceptingRideId == offer.id
-                  ? const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        UberShimmer(
-                          baseColor: Color(0x88FFFFFF),
-                          highlightColor: Color(0xFFFFFFFF),
-                          child: UberShimmerBox(
-                            width: 44,
-                            height: 10,
-                            borderRadius: BorderRadius.all(Radius.circular(8)),
-                          ),
-                        ),
-                        SizedBox(width: 6),
-                        Text(
-                          'Accepting...',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    )
-                  : Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          isGolden ? 'Golden Ride' : 'Accept Ride',
-                          style: TextStyle(
-                            color: _isOnline
-                                ? Colors.white
-                                : const Color(0xFFD4956A).withOpacity(0.5),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          Icons.check_circle_outline,
-                          size: 12,
-                          color: _isOnline
-                              ? Colors.white
-                              : const Color(0xFFD4956A).withOpacity(0.5),
-                        ),
-                      ],
-                    ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -2966,10 +3178,36 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             Builder(
               builder: (context) {
                 final user = ref.watch(currentUserProvider);
+                final onboarding = ref.watch(driverOnboardingProvider);
                 final displayName = user?.name ?? 'Driver';
                 final displayPhone = user?.phone ?? '';
                 final initial =
                     displayName.isNotEmpty ? displayName[0].toUpperCase() : 'D';
+                final profilePhotoDetail = onboarding.backendStatus.documentDetails
+                    .where((d) => d.type == 'PROFILE_PHOTO' && d.url != null)
+                    .fold<BackendDocumentInfo?>(
+                  null,
+                  (best, current) {
+                    if (best == null) return current;
+                    final bestTs = best.uploadedAt?.millisecondsSinceEpoch ?? 0;
+                    final curTs = current.uploadedAt?.millisecondsSinceEpoch ?? 0;
+                    return curTs >= bestTs ? current : best;
+                  },
+                );
+                final rawAvatarUrl = (profilePhotoDetail?.url?.isNotEmpty == true)
+                    ? profilePhotoDetail!.url
+                    : user?.avatarUrl;
+                final avatarUrl = (() {
+                  if (rawAvatarUrl == null || rawAvatarUrl.isEmpty) return null;
+                  final resolved = _resolveAvatarUrl(rawAvatarUrl);
+                  if (resolved == null || resolved.isEmpty) return null;
+                  final uploadedAtMs =
+                      profilePhotoDetail?.uploadedAt?.millisecondsSinceEpoch;
+                  if (uploadedAtMs == null) return resolved;
+                  final separator =
+                      resolved.contains('?') ? '&' : '?';
+                  return '$resolved${separator}v=$uploadedAtMs';
+                })();
 
                 return Container(
                   padding: const EdgeInsets.all(20),
@@ -2979,19 +3217,17 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                       CircleAvatar(
                         radius: 30,
                         backgroundColor: const Color(0xFFD4956A),
-                        backgroundImage: user?.avatarUrl != null
-                            ? NetworkImage(user!.avatarUrl!)
-                            : null,
-                        child: user?.avatarUrl == null
-                            ? Text(
-                                initial,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              )
-                            : null,
+                        child: ClipOval(
+                          child: avatarUrl != null
+                              ? Image.network(
+                                  avatarUrl,
+                                  width: 60,
+                                  height: 60,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => _buildAvatarFallback(initial),
+                                )
+                              : _buildAvatarFallback(initial),
+                        ),
                       ),
                       const SizedBox(height: 12),
                       Text(
@@ -3032,7 +3268,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             _buildDrawerItem(Icons.description_outlined, 'Update Documents',
                 () {
               Navigator.pop(context);
-              context.push(AppRoutes.driverOnboarding);
+              context.push(
+                '${AppRoutes.driverOnboarding}?isUpdateMode=true&returnToProfile=true',
+              );
             }),
             _buildDrawerItem(Icons.settings, ref.tr('settings'), () {
               Navigator.pop(context);
@@ -3066,6 +3304,39 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         ),
       ),
     );
+  }
+
+  Widget _buildAvatarFallback(String initial) {
+    return Container(
+      width: 60,
+      height: 60,
+      color: const Color(0xFFD4956A),
+      alignment: Alignment.center,
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 24,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  String? _resolveAvatarUrl(String? rawUrl) {
+    if (rawUrl == null) return null;
+    final input = rawUrl.trim();
+    if (input.isEmpty) return null;
+
+    final uri = Uri.tryParse(input);
+    if (uri != null && uri.hasScheme) return input;
+
+    final apiUri = Uri.tryParse(AppConfig.apiUrl);
+    if (apiUri == null || !apiUri.hasScheme) return input;
+    final origin = '${apiUri.scheme}://${apiUri.authority}';
+
+    if (input.startsWith('/')) return '$origin$input';
+    return '$origin/$input';
   }
 
   void _showRideHistory() {
@@ -3926,10 +4197,27 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
               // Transfer To Section
               if (accounts.isNotEmpty) ...[
-                Text(
-                  trTransferTo,
-                  style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w600),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      trTransferTo,
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w600),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _showManagePaymentMethodsSheet();
+                      },
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('Add New'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFF1A73E8),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 ...accounts.map((account) => RadioListTile<String>(
@@ -3940,12 +4228,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                       title: Text(
                         account['accountType'] == 'UPI'
                             ? 'UPI: ${account['upiId']}'
-                            : '${account['bankName']} ${account['accountNumber']}',
+                            : '${account['bankName']} ****${_maskAccountNumber(account['accountNumber'])}',
                         style: const TextStyle(fontSize: 14),
                       ),
                       subtitle: Text(
                         account['accountType'] == 'UPI'
-                            ? 'Instant'
+                            ? 'Instant transfer'
                             : '1-2 business days',
                         style: const TextStyle(
                             fontSize: 12, color: Color(0xFF888888)),
@@ -3960,12 +4248,51 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                     color: const Color(0xFFFFF3E0),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.warning_amber, color: Color(0xFFFF9800)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(trAddPaymentFirst),
+                      Row(
+                        children: [
+                          const Icon(Icons.warning_amber, color: Color(0xFFFF9800)),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(trAddPaymentFirst),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () {
+                                Navigator.pop(context);
+                                _showAddUpiSheet();
+                              },
+                              icon: const Icon(Icons.account_balance_wallet, size: 18),
+                              label: const Text('Add UPI'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFF1A1A1A),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () {
+                                Navigator.pop(context);
+                                _showAddBankSheet();
+                              },
+                              icon: const Icon(Icons.account_balance, size: 18),
+                              label: const Text('Add Bank'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFF1A1A1A),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -4332,6 +4659,349 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ),
           );
         },
+      ),
+    );
+  }
+
+  // Helper to mask account number (show last 4 digits)
+  String _maskAccountNumber(String? accountNumber) {
+    if (accountNumber == null || accountNumber.length < 4) {
+      return accountNumber ?? '';
+    }
+    return accountNumber.substring(accountNumber.length - 4);
+  }
+
+  // Manage Payment Methods Sheet
+  void _showManagePaymentMethodsSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.8,
+        expand: false,
+        builder: (context, scrollController) => Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE0E0E0),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                  const Text(
+                    'Payment Methods',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              
+              // Add Payment Method Options
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF5F5F5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Add a new payment method',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF666666),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildPaymentMethodCard(
+                            icon: Icons.account_balance_wallet,
+                            title: 'UPI ID',
+                            subtitle: 'Instant transfer',
+                            onTap: () {
+                              Navigator.pop(context);
+                              _showAddUpiSheet();
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _buildPaymentMethodCard(
+                            icon: Icons.account_balance,
+                            title: 'Bank Account',
+                            subtitle: '1-2 business days',
+                            onTap: () {
+                              Navigator.pop(context);
+                              _showAddBankSheet();
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              
+              const Text(
+                'Your saved methods',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF666666),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // List of saved accounts will be fetched
+              Expanded(
+                child: FutureBuilder<Map<String, dynamic>>(
+                  future: apiClient.getPayoutAccounts(),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    
+                    if (!snapshot.hasData || snapshot.data?['success'] != true) {
+                      return const Center(
+                        child: Text('Failed to load payment methods'),
+                      );
+                    }
+                    
+                    final accounts = List<Map<String, dynamic>>.from(
+                      snapshot.data?['data']?['accounts'] ?? [],
+                    );
+                    
+                    if (accounts.isEmpty) {
+                      return Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.account_balance_wallet_outlined,
+                              size: 48,
+                              color: Colors.grey.shade400,
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'No payment methods added yet',
+                              style: TextStyle(
+                                color: Colors.grey.shade600,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                    
+                    return ListView.builder(
+                      controller: scrollController,
+                      itemCount: accounts.length,
+                      itemBuilder: (context, index) {
+                        final account = accounts[index];
+                        final isUpi = account['accountType'] == 'UPI';
+                        final isPrimary = account['isPrimary'] == true;
+                        
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: isPrimary 
+                                  ? const Color(0xFF4CAF50) 
+                                  : const Color(0xFFE0E0E0),
+                              width: isPrimary ? 2 : 1,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: isUpi 
+                                      ? const Color(0xFFE3F2FD) 
+                                      : const Color(0xFFF3E5F5),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(
+                                  isUpi 
+                                      ? Icons.account_balance_wallet 
+                                      : Icons.account_balance,
+                                  color: isUpi 
+                                      ? const Color(0xFF1976D2) 
+                                      : const Color(0xFF7B1FA2),
+                                  size: 24,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          isUpi 
+                                              ? account['upiId'] ?? 'UPI' 
+                                              : account['bankName'] ?? 'Bank',
+                                          style: const TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        if (isPrimary) ...[
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFE8F5E9),
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: const Text(
+                                              'Primary',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                color: Color(0xFF4CAF50),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      isUpi 
+                                          ? 'Instant transfer' 
+                                          : '****${_maskAccountNumber(account['accountNumber'])}',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFF888888),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (!isPrimary)
+                                TextButton(
+                                  onPressed: () async {
+                                    try {
+                                      await apiClient.setPrimaryPayoutAccount(
+                                        account['id'],
+                                      );
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Primary account updated'),
+                                            backgroundColor: Colors.green,
+                                          ),
+                                        );
+                                      }
+                                    } catch (e) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(
+                                            content: Text('Failed: $e'),
+                                            backgroundColor: Colors.red,
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  },
+                                  child: const Text(
+                                    'Set Primary',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Payment method card widget
+  Widget _buildPaymentMethodCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFE0E0E0)),
+        ),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5F5F5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 28, color: const Color(0xFF1A1A1A)),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFF888888),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -5041,7 +5711,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   'Upload/review license and other documents',
                   () {
                     Navigator.pop(context);
-                    context.push(AppRoutes.driverOnboarding);
+                    context.push(
+                      '${AppRoutes.driverOnboarding}?isUpdateMode=true&returnToProfile=true',
+                    );
                   },
                   isDark,
                 ),
@@ -5740,6 +6412,9 @@ class _BackendError {
   final String cta;
   final bool allowRetry;
   final bool affectsEligibility;
+  final bool isPenalty;
+  /// When true, call penalty status API and show wallet/UPI flow if a penalty exists.
+  final bool offerPenaltyResolution;
 
   const _BackendError({
     required this.title,
@@ -5747,5 +6422,7 @@ class _BackendError {
     required this.cta,
     required this.allowRetry,
     required this.affectsEligibility,
+    this.isPenalty = false,
+    this.offerPenaltyResolution = false,
   });
 }

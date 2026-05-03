@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/providers/settings_provider.dart';
@@ -90,10 +93,60 @@ class _AppInitializerState extends State<_AppInitializer> {
     _initialize();
   }
 
+  /// Initialize Firebase App Check for seamless phone authentication
+  /// This enables Play Integrity on Android to avoid reCAPTCHA fallback
+  Future<void> _initializeAppCheck() async {
+    try {
+      // Check if running on emulator (App Check may not work properly)
+      final isEmulator = Platform.isAndroid && await _isRunningOnEmulator();
+      if (isEmulator) {
+        debugPrint('⚠️ Running on emulator - App Check may trigger reCAPTCHA fallback');
+      }
+      
+      // Activate App Check with Play Integrity (Android) or Device Check (iOS)
+      await FirebaseAppCheck.instance.activate(
+        androidProvider: AndroidProvider.playIntegrity,
+        appleProvider: AppleProvider.deviceCheck,
+      );
+      debugPrint('✅ Firebase App Check activated (Play Integrity)');
+      
+      // Listen for token changes (useful for debugging)
+      FirebaseAppCheck.instance.onTokenChange.listen((token) {
+        if (token != null) {
+          debugPrint('🔐 App Check token refreshed (length: ${token.length})');
+        }
+      });
+    } catch (e) {
+      // App Check failure should not block the app - phone auth will fall back to reCAPTCHA
+      debugPrint('⚠️ Firebase App Check activation failed: $e');
+      debugPrint('⚠️ Phone auth will use reCAPTCHA fallback');
+    }
+  }
+  
+  /// Check if running on Android emulator
+  Future<bool> _isRunningOnEmulator() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      // Common emulator indicators
+      final brand = Platform.environment['BRAND'] ?? '';
+      final device = Platform.environment['DEVICE'] ?? '';
+      final model = Platform.environment['MODEL'] ?? '';
+      final product = Platform.environment['PRODUCT'] ?? '';
+      
+      return brand.contains('generic') ||
+             device.contains('generic') ||
+             model.contains('sdk') ||
+             model.contains('Emulator') ||
+             product.contains('sdk') ||
+             product.contains('emulator');
+    } catch (e) {
+      return false;
+    }
+  }
+
   Future<void> _initialize() async {
     try {
-      debugPrint('🔓 DEV MODE: Firebase App Check DISABLED');
-
+      // Background handler is registered once in main(); avoid duplicate registration here.
       // Run init with 12s timeout to prevent blank screen if push/server hangs
       await _runInitWithTimeout();
     } catch (e, stack) {
@@ -133,6 +186,24 @@ class _AppInitializerState extends State<_AppInitializer> {
       }
     } else {
       debugPrint('✅ Firebase already initialized');
+    }
+
+    // App Check + Auth settings (from main): improve phone auth on real devices
+    try {
+      await _initializeAppCheck();
+    } catch (e) {
+      debugPrint('⚠️ App Check in _doInit: $e');
+    }
+    if (Platform.isAndroid) {
+      try {
+        await FirebaseAuth.instance.setSettings(
+          forceRecaptchaFlow: false,
+          appVerificationDisabledForTesting: false,
+        );
+        debugPrint('✅ Firebase Auth: forceRecaptchaFlow=false (native preferred)');
+      } catch (e) {
+        debugPrint('⚠️ Firebase Auth setSettings failed (non-fatal): $e');
+      }
     }
 
     // Push notification (can block on iOS permission dialog)

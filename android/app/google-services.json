@@ -12,7 +12,36 @@
           "package_name": "com.rhi.raahi"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "877632727493-b1memqtubgjvigipruhriau7np08f7q6.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.rhi.raahi",
+            "certificate_hash": "bc5f06d010f0425bc03e20645d501fe92f9236c2"
+          }
+        },
+        {
+          "client_id": "877632727493-pceuld0qbea9ncp99jkf0drdfvbmnrga.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.rhi.raahi",
+            "certificate_hash": "fc9ca422fa57254b0fcbec28ef308fbfd0bd832e"
+          }
+        },
+        {
+          "client_id": "877632727493-svjesfgm2c5af7o0jfi4d1pk564nehc2.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.rhi.raahi",
+            "certificate_hash": "a0d13efd33e296dbdd0e1168824037d261d2b373"
+          }
+        },
+        {
+          "client_id": "877632727493-drmcekkvc4ui34cb09a0oq7538ildj0r.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDwNShJzwstOOm13fCEbRkOKOu-ptxlRCM"
@@ -20,7 +49,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "877632727493-drmcekkvc4ui34cb09a0oq7538ildj0r.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "877632727493-r2hh9qmjid0mffi3a5e049f26bofepv2.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.rhi.raahi"
+              }
+            }
+          ]
         }
       }
     }

@@ -28,7 +28,8 @@ class ProfileScreen extends ConsumerStatefulWidget {
   ConsumerState<ProfileScreen> createState() => _ProfileScreenState();
 }
 
-class _ProfileScreenState extends ConsumerState<ProfileScreen> {
+class _ProfileScreenState extends ConsumerState<ProfileScreen>
+    with WidgetsBindingObserver {
   // User stats - loaded from backend
   int _totalRides = 0;
   double _rating = 0.0;
@@ -38,11 +39,68 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   // Saved places
   List<Map<String, dynamic>> _savedPlaces = [];
 
+  // Notification permission state – kept in sync with the OS
+  bool _notificationsGranted = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadUserStats();
     _loadSavedPlaces();
+    _syncNotificationStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _syncNotificationStatus();
+    }
+  }
+
+  /// Re-read the OS notification permission and align local prefs / FCM token.
+  Future<void> _syncNotificationStatus() async {
+    final status = await Permission.notification.status;
+    final granted = status.isGranted;
+
+    if (mounted && granted != _notificationsGranted) {
+      setState(() => _notificationsGranted = granted);
+
+      final prefs = await SharedPreferences.getInstance();
+      if (granted) {
+        // User enabled notifications from device settings – re-register FCM
+        if (prefs.getBool('pref_push_notifications') != true) {
+          await prefs.setBool('pref_push_notifications', true);
+          await prefs.setBool('notificationsEnabled', true);
+          pushNotificationService.registerToken().catchError((_) {});
+        }
+      } else {
+        // User revoked notifications from device settings – unregister FCM
+        if (prefs.getBool('pref_push_notifications') == true) {
+          await prefs.setBool('pref_push_notifications', false);
+          await prefs.setBool('notificationsEnabled', false);
+          await pushNotificationService.unregisterToken();
+        }
+      }
+    } else if (mounted) {
+      setState(() => _notificationsGranted = granted);
+    }
+  }
+
+  /// Format E.164 phone (+919450665544) as "+91 94506 65544"
+  String _formatPhone(String phone) {
+    var digits = phone.replaceFirst(RegExp(r'^\+91\s*'), '');
+    digits = digits.replaceAll(RegExp(r'[^\d]'), '');
+    if (digits.length == 10) {
+      return '+91 ${digits.substring(0, 5)} ${digits.substring(5)}';
+    }
+    return phone.startsWith('+') ? phone : '+91 $phone';
   }
 
   Future<void> _loadUserStats() async {
@@ -201,10 +259,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                     color: AppColors.textSecondary,
                                   ),
                             ),
-                            if (user?.phone != null) ...[
+                            if (user?.phone != null &&
+                                user!.phone!.isNotEmpty) ...[
                               const SizedBox(height: 2),
                               Text(
-                                '+91 ${user!.phone!}',
+                                _formatPhone(user.phone!),
                                 style: Theme.of(context)
                                     .textTheme
                                     .bodyMedium
@@ -267,9 +326,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   onTap: () => _openSavedPlaces(context),
                 ),
                 _MenuItem(
-                  icon: Icons.notifications_outlined,
+                  icon: _notificationsGranted
+                      ? Icons.notifications_active
+                      : Icons.notifications_off_outlined,
                   title: ref.tr('notifications'),
-                  subtitle: ref.tr('notifications_desc'),
+                  subtitle: _notificationsGranted
+                      ? ref.tr('notifications_enabled')
+                      : ref.tr('notifications_disabled_tap'),
                   onTap: () => _openNotificationPreferences(context),
                 ),
                 _MenuItem(
@@ -1770,6 +1833,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   Future<void> _openNotificationPreferences(BuildContext context) async {
     await _openSettings(context);
+    _syncNotificationStatus();
   }
 
   Future<void> _openHelpOptions(BuildContext context) async {

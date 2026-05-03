@@ -11,13 +11,16 @@ import '../../providers/auth_provider.dart';
 class OTPVerificationScreen extends ConsumerStatefulWidget {
   final String phone;
   final bool isNewUser;
+  final bool isPhoneLinkMode;
 
   OTPVerificationScreen({
     super.key,
     required this.phone,
     this.isNewUser = false,
+    this.isPhoneLinkMode = false,
   }) {
-    debugPrint('📱 OTPVerificationScreen created: phone=$phone, isNewUser=$isNewUser');
+    debugPrint(
+        '📱 OTPVerificationScreen created: phone=$phone, isNewUser=$isNewUser, isPhoneLinkMode=$isPhoneLinkMode');
   }
 
   @override
@@ -83,7 +86,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
     }
     return phone;
   }
-  
+
   /// Returns formatted phone number for display (XXXXX XXXXX)
   String get _formattedPhone {
     final phone = _cleanPhone;
@@ -107,18 +110,26 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
       final authNotifier = ref.read(authStateProvider.notifier);
       // Use clean 10-digit phone number for API call
       final phoneForApi = _cleanPhone;
-      final result = await authNotifier.verifyOTP(
-        phoneForApi,
-        _otp,
-        isNewUser: widget.isNewUser,
-      );
+      final result = widget.isPhoneLinkMode
+          ? await authNotifier.verifyOtpForPhoneLink(_otp)
+          : await authNotifier.verifyOTP(
+              phoneForApi,
+              _otp,
+              isNewUser: widget.isNewUser,
+            );
 
       if (mounted) {
         setState(() => _isLoading = false);
 
         if (result.success) {
           // OTP verified successfully
-          if (result.isNewUser) {
+          if (widget.isPhoneLinkMode) {
+            if (result.isNewUser) {
+              context.go('${AppRoutes.nameEntry}?phone=$phoneForApi');
+            } else {
+              context.go(AppRoutes.home);
+            }
+          } else if (result.isNewUser) {
             // New user → collect name first, then terms
             context.push('${AppRoutes.nameEntry}?phone=$phoneForApi');
           } else {
@@ -227,7 +238,9 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
   Future<void> _resendOTP() async {
     final authNotifier = ref.read(authStateProvider.notifier);
     // Use clean 10-digit phone number for API call
-    final result = await authNotifier.resendOTP(_cleanPhone);
+    final result = widget.isPhoneLinkMode
+        ? await authNotifier.requestOTP(_cleanPhone)
+        : await authNotifier.resendOTP(_cleanPhone);
     
     if (mounted) {
       if (result.success) {

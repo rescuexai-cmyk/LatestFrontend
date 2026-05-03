@@ -8,6 +8,7 @@ class ApiClient {
   String? _authToken;
   String? _refreshToken;
   bool _isRefreshing = false;
+  bool _authErrorNotified = false;
   void Function()? _onAuthError;
   String _baseApiPrefix = '';
 
@@ -105,15 +106,20 @@ class ApiClient {
         debugPrint('   Error: ${error.message}');
 
         final statusCode = error.response?.statusCode;
+        final requestPath = error.requestOptions.path;
+        final isAuthFlowRequest =
+            requestPath.contains('/api/auth/refresh') ||
+            requestPath.contains('/api/auth/logout');
 
         // Handle 401 Unauthorized - attempt token refresh
-        if (statusCode == 401 && _refreshToken != null && !_isRefreshing) {
+        if (statusCode == 401 && !isAuthFlowRequest && _refreshToken != null && !_isRefreshing) {
           _isRefreshing = true;
           try {
             final refreshResult = await _attemptTokenRefresh();
             _isRefreshing = false;
 
             if (refreshResult) {
+              _authErrorNotified = false;
               // Retry the original request with new token
               final opts = error.requestOptions;
               opts.headers['Authorization'] = 'Bearer $_authToken';
@@ -125,14 +131,25 @@ class ApiClient {
             debugPrint('Token refresh failed: $e');
           }
           // Refresh failed - trigger logout via callback
-          _onAuthError?.call();
+          if (!_authErrorNotified) {
+            _authErrorNotified = true;
+            _onAuthError?.call();
+          }
+        } else if (statusCode == 401 && !isAuthFlowRequest && _refreshToken == null) {
+          if (!_authErrorNotified) {
+            _authErrorNotified = true;
+            _onAuthError?.call();
+          }
         }
 
         // Handle 403 Forbidden - user may be deactivated or lack permissions
-        if (statusCode == 403) {
+        if (statusCode == 403 && !isAuthFlowRequest) {
           final message = error.response?.data?['message']?.toString() ?? '';
           if (message.contains('deactivated') || message.contains('isActive')) {
-            _onAuthError?.call();
+            if (!_authErrorNotified) {
+              _authErrorNotified = true;
+              _onAuthError?.call();
+            }
           }
         }
 
@@ -150,6 +167,9 @@ class ApiClient {
 
   void setAuthToken(String? token) {
     _authToken = token;
+    if (token != null) {
+      _authErrorNotified = false;
+    }
     if (token != null) {
       final preview =
           token.length > 30 ? '${token.substring(0, 30)}...' : token;
@@ -311,6 +331,79 @@ class ApiClient {
       return {
         'success': false,
         'message': e.response?.statusMessage ?? 'Phone authentication failed',
+      };
+    }
+  }
+
+  /// Authenticate with Google ID token.
+  /// Backend: POST /api/auth/google  body: { idToken }
+  /// Returns: { success, message, data: { user, tokens: { accessToken, refreshToken, expiresIn }, isNewUser, requiresPhone } }
+  Future<Map<String, dynamic>> authenticateWithGoogle(String idToken) async {
+    try {
+      final response = await _dio.post('/api/auth/google', data: {
+        'idToken': idToken,
+      });
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      debugPrint('Google auth error: ${e.response?.data}');
+      if (e.response?.data != null && e.response?.data is Map) {
+        return e.response!.data as Map<String, dynamic>;
+      }
+      return {
+        'success': false,
+        'message': e.response?.statusMessage ?? 'Google authentication failed',
+      };
+    }
+  }
+
+  /// Authenticate with Truecaller data.
+  /// Backend: POST /api/auth/truecaller
+  /// body: { phone? } or { profile?, truecallerToken?/accessToken? }
+  Future<Map<String, dynamic>> authenticateWithTruecaller({
+    String? phone,
+    Map<String, dynamic>? profile,
+    String? accessToken,
+    String? truecallerToken,
+  }) async {
+    try {
+      final payload = <String, dynamic>{
+        if (phone != null && phone.isNotEmpty) 'phone': phone,
+        if (profile != null) 'profile': profile,
+        if (accessToken != null && accessToken.isNotEmpty)
+          'accessToken': accessToken,
+        if (truecallerToken != null && truecallerToken.isNotEmpty)
+          'truecallerToken': truecallerToken,
+      };
+      final response = await _dio.post('/api/auth/truecaller', data: payload);
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      debugPrint('Truecaller auth error: ${e.response?.data}');
+      if (e.response?.data != null && e.response?.data is Map) {
+        return e.response!.data as Map<String, dynamic>;
+      }
+      return {
+        'success': false,
+        'message': e.response?.statusMessage ?? 'Truecaller authentication failed',
+      };
+    }
+  }
+
+  /// Add verified phone to the current authenticated user.
+  /// Backend: POST /api/auth/add-phone  body: { idToken }
+  Future<Map<String, dynamic>> addPhoneWithFirebase(String idToken) async {
+    try {
+      final response = await _dio.post('/api/auth/add-phone', data: {
+        'idToken': idToken,
+      });
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      debugPrint('addPhoneWithFirebase error: ${e.response?.data}');
+      if (e.response?.data != null && e.response?.data is Map) {
+        return e.response!.data as Map<String, dynamic>;
+      }
+      return {
+        'success': false,
+        'message': e.response?.statusMessage ?? 'Failed to add phone number',
       };
     }
   }
@@ -873,11 +966,14 @@ class ApiClient {
       });
       // documentType goes as query parameter, not in form body
       final response = await _dio.post(
-        '/driver/onboarding/document/upload',
+        '/api/driver/onboarding/document/upload',
         queryParameters: {'documentType': backendDocType},
         data: formData,
       );
-      return response.data as Map<String, dynamic>;
+      return _normalizeApiResponse(
+        response.data,
+        successFallbackMessage: 'Document uploaded successfully',
+      );
     } on DioException catch (e) {
       final statusCode = e.response?.statusCode;
       final responseData = e.response?.data;
@@ -905,6 +1001,92 @@ class ApiClient {
 
       throw Exception(errorMsg);
     }
+  }
+
+  /// Re-upload/replace a driver document.
+  /// Primary: PUT /api/driver/documents/:type (multipart)
+  /// Fallback: POST /api/driver/onboarding/document/upload?documentType=TYPE
+  Future<Map<String, dynamic>> updateDriverDocument({
+    required String documentType,
+    required String filePath,
+  }) async {
+    final backendDocType = _mapDocumentType(documentType);
+    final extension =
+        filePath.split('.').last.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final safeExt = extension.isEmpty ? 'jpg' : extension;
+    Future<FormData> buildFormData() async => FormData.fromMap({
+          'document': await MultipartFile.fromFile(
+            filePath,
+            filename:
+                '${backendDocType.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.$safeExt',
+          ),
+        });
+
+    try {
+      final response = await _dio.put(
+        '/api/driver/documents/$backendDocType',
+        data: await buildFormData(),
+      );
+      return _normalizeApiResponse(
+        response.data,
+        successFallbackMessage: 'Document updated successfully',
+      );
+    } on DioException catch (e) {
+      // Compatibility fallback for older backend deployments.
+      if (e.response?.statusCode == 404 || e.response?.statusCode == 405) {
+        final fallback = await _dio.post(
+          '/api/driver/onboarding/document/upload',
+          queryParameters: {'documentType': backendDocType},
+          data: await buildFormData(),
+        );
+        return _normalizeApiResponse(
+          fallback.data,
+          successFallbackMessage: 'Document uploaded successfully',
+        );
+      }
+      throw Exception(
+        _extractApiErrorMessage(
+          e.response?.data,
+          fallback: 'Failed to update document',
+        ),
+      );
+    }
+  }
+
+  Map<String, dynamic> _normalizeApiResponse(
+    dynamic rawData, {
+    required String successFallbackMessage,
+  }) {
+    if (rawData is Map<String, dynamic>) return rawData;
+    if (rawData is Map) {
+      return rawData.map(
+        (key, value) => MapEntry(key.toString(), value),
+      );
+    }
+    if (rawData is String) {
+      return {'success': true, 'message': rawData};
+    }
+    return {
+      'success': true,
+      'message': successFallbackMessage,
+      'data': rawData,
+    };
+  }
+
+  String _extractApiErrorMessage(
+    dynamic rawData, {
+    required String fallback,
+  }) {
+    if (rawData is Map) {
+      final message = rawData['message'] ?? rawData['error'];
+      if (message is String && message.trim().isNotEmpty) {
+        return message;
+      }
+    }
+    if (rawData is String && rawData.trim().isNotEmpty) {
+      return rawData;
+    }
+    return fallback;
   }
 
   /// Map frontend document type names to backend expected values
@@ -1134,6 +1316,71 @@ class ApiClient {
         await _dio.get('/api/driver/wallet/payouts', queryParameters: {
       'page': page,
       'limit': limit,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  // ─────────────────────────────────────────────
+  // DRIVER SUBSCRIPTION (DAILY PLATFORM FEE)
+  // ─────────────────────────────────────────────
+
+  /// Get driver subscription status.
+  /// Backend: GET /api/driver/subscription/status
+  /// Response: { allowOnline: bool, validTill: timestamp, status: 'active'|'expired'|'never_purchased', message: string }
+  Future<Map<String, dynamic>> getDriverSubscriptionStatus() async {
+    final response = await _dio.get('/api/driver/subscription/status');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Activate driver subscription after payment.
+  /// Backend: POST /api/driver/subscription/activate
+  /// Request: { transactionId?: string, paymentMethod: string }
+  /// Response: { success: bool, validTill: timestamp, message: string }
+  Future<Map<String, dynamic>> activateDriverSubscription({
+    String? transactionId,
+    String paymentMethod = 'UPI',
+  }) async {
+    final response = await _dio.post('/api/driver/subscription/activate', data: {
+      if (transactionId != null) 'transactionId': transactionId,
+      'paymentMethod': paymentMethod,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  // ─────────────────────────────────────────────
+  // DRIVER PENALTY
+  // ─────────────────────────────────────────────
+
+  /// Get driver penalty status and wallet balance.
+  /// Backend: GET /api/driver/penalty/status
+  /// Response: { hasPendingPenalty: bool, penalty: { id, amount, reason }, wallet: { balance } }
+  Future<Map<String, dynamic>> getDriverPenaltyStatus() async {
+    final response = await _dio.get('/api/driver/penalty/status');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Clear penalty using wallet balance.
+  /// Backend: POST /api/driver/penalty/clear-with-wallet
+  /// Request: { penaltyId?: string }
+  /// Response: { success: bool, message: string, newWalletBalance: number }
+  Future<Map<String, dynamic>> clearPenaltyWithWallet({String? penaltyId}) async {
+    final response = await _dio.post('/api/driver/penalty/clear-with-wallet', data: {
+      if (penaltyId != null) 'penaltyId': penaltyId,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Clear penalty using UPI payment.
+  /// Backend: POST /api/driver/penalty/clear-with-upi
+  /// Request: { penaltyId?: string, transactionId?: string }
+  /// Response: { success: bool, message: string }
+  Future<Map<String, dynamic>> clearPenaltyWithUpi({
+    String? penaltyId,
+    String? transactionId,
+  }) async {
+    final response = await _dio.post('/api/driver/penalty/clear-with-upi', data: {
+      if (penaltyId != null) 'penaltyId': penaltyId,
+      if (transactionId != null) 'transactionId': transactionId,
     });
     return response.data as Map<String, dynamic>;
   }

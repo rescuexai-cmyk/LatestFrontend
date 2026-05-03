@@ -1,15 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/router/app_routes.dart';
+import '../../../../core/services/api_client.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
-import '../../../auth/providers/auth_provider.dart';
 
 /// Screen for managing/updating driver documents.
 /// Shows all uploaded documents with status, expiry warnings, and re-upload options.
 class DriverDocumentManagementScreen extends ConsumerStatefulWidget {
-  const DriverDocumentManagementScreen({super.key});
+  final bool returnToProfileOnBack;
+
+  const DriverDocumentManagementScreen({
+    super.key,
+    this.returnToProfileOnBack = false,
+  });
 
   @override
   ConsumerState<DriverDocumentManagementScreen> createState() => _DriverDocumentManagementScreenState();
@@ -29,6 +37,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
   bool _hasFetchedStatus = false;
   final ImagePicker _picker = ImagePicker();
   String? _reuploadingDocType;
+  final Set<String> _pendingUploadDocTypes = <String>{};
 
   static const List<Map<String, dynamic>> _allDocuments = [
     {'backendId': 'LICENSE', 'frontendId': 'driving_license', 'title': 'Driving License', 'icon': Icons.badge_outlined, 'color': Color(0xFF2196F3)},
@@ -58,8 +67,16 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
   }
 
-  Future<void> _reuploadDocument(String backendId, String frontendId, String title) async {
-    final source = await showDialog<ImageSource>(
+  void _handleBackNavigation() {
+    if (widget.returnToProfileOnBack) {
+      context.go(AppRoutes.driverHome);
+    } else {
+      context.pop();
+    }
+  }
+
+  Future<void> _reuploadDocument(String backendId, String title) async {
+    final action = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.white,
@@ -76,56 +93,66 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
               ),
               title: Text(ref.tr('camera')),
               subtitle: Text(ref.tr('take_photo')),
-              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+              onTap: () => Navigator.pop(ctx, 'camera'),
             ),
             const SizedBox(height: 8),
             ListTile(
               leading: Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(color: const Color(0xFF2196F3).withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
-                child: const Icon(Icons.photo_library, color: Color(0xFF2196F3)),
+                child: const Icon(Icons.attach_file, color: Color(0xFF2196F3)),
               ),
-              title: Text(ref.tr('gallery')),
-              subtitle: Text(ref.tr('choose_gallery')),
-              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+              title: const Text('Files'),
+              subtitle: const Text('Choose image or PDF'),
+              onTap: () => Navigator.pop(ctx, 'files'),
             ),
           ],
         ),
       ),
     );
 
-    if (source == null || !mounted) return;
+    if (action == null || !mounted) return;
 
     try {
-      final XFile? image = await _picker.pickImage(
-        source: source,
-        maxWidth: 1920,
-        maxHeight: 1080,
-        imageQuality: 85,
-      );
-      if (image == null || !mounted) return;
+      String? selectedPath;
+      if (action == 'camera') {
+        final XFile? image = await _picker.pickImage(
+          source: ImageSource.camera,
+          maxWidth: 1920,
+          maxHeight: 1080,
+          imageQuality: 85,
+        );
+        selectedPath = image?.path;
+      } else {
+        final picked = await FilePicker.platform.pickFiles(
+          allowMultiple: false,
+          type: FileType.custom,
+          allowedExtensions: const ['jpg', 'jpeg', 'png', 'pdf'],
+        );
+        selectedPath = picked?.files.single.path;
+      }
+      if (selectedPath == null || !mounted) return;
 
       setState(() => _reuploadingDocType = backendId);
 
-      final notifier = ref.read(driverOnboardingProvider.notifier);
-      final result = await notifier.uploadDocument(frontendId, image.path, isFront: true);
-      final success = result['success'] as bool? ?? false;
+      await ref.read(apiClientProvider).updateDriverDocument(
+            documentType: backendId,
+            filePath: selectedPath,
+          );
 
       if (!mounted) return;
-      setState(() => _reuploadingDocType = null);
+      setState(() {
+        _reuploadingDocType = null;
+        _pendingUploadDocTypes.add(backendId);
+      });
 
-      if (success) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('$title uploaded successfully!'),
-            backgroundColor: _success,
-          ),
-        );
-        await _refreshStatus();
-      } else {
-        final errorMsg = result['error'] as String? ?? 'Upload failed';
-        _showUploadError(title, errorMsg);
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$title re-uploaded. Status changed to Pending.'),
+          backgroundColor: _success,
+        ),
+      );
+      await _refreshStatus();
     } catch (e) {
       if (mounted) {
         setState(() => _reuploadingDocType = null);
@@ -174,7 +201,14 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     final hasRejections = backendStatus.hasRejectedDocuments;
     final hasExpiring = _hasExpiringDocuments(backendStatus);
 
-    return Scaffold(
+    return PopScope(
+      canPop: !widget.returnToProfileOnBack,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && widget.returnToProfileOnBack) {
+          _handleBackNavigation();
+        }
+      },
+      child: Scaffold(
       backgroundColor: _beige,
       body: SafeArea(
         child: RefreshIndicator(
@@ -222,7 +256,6 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
 
                 ..._allDocuments.map((doc) {
                   final backendId = doc['backendId'] as String;
-                  final frontendId = doc['frontendId'] as String;
                   final title = doc['title'] as String;
                   final icon = doc['icon'] as IconData;
                   final color = doc['color'] as Color;
@@ -234,14 +267,16 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: _buildDocumentCard(
+                      backendId: backendId,
                       icon: icon,
                       color: color,
                       title: title,
                       status: docStatus,
                       rejectionReason: rejectionReason,
+                      previewUrl: _documentPreviewUrl(backendStatus, backendId),
                       isReuploading: isReuploading,
                       isExpiring: isExpiring,
-                      onReupload: () => _reuploadDocument(backendId, frontendId, title),
+                      onReupload: () => _reuploadDocument(backendId, title),
                     ),
                   );
                 }),
@@ -253,10 +288,10 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                   width: double.infinity,
                   height: 56,
                   child: OutlinedButton.icon(
-                    onPressed: () => context.pop(),
+                    onPressed: _handleBackNavigation,
                     icon: const Icon(Icons.arrow_back, size: 20),
-                    label: const Text(
-                      'Back to Home',
+                    label: Text(
+                      widget.returnToProfileOnBack ? 'Back to Home' : 'Back',
                       style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                     ),
                     style: OutlinedButton.styleFrom(
@@ -271,14 +306,14 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
           ),
         ),
       ),
-    );
+    ));
   }
 
   Widget _buildHeader(BuildContext context) {
     return Row(
       children: [
         GestureDetector(
-          onTap: () => context.pop(),
+          onTap: _handleBackNavigation,
           child: Container(
             width: 40,
             height: 40,
@@ -323,6 +358,57 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     // For now, return false - will be enhanced when backend provides expiry dates
     // Placeholder for future expiry logic
     return false;
+  }
+
+  String? _documentPreviewUrl(
+      BackendOnboardingStatus status, String backendId) {
+    for (final detail in status.documentDetails) {
+      if (detail.type == backendId && detail.url != null) {
+        return detail.url;
+      }
+    }
+    return null;
+  }
+
+  bool _isPdfUrl(String url) {
+    return url.toLowerCase().contains('.pdf');
+  }
+
+  Future<void> _openDocumentPreview(String previewUrl) async {
+    if (_isPdfUrl(previewUrl)) {
+      final uri = Uri.tryParse(previewUrl);
+      if (uri != null) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        child: Stack(
+          children: [
+            InteractiveViewer(
+              child: Image.network(previewUrl, fit: BoxFit.contain),
+            ),
+            Positioned(
+              top: 8,
+              right: 8,
+              child: IconButton(
+                icon: const Icon(Icons.close),
+                color: Colors.white,
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.black54,
+                ),
+                onPressed: () => Navigator.pop(ctx),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildRejectionBanner(int rejectedCount) {
@@ -396,15 +482,21 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
   }
 
   Widget _buildDocumentCard({
+    required String backendId,
     required IconData icon,
     required Color color,
     required String title,
+    required String? previewUrl,
     required DocumentStatus status,
     required String? rejectionReason,
     required bool isReuploading,
     required bool isExpiring,
     required VoidCallback onReupload,
   }) {
+    if (_pendingUploadDocTypes.contains(backendId)) {
+      status = DocumentStatus.inReview;
+    }
+
     Color statusColor;
     String statusText;
     IconData statusIcon;
@@ -412,27 +504,26 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     switch (status) {
       case DocumentStatus.verified:
         statusColor = _success;
-        statusText = 'Verified';
+        statusText = 'Approved';
         statusIcon = Icons.check_circle;
         break;
       case DocumentStatus.rejected:
         statusColor = _error;
-        statusText = 'Verification Failed';
+        statusText = 'Rejected';
         statusIcon = Icons.cancel;
         break;
       case DocumentStatus.inReview:
         statusColor = _accent;
-        statusText = 'Under Review';
+        statusText = 'Pending';
         statusIcon = Icons.hourglass_empty;
         break;
       case DocumentStatus.uploading:
       case DocumentStatus.uploaded:
         statusColor = _accent;
-        statusText = 'Uploaded';
+        statusText = 'Pending';
         statusIcon = Icons.cloud_done_outlined;
         break;
       case DocumentStatus.notUploaded:
-      default:
         statusColor = _textSecondary;
         statusText = 'Not uploaded';
         statusIcon = Icons.upload_file;
@@ -446,7 +537,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     }
 
     final isRejected = status == DocumentStatus.rejected;
-    final showReupload = isRejected || isExpiring || status == DocumentStatus.verified;
+    const showReupload = true;
 
     Color cardBg = Colors.white;
     Color borderColor = _border;
@@ -523,6 +614,41 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                 const Icon(Icons.check_circle, color: _success, size: 24),
             ],
           ),
+
+          if (previewUrl != null) ...[
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () => _openDocumentPreview(previewUrl),
+              child: Container(
+                width: double.infinity,
+                height: 120,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8F8F8),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: _border),
+                ),
+                child: _isPdfUrl(previewUrl)
+                    ? const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.picture_as_pdf, color: _error),
+                          SizedBox(width: 8),
+                          Text('Preview PDF'),
+                        ],
+                      )
+                    : ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.network(
+                          previewUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => const Center(
+                            child: Text('Preview unavailable'),
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+          ],
 
           // Rejection reason
           if (isRejected && rejectionReason != null) ...[

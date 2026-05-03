@@ -5,11 +5,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/services/api_client.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 
 class DriverOnboardingScreen extends ConsumerStatefulWidget {
-  const DriverOnboardingScreen({super.key});
+  final bool isUpdateMode;
+  final bool returnToProfileOnBack;
+
+  const DriverOnboardingScreen({
+    super.key,
+    this.isUpdateMode = false,
+    this.returnToProfileOnBack = false,
+  });
 
   @override
   ConsumerState<DriverOnboardingScreen> createState() => _DriverOnboardingScreenState();
@@ -18,6 +26,7 @@ class DriverOnboardingScreen extends ConsumerStatefulWidget {
 class _DriverOnboardingScreenState extends ConsumerState<DriverOnboardingScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
+  bool _isResolvingUpdateMode = false;
 
   // Raahi color palette
   static const _beige = Color(0xFFF6EFE4);
@@ -26,6 +35,86 @@ class _DriverOnboardingScreenState extends ConsumerState<DriverOnboardingScreen>
   static const _textSecondary = Color(0xFF888888);
   static const _inputBg = Color(0xFFEDE6DA);
   static const _border = Color(0xFFE8E0D4);
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isUpdateMode) {
+      _isResolvingUpdateMode = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _resolveUpdateModeEntry();
+      });
+    }
+  }
+
+  Future<void> _resolveUpdateModeEntry() async {
+    try {
+      final response = await ref.read(apiClientProvider).getDriverProfile();
+      final data = (response['data'] as Map<String, dynamic>?) ?? const {};
+      final profile = (data['driver'] as Map<String, dynamic>?) ?? data;
+      final onboarding =
+          (profile['onboarding'] as Map<String, dynamic>?) ?? const {};
+
+      final isOnboarded = profile['isOnboarded'] == true ||
+          profile['is_onboarded'] == true ||
+          profile['onboardingCompleted'] == true ||
+          profile['onboarding_completed'] == true ||
+          onboarding['is_verified'] == true ||
+          onboarding['documents_verified'] == true ||
+          onboarding['documents_submitted'] == true ||
+          (onboarding['status'] as String?)?.toUpperCase() == 'COMPLETED' ||
+          (onboarding['status'] as String?)?.toUpperCase() ==
+              'DOCUMENT_VERIFICATION';
+      final hasDocuments = _profileHasDocuments(profile['documents']);
+
+      if (mounted && widget.isUpdateMode && isOnboarded && hasDocuments) {
+        final returnToProfile = widget.returnToProfileOnBack ? 'true' : 'false';
+        context.go(
+          '${AppRoutes.driverDocuments}?isUpdateMode=true&returnToProfile=$returnToProfile',
+        );
+        return;
+      }
+    } catch (e) {
+      debugPrint('❌ Failed to resolve update mode entry: $e');
+    }
+
+    if (mounted) {
+      setState(() => _isResolvingUpdateMode = false);
+    }
+  }
+
+  bool _profileHasDocuments(dynamic rawDocuments) {
+    if (rawDocuments is List) {
+      return rawDocuments.isNotEmpty;
+    }
+    if (rawDocuments is Map) {
+      if (rawDocuments.isEmpty) return false;
+      final pendingCount =
+          (rawDocuments['pending_count'] as num?)?.toInt() ??
+              (rawDocuments['pendingCount'] as num?)?.toInt() ??
+              0;
+      if (pendingCount > 0) return true;
+
+      if (rawDocuments['all_verified'] == true ||
+          rawDocuments['allVerified'] == true ||
+          rawDocuments['license_verified'] == true ||
+          rawDocuments['insurance_verified'] == true ||
+          rawDocuments['vehicle_registration_verified'] == true) {
+        return true;
+      }
+
+      return rawDocuments.values.any((value) {
+        if (value == null) return false;
+        if (value is bool) return value;
+        if (value is num) return value > 0;
+        if (value is String) return value.trim().isNotEmpty;
+        if (value is List) return value.isNotEmpty;
+        if (value is Map) return value.isNotEmpty;
+        return true;
+      });
+    }
+    return false;
+  }
 
   @override
   void dispose() {
@@ -49,12 +138,25 @@ class _DriverOnboardingScreenState extends ConsumerState<DriverOnboardingScreen>
         curve: Curves.easeInOut,
       );
     } else {
-      context.pop();
+      if (widget.returnToProfileOnBack) {
+        context.go(AppRoutes.driverHome);
+      } else {
+        context.pop();
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_isResolvingUpdateMode) {
+      return const Scaffold(
+        backgroundColor: _beige,
+        body: Center(
+          child: CircularProgressIndicator(color: _accent),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: _beige,
       body: SafeArea(

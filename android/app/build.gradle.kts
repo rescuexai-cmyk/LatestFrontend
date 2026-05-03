@@ -34,10 +34,12 @@ android {
 
     signingConfigs {
         create("release") {
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["keyPassword"] as String
-            storeFile = file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["storePassword"] as String
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                storeFile = keystoreProperties.getProperty("storeFile")?.let { path -> file(path) }
+                storePassword = keystoreProperties.getProperty("storePassword")
+            }
         }
     }
 
@@ -49,23 +51,32 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        
+
         // Required for flutter_local_notifications
         multiDexEnabled = true
-        
+
         // Get Google Maps API key from dart-defines or use placeholder
         val dartDefines = project.findProperty("dart-defines")?.toString()
         val googleMapsApiKey = dartDefines?.split(",")
             ?.firstOrNull { it.startsWith("GOOGLE_MAPS_API_KEY=") }
             ?.substringAfter("GOOGLE_MAPS_API_KEY=")
             ?: "YOUR_API_KEY_HERE"
-        
+        val truecallerClientId = project.findProperty("TRUECALLER_CLIENT_ID")
+            ?.toString()
+            ?: System.getenv("TRUECALLER_CLIENT_ID")
+            ?: "mjjigzyauyvch7n-i6y5adp_eva6zxx5v0n6hd5sr60"
+
         manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
+        manifestPlaceholders["TRUECALLER_CLIENT_ID"] = truecallerClientId
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

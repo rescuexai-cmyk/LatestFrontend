@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../providers/auth_provider.dart';
 
 /// Input formatter for Indian phone numbers.
@@ -46,26 +47,83 @@ class IndianPhoneInputFormatter extends TextInputFormatter {
 }
 
 class SignUpScreen extends ConsumerStatefulWidget {
-  const SignUpScreen({super.key});
+  final bool isPhoneLinkMode;
+
+  const SignUpScreen({
+    super.key,
+    this.isPhoneLinkMode = false,
+  });
 
   @override
   ConsumerState<SignUpScreen> createState() => _SignUpScreenState();
 }
 
-class _SignUpScreenState extends ConsumerState<SignUpScreen> {
+class _SignUpScreenState extends ConsumerState<SignUpScreen>
+    with WidgetsBindingObserver {
   final _phoneController = TextEditingController();
   bool _isLoading = false;
+  bool _isVerifying = false;
+  bool _hasNavigatedToOtp = false;
   int _cooldownSeconds = 0;
   Timer? _cooldownTimer;
   int _retryCount = 0;
   static const int _maxRetries = 3;
-  static const int _baseCooldown = 30; // Base cooldown in seconds
+  static const int _baseCooldown = 30;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkAndNavigateIfSessionExists();
+    });
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _phoneController.dispose();
     _cooldownTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    super.didChangeAppLifecycleState(lifecycleState);
+    if (lifecycleState == AppLifecycleState.resumed) {
+      debugPrint('📱 SignUpScreen: App resumed from background');
+      Future.delayed(const Duration(milliseconds: 800), () {
+        if (mounted && !_hasNavigatedToOtp) {
+          _checkAndNavigateIfSessionExists();
+        }
+      });
+    }
+  }
+
+  void _checkAndNavigateIfSessionExists() {
+    if (_hasNavigatedToOtp || !mounted) return;
+    final service = firebasePhoneAuth;
+    if (service.hasValidSession && service.pendingPhoneNumber != null) {
+      final phone = service.pendingPhoneNumber!
+          .replaceAll('+91', '')
+          .replaceAll(RegExp(r'[^\d]'), '');
+      debugPrint('📱 SignUpScreen: Found valid OTP session for $phone, auto-navigating');
+      _navigateToOtp(phone);
+    }
+  }
+
+  void _navigateToOtp(String phone) {
+    if (_hasNavigatedToOtp || !mounted) return;
+    _hasNavigatedToOtp = true;
+    final modeQuery = widget.isPhoneLinkMode ? '&mode=linkPhone' : '';
+    final otpPath =
+        '${AppRoutes.otpVerification}?phone=$phone&isNewUser=true$modeQuery';
+    debugPrint('📱 SignUpScreen: Navigating to OTP screen → $otpPath');
+    if (widget.isPhoneLinkMode) {
+      context.go(otpPath);
+    } else {
+      context.push(otpPath);
+    }
   }
 
   void _startCooldown(int seconds) {
@@ -80,14 +138,16 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
     });
   }
 
-  /// Get cooldown duration with exponential backoff
   int _getCooldownDuration() {
-    // Exponential backoff: 30s, 60s, 120s, 240s...
     return _baseCooldown * (1 << _retryCount.clamp(0, 3));
   }
 
   Future<void> _handleContinue() async {
-    // Check if in cooldown
+    if (_isVerifying) {
+      debugPrint('📱 SignUpScreen: _handleContinue blocked — already verifying');
+      return;
+    }
+
     if (_cooldownSeconds > 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -99,18 +159,13 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
     }
 
     String phone = _phoneController.text.trim();
-    
-    // Remove any spaces, dashes, or parentheses
     phone = phone.replaceAll(RegExp(r'[\s\-()]'), '');
-    
-    // Strip country code if user included it
     if (phone.startsWith('+91')) {
       phone = phone.substring(3);
     } else if (phone.startsWith('91') && phone.length > 10) {
       phone = phone.substring(2);
     }
-    
-    // Validate: must be exactly 10 digits starting with 6-9
+
     if (phone.isEmpty || phone.length != 10 || !RegExp(r'^[6-9]\d{9}$').hasMatch(phone)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -121,69 +176,76 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
       return;
     }
 
+    _isVerifying = true;
     setState(() => _isLoading = true);
-    
-    // Yield to UI thread to show loading indicator immediately
     await Future.delayed(Duration.zero);
 
     try {
-      debugPrint('📱 Attempting to request OTP for phone: $phone (attempt ${_retryCount + 1})');
+      debugPrint('📱 SignUpScreen: Requesting OTP for $phone (attempt ${_retryCount + 1})');
 
-      // Get the notifier - wrap in microtask to avoid blocking
       final authNotifier = ref.read(authStateProvider.notifier);
-      
-      // Add timeout to prevent indefinite blocking
-      final result = await authNotifier.requestOTP(phone).timeout(
-        const Duration(seconds: 15),
-        onTimeout: () => OTPResult(success: false, error: 'Request timed out. Please try again.'),
-      );
+      final result = await authNotifier.requestOTP(phone);
 
-      debugPrint('📱 OTP request result: success=${result.success}, error=${result.error}');
+      debugPrint('📱 SignUpScreen: OTP result success=${result.success}, error=${result.error}');
 
-      if (mounted) {
-        setState(() => _isLoading = false);
+      if (!mounted) {
+        debugPrint('📱 SignUpScreen: Widget no longer mounted after requestOTP');
+        _isVerifying = false;
+        return;
+      }
 
-        if (result.success) {
-          debugPrint('✅ OTP requested successfully, navigating to OTP screen');
-          _retryCount = 0; // Reset retry count on success
-          // Navigate to OTP screen with phone number (without +91 prefix - will be added in display)
-          context.push(
-            '${AppRoutes.otpVerification}?phone=$phone&isNewUser=true',
+      setState(() => _isLoading = false);
+
+      if (result.success) {
+        _retryCount = 0;
+        _navigateToOtp(phone);
+      } else {
+        if (firebasePhoneAuth.hasValidSession) {
+          debugPrint('📱 SignUpScreen: Request returned failure but session exists — navigating anyway');
+          _navigateToOtp(phone);
+          return;
+        }
+
+        if (authNotifier.hasActiveOtpSession()) {
+          debugPrint('📱 SignUpScreen: Active OTP session found — navigating');
+          _navigateToOtp(phone);
+          return;
+        }
+
+        final error = result.error ?? '';
+        if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
+          _retryCount++;
+          final cooldown = _getCooldownDuration();
+          _startCooldown(cooldown);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Too many requests. Please wait $cooldown seconds and try again.'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 4),
+            ),
           );
         } else {
-          debugPrint('❌ OTP request failed: ${result.error}');
-          
-          // Check for rate limit error (429)
-          final error = result.error ?? '';
-          if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
-            _retryCount++;
-            final cooldown = _getCooldownDuration();
-            _startCooldown(cooldown);
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Too many requests. Please wait $cooldown seconds and try again.'),
-                backgroundColor: Colors.orange,
-                duration: const Duration(seconds: 4),
-              ),
-            );
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(result.error ?? 'Failed to send OTP. Please try again.'),
-                backgroundColor: Colors.red,
-              ),
-            );
-          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result.error ?? 'Failed to send OTP. Please try again.'),
+              backgroundColor: Colors.red,
+            ),
+          );
         }
       }
     } catch (e) {
-      debugPrint('❌ OTP request exception: $e');
+      debugPrint('📱 SignUpScreen: OTP request exception: $e');
 
       if (mounted) {
         setState(() => _isLoading = false);
-        
+
+        if (firebasePhoneAuth.hasValidSession) {
+          debugPrint('📱 SignUpScreen: Exception but session exists — navigating');
+          _navigateToOtp(phone);
+          return;
+        }
+
         final errorStr = e.toString();
-        // Check for rate limit in exception
         if (errorStr.contains('429') || errorStr.toLowerCase().contains('too many')) {
           _retryCount++;
           final cooldown = _getCooldownDuration();
@@ -204,6 +266,8 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
           );
         }
       }
+    } finally {
+      _isVerifying = false;
     }
   }
 
@@ -220,8 +284,10 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
               const SizedBox(height: 60),
               
               // Title
-              const Text(
-                "What's your number?",
+              Text(
+                widget.isPhoneLinkMode
+                    ? 'Add your mobile number'
+                    : "What's your number?",
                 style: TextStyle(
                   fontSize: 28,
                   fontWeight: FontWeight.w600,

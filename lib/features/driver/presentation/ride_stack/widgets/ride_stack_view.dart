@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/driver_rides_provider.dart';
-import '../state/ride_queue_provider.dart';
 import 'ride_card.dart';
 
+/// Displays a stack of ride offer cards using the new single-offer architecture.
+/// 
+/// Uses driverRidesProvider directly instead of a separate queue provider.
+/// Shows up to 3 cards: the active offer on top, with pending offers behind.
 class RideStackView extends ConsumerStatefulWidget {
   final Future<void> Function(RideOffer ride) onAccept;
   final Future<void> Function(RideOffer ride) onDecline;
@@ -22,6 +25,7 @@ class _RideStackViewState extends ConsumerState<RideStackView>
     with SingleTickerProviderStateMixin {
   late final AnimationController _promotionController;
   bool _isPromoting = false;
+  bool _isProcessing = false;
 
   @override
   void initState() {
@@ -39,23 +43,21 @@ class _RideStackViewState extends ConsumerState<RideStackView>
   }
 
   Future<void> _handleAccept(RideOffer ride) async {
-    if (_isPromoting) return;
+    if (_isPromoting || _isProcessing) return;
     
-    ref.read(rideQueueProvider.notifier).setProcessing(true);
+    setState(() => _isProcessing = true);
     
     await widget.onAccept(ride);
     
     if (mounted) {
-      ref.read(rideQueueProvider.notifier).setProcessing(false);
+      setState(() => _isProcessing = false);
     }
   }
 
   Future<void> _handleDecline(RideOffer ride) async {
-    if (_isPromoting) return;
+    if (_isPromoting || _isProcessing) return;
     
     _isPromoting = true;
-    
-    ref.read(rideQueueProvider.notifier).removeTopRide();
     
     await _promotionController.forward(from: 0);
     
@@ -68,10 +70,10 @@ class _RideStackViewState extends ConsumerState<RideStackView>
 
   @override
   Widget build(BuildContext context) {
-    final queueState = ref.watch(rideQueueProvider);
-    final visibleRides = queueState.visibleRides;
+    final driverRidesState = ref.watch(driverRidesProvider);
+    final visibleOffers = driverRidesState.visibleOffers;
 
-    if (visibleRides.isEmpty) {
+    if (visibleOffers.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -83,9 +85,9 @@ class _RideStackViewState extends ConsumerState<RideStackView>
           child: Stack(
             alignment: Alignment.topCenter,
             children: [
-              for (int i = visibleRides.length - 1; i >= 0; i--)
+              for (int i = visibleOffers.length - 1; i >= 0; i--)
                 _buildAnimatedCard(
-                  ride: visibleRides[i],
+                  ride: visibleOffers[i],
                   index: i,
                   isTop: i == 0,
                 ),
