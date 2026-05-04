@@ -69,12 +69,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
 
   void _handleBackNavigation() {
     final onboardingState = ref.read(driverOnboardingProvider);
-    // If documents are rejected, ALWAYS go to personal info so driver
-    // can correct their aadhaar number, email, RC details — regardless
-    // of where they came from.
-    if (onboardingState.isRejected) {
-      context.go('${AppRoutes.driverOnboarding}?isUpdateMode=true');
-    } else if (widget.returnToProfileOnBack) {
+    if (widget.returnToProfileOnBack || onboardingState.isRejected) {
       context.go(AppRoutes.driverHome);
     } else {
       context.pop();
@@ -738,3 +733,9 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                 ),
               ),
             ),
+          ],
+        ],
+      ),
+    );
+  }
+}

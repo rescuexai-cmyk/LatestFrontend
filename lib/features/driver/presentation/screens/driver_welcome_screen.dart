@@ -32,6 +32,14 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
   final ImagePicker _picker = ImagePicker();
   String? _reuploadingDocType;
 
+  // Edit details card state
+  bool _editDetailsExpanded = false;
+  bool _isSavingDetails = false;
+  final _aadhaarController = TextEditingController();
+  final _vehicleNumberController = TextEditingController();
+  final _vehicleModelController = TextEditingController();
+  final _emailController = TextEditingController();
+
   static const List<Map<String, dynamic>> _allDocuments = [
     {'backendId': 'LICENSE', 'frontendId': 'driving_license', 'title': 'Driving License', 'icon': Icons.badge_outlined, 'color': Color(0xFF2196F3)},
     {'backendId': 'RC', 'frontendId': 'vehicle_rc', 'title': 'Registration Certificate (RC)', 'icon': Icons.description_outlined, 'color': Color(0xFF9C27B0)},
@@ -46,7 +54,25 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _fetchBackendStatus();
+      // Pre-fill edit fields from provider state
+      final s = ref.read(driverOnboardingProvider);
+      if (s.email != null) _emailController.text = s.email!;
+      if (s.vehicleRC.documentNumber != null) {
+        _vehicleNumberController.text = s.vehicleRC.documentNumber!;
+      }
+      if (s.aadhaarCard.documentNumber != null) {
+        _aadhaarController.text = s.aadhaarCard.documentNumber!;
+      }
     });
+  }
+
+  @override
+  void dispose() {
+    _aadhaarController.dispose();
+    _vehicleNumberController.dispose();
+    _vehicleModelController.dispose();
+    _emailController.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchBackendStatus() async {
@@ -204,9 +230,11 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                 _buildProgressSection(progress, onboardingState.verificationProgress),
                 const SizedBox(height: 24),
 
-                // Rejection banner
+                // Rejection banner + edit details card
                 if (hasRejections) ...[
                   _buildRejectionBanner(backendStatus.rejectedDocuments.length),
+                  const SizedBox(height: 12),
+                  _buildEditDetailsCard(),
                   const SizedBox(height: 16),
                 ],
 
@@ -361,6 +389,252 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
           child: Text(ref.tr('verification_progress'), style: const TextStyle(fontSize: 14, color: _textSecondary)),
         ),
       ],
+    );
+  }
+
+  Future<void> _savePersonalDetails() async {
+    final aadhaar = _aadhaarController.text.trim();
+    final vehicleNum = _vehicleNumberController.text.trim();
+    final vehicleModel = _vehicleModelController.text.trim();
+    final email = _emailController.text.trim();
+
+    if (email.isNotEmpty) {
+      final emailRegex = RegExp(r'^[\w\-.]+@([\w\-]+\.)+[\w\-]{2,4}$');
+      if (!emailRegex.hasMatch(email)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please enter a valid email address'), backgroundColor: _error),
+        );
+        return;
+      }
+    }
+
+    if (aadhaar.isNotEmpty && aadhaar.length != 12) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Aadhaar number must be exactly 12 digits'), backgroundColor: _error),
+      );
+      return;
+    }
+
+    setState(() => _isSavingDetails = true);
+
+    try {
+      final notifier = ref.read(driverOnboardingProvider.notifier);
+      bool anySuccess = false;
+
+      if (aadhaar.isNotEmpty || vehicleNum.isNotEmpty || vehicleModel.isNotEmpty) {
+        final ok = await notifier.setPersonalInfo(
+          aadhaarNumber: aadhaar.isNotEmpty ? aadhaar : null,
+          vehicleNumber: vehicleNum.isNotEmpty
+              ? vehicleNum.toUpperCase().replaceAll(RegExp(r'\s+'), '')
+              : null,
+          vehicleModel: vehicleModel.isNotEmpty ? vehicleModel : null,
+        );
+        if (ok) anySuccess = true;
+      }
+
+      if (email.isNotEmpty) {
+        final ok = await notifier.updateEmail(email);
+        if (ok) anySuccess = true;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _isSavingDetails = false;
+        if (anySuccess) _editDetailsExpanded = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(anySuccess
+              ? 'Details saved! Now re-upload the affected documents.'
+              : 'Failed to save. Please try again.'),
+          backgroundColor: anySuccess ? _success : _error,
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isSavingDetails = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.toString().replaceAll('Exception: ', '')}'),
+            backgroundColor: _error,
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildEditDetailsCard() {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeInOut,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: _editDetailsExpanded ? _accent.withOpacity(0.6) : _border,
+          width: _editDetailsExpanded ? 1.5 : 1.0,
+        ),
+        boxShadow: _editDetailsExpanded
+            ? [BoxShadow(color: _accent.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 2))]
+            : [],
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: () => setState(() => _editDetailsExpanded = !_editDetailsExpanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: _accent.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.edit_outlined, color: _accent, size: 18),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Edit Your Details',
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _textPrimary),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'Fix Aadhaar, RC number, email if entered wrong',
+                          style: TextStyle(fontSize: 12, color: _textSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+                  AnimatedRotation(
+                    turns: _editDetailsExpanded ? 0.5 : 0.0,
+                    duration: const Duration(milliseconds: 250),
+                    child: const Icon(Icons.keyboard_arrow_down, color: _textSecondary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_editDetailsExpanded) ...[
+            const Divider(height: 1, thickness: 1, color: Color(0xFFF0EBE3)),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Aadhaar Number', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _textPrimary)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _aadhaarController,
+                    keyboardType: TextInputType.number,
+                    maxLength: 12,
+                    style: const TextStyle(fontSize: 14),
+                    decoration: InputDecoration(
+                      hintText: '0000 0000 0000',
+                      hintStyle: const TextStyle(color: _textSecondary, fontSize: 14),
+                      counterText: '',
+                      filled: true,
+                      fillColor: _inputBg,
+                      prefixIcon: const Icon(Icons.fingerprint, color: _textSecondary, size: 20),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _accent, width: 1.5)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text('Vehicle Registration No.', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _textPrimary)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _vehicleNumberController,
+                    textCapitalization: TextCapitalization.characters,
+                    style: const TextStyle(fontSize: 14),
+                    decoration: InputDecoration(
+                      hintText: 'e.g. DL 01 AB 1234',
+                      hintStyle: const TextStyle(color: _textSecondary, fontSize: 14),
+                      filled: true,
+                      fillColor: _inputBg,
+                      prefixIcon: const Icon(Icons.directions_car_outlined, color: _textSecondary, size: 20),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _accent, width: 1.5)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text('Vehicle Model', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _textPrimary)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _vehicleModelController,
+                    style: const TextStyle(fontSize: 14),
+                    decoration: InputDecoration(
+                      hintText: 'e.g. Maruti Swift Dzire',
+                      hintStyle: const TextStyle(color: _textSecondary, fontSize: 14),
+                      filled: true,
+                      fillColor: _inputBg,
+                      prefixIcon: const Icon(Icons.commute_outlined, color: _textSecondary, size: 20),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _accent, width: 1.5)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text('Email Address', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _textPrimary)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    autocorrect: false,
+                    style: const TextStyle(fontSize: 14),
+                    decoration: InputDecoration(
+                      hintText: 'you@email.com',
+                      hintStyle: const TextStyle(color: _textSecondary, fontSize: 14),
+                      filled: true,
+                      fillColor: _inputBg,
+                      prefixIcon: const Icon(Icons.email_outlined, color: _textSecondary, size: 20),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _border)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _accent, width: 1.5)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 46,
+                    child: ElevatedButton.icon(
+                      onPressed: _isSavingDetails ? null : _savePersonalDetails,
+                      icon: _isSavingDetails
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.save_outlined, size: 18),
+                      label: Text(
+                        _isSavingDetails ? 'Saving...' : 'Save Details',
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _accent,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: _accent.withOpacity(0.5),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        elevation: 0,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
