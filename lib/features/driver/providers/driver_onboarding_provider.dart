@@ -240,6 +240,13 @@ class BackendOnboardingStatus {
   final List<String> rejectedDocuments;
   final List<BackendDocumentInfo> documentDetails;
 
+  // Driver personal info (pre-fetched from backend for edit flow)
+  final String? email;
+  final String? fullName;
+  final String? aadhaarNumber;
+  final String? vehicleNumber;
+  final String? vehicleModel;
+
   const BackendOnboardingStatus({
     this.onboardingStatus = OnboardingStatus.notStarted,
     this.canStartRides = false,
@@ -255,6 +262,11 @@ class BackendOnboardingStatus {
     this.pendingDocuments = const [],
     this.rejectedDocuments = const [],
     this.documentDetails = const [],
+    this.email,
+    this.fullName,
+    this.aadhaarNumber,
+    this.vehicleNumber,
+    this.vehicleModel,
   });
 
   factory BackendOnboardingStatus.fromJson(Map<String, dynamic> json) {
@@ -354,6 +366,15 @@ class BackendOnboardingStatus {
     final derivedCanStart = parsedStatus == OnboardingStatus.completed &&
         rejectedRaw.isEmpty;
 
+    // Parse personal info from status response
+    final kyc = data['kyc'] as Map<String, dynamic>? ?? {};
+    final aadhaarKyc = kyc['aadhaar'] as Map<String, dynamic>? ?? {};
+    final parsedEmail = data['email'] as String?;
+    final parsedFullName = data['full_name'] as String? ?? data['fullName'] as String?;
+    final parsedAadhaar = aadhaarKyc['number_full'] as String? ?? aadhaarKyc['numberFull'] as String?;
+    final parsedVehicleNumber = data['vehicle_number'] as String? ?? data['vehicleNumber'] as String?;
+    final parsedVehicleModel = data['vehicle_model'] as String? ?? data['vehicleModel'] as String?;
+
     return BackendOnboardingStatus(
       onboardingStatus: parsedStatus,
       // Some backend responses occasionally omit can_start_rides.
@@ -373,6 +394,11 @@ class BackendOnboardingStatus {
       pendingDocuments: cleanPending,
       rejectedDocuments: rejectedRaw,
       documentDetails: details,
+      email: parsedEmail,
+      fullName: parsedFullName,
+      aadhaarNumber: parsedAadhaar,
+      vehicleNumber: parsedVehicleNumber,
+      vehicleModel: parsedVehicleModel,
     );
   }
   
@@ -416,6 +442,26 @@ class BackendOnboardingStatus {
 
   /// True if any required document was rejected
   bool get hasRejectedDocuments => rejectedDocuments.isNotEmpty;
+
+  /// Whether the Aadhaar field should be shown for editing
+  /// (AADHAAR_CARD is rejected/flagged)
+  bool get shouldEditAadhaar => rejectedDocuments.contains('AADHAAR_CARD');
+
+  /// Whether vehicle fields should be shown for editing
+  /// (RC document is rejected/flagged)
+  bool get shouldEditVehicle => rejectedDocuments.contains('RC');
+
+  /// Whether email field should be shown for editing.
+  /// Shown if any document has an email-related mismatch, or if there are
+  /// general rejections (email is a common source of mismatches).
+  bool get shouldEditEmail {
+    for (final detail in documentDetails) {
+      final reason = (detail.displayReason ?? '').toLowerCase();
+      if (reason.contains('email')) return true;
+    }
+    // Also show email if there are any rejections as a safe fallback
+    return rejectedDocuments.isNotEmpty;
+  }
 }
 
 /// Driver onboarding state
@@ -748,6 +794,8 @@ class DriverOnboardingNotifier extends StateNotifier<DriverOnboardingState> {
       aadhaarCard: updatedAadhaarCard,
       panCard: updatedPanCard,
       profilePhotoPath: profilePhotoUploaded ? (state.profilePhotoPath ?? 'uploaded') : state.profilePhotoPath,
+      email: state.email ?? status.email,
+      fullName: state.fullName ?? status.fullName,
     );
 
     final isCompletedAndRideable = status.onboardingStatus == OnboardingStatus.completed &&
