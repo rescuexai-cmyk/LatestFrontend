@@ -31,6 +31,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
   bool _hasFetchedStatus = false;
   final ImagePicker _picker = ImagePicker();
   String? _reuploadingDocType;
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _documentStatusKey = GlobalKey();
 
   // Edit details card state
   bool _editDetailsExpanded = false;
@@ -52,22 +54,56 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _fetchBackendStatus();
-      // Pre-fill edit fields from provider state
-      final s = ref.read(driverOnboardingProvider);
-      if (s.email != null) _emailController.text = s.email!;
-      if (s.vehicleRC.documentNumber != null) {
-        _vehicleNumberController.text = s.vehicleRC.documentNumber!;
-      }
-      if (s.aadhaarCard.documentNumber != null) {
-        _aadhaarController.text = s.aadhaarCard.documentNumber!;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Fetch backend status first, then pre-fill fields from the response
+      await _fetchBackendStatus();
+      if (!mounted) return;
+      _preFillEditFields();
+
+      // Auto-redirect to driver home if fully verified
+      final state = ref.read(driverOnboardingProvider);
+      if (state.canStartRides && mounted) {
+        context.go(AppRoutes.driverHome);
       }
     });
   }
 
+  /// Pre-fill edit fields from the backend status data.
+  /// Must be called AFTER fetchOnboardingStatus() completes.
+  void _preFillEditFields() {
+    final bs = ref.read(driverOnboardingProvider).backendStatus;
+    debugPrint('📋 Pre-filling edit fields: email=${bs.email}, aadhaar=${bs.aadhaarNumber}, '
+        'vehicleNumber=${bs.vehicleNumber}, vehicleModel=${bs.vehicleModel}');
+    if (bs.email != null && bs.email!.isNotEmpty) {
+      _emailController.text = bs.email!;
+    }
+    if (bs.aadhaarNumber != null && bs.aadhaarNumber!.isNotEmpty) {
+      _aadhaarController.text = bs.aadhaarNumber!;
+    }
+    if (bs.vehicleNumber != null && bs.vehicleNumber!.isNotEmpty) {
+      _vehicleNumberController.text = bs.vehicleNumber!;
+    }
+    if (bs.vehicleModel != null && bs.vehicleModel!.isNotEmpty) {
+      _vehicleModelController.text = bs.vehicleModel!;
+    }
+  }
+
+  /// Smoothly scroll to the Document Status section
+  void _scrollToDocumentStatus() {
+    final ctx = _documentStatusKey.currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 500),
+        curve: Curves.easeInOut,
+        alignment: 0.0, // scroll to top of viewport
+      );
+    }
+  }
+
   @override
   void dispose() {
+    _scrollController.dispose();
     _aadhaarController.dispose();
     _vehicleNumberController.dispose();
     _vehicleModelController.dispose();
@@ -84,6 +120,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
 
   Future<void> _refreshStatus() async {
     await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
+    if (mounted) _preFillEditFields();
   }
 
   Future<void> _reuploadDocument(String backendId, String frontendId, String title) async {
@@ -211,6 +248,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
           onRefresh: _refreshStatus,
           color: _accent,
           child: SingleChildScrollView(
+            controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -245,9 +283,10 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                 ],
 
                 // All document cards
-                const Text(
+                Text(
                   'Document Status',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: _textPrimary),
+                  key: _documentStatusKey,
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: _textPrimary),
                 ),
                 const SizedBox(height: 12),
 
@@ -304,6 +343,33 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
+                ],
+
+                // Issues warning button — scrolls to document status section
+                if (hasRejections && !onboardingState.canStartRides) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _scrollToDocumentStatus,
+                      icon: const Icon(Icons.warning_amber_rounded, size: 20),
+                      label: const Text(
+                        'There are some issues validating your Documents.. See Now',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                        textAlign: TextAlign.center,
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFFFEBEE),
+                        foregroundColor: const Color(0xFFD32F2F),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: const BorderSide(color: Color(0xFFEF9A9A), width: 1.2),
+                        ),
+                        elevation: 0,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                 ],
 
                 // Action button

@@ -371,9 +371,19 @@ class BackendOnboardingStatus {
     final aadhaarKyc = kyc['aadhaar'] as Map<String, dynamic>? ?? {};
     final parsedEmail = data['email'] as String?;
     final parsedFullName = data['full_name'] as String? ?? data['fullName'] as String?;
-    final parsedAadhaar = aadhaarKyc['number_full'] as String? ?? aadhaarKyc['numberFull'] as String?;
-    final parsedVehicleNumber = data['vehicle_number'] as String? ?? data['vehicleNumber'] as String?;
+    final parsedAadhaar = aadhaarKyc['number_full'] as String?
+        ?? aadhaarKyc['numberFull'] as String?
+        ?? aadhaarKyc['number'] as String?
+        ?? data['aadhaar_number'] as String?
+        ?? data['aadhaarNumber'] as String?;
+    final parsedVehicleNumber = data['vehicle_number'] as String?
+        ?? data['vehicleNumber'] as String?
+        ?? data['vehicle_registration_number'] as String?
+        ?? data['vehicleRegistrationNumber'] as String?;
     final parsedVehicleModel = data['vehicle_model'] as String? ?? data['vehicleModel'] as String?;
+    
+    debugPrint('📋 Parsed personal info: email=$parsedEmail, fullName=$parsedFullName, '
+        'aadhaar=$parsedAadhaar, vehicleNumber=$parsedVehicleNumber, vehicleModel=$parsedVehicleModel');
 
     return BackendOnboardingStatus(
       onboardingStatus: parsedStatus,

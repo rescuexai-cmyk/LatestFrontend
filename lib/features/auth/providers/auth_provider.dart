@@ -118,7 +118,6 @@ class AuthNotifier extends StateNotifier<AuthState> {
   // NOTE: These are for LOCAL DEV ONLY when Firebase is not configured.
   // For Firebase Console test numbers, use the normal Firebase flow - they work automatically.
   static const List<String> _testPhoneNumbers = [
-    '9794696252',
     '1234567890',
     '9999999999',
   ];
