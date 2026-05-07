@@ -200,9 +200,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
 
   // Services that are not yet available
   static const _comingSoonServices = {
-    'cab_xl',
-    'cab_premium',
-    'personal_driver'
+    'personal_driver', // Driver Rental — not yet launched
   };
 
   void _navigateToFindTrip({String serviceType = 'bike_rescue'}) {
@@ -415,7 +413,18 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(currentUserProvider);
-    final displayName = user?.name ?? user?.email ?? 'User';
+    // Never show email as greeting — use name, or last 4 digits of phone, or 'User'
+    final rawName = user?.name;
+    final hasRealName = rawName != null && rawName.isNotEmpty && rawName != 'User';
+    String displayName;
+    if (hasRealName) {
+      displayName = rawName!;
+    } else if (user?.phone != null && user!.phone!.isNotEmpty) {
+      final digits = user.phone!.replaceAll(RegExp(r'[^\d]'), '');
+      displayName = digits.length >= 4 ? 'User ${digits.substring(digits.length - 4)}' : 'User';
+    } else {
+      displayName = 'User';
+    }
     final firstName = displayName.split(' ').first;
     final initial = firstName.isNotEmpty ? firstName[0].toUpperCase() : 'U';
 
