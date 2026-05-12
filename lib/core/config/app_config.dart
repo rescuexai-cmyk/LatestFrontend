@@ -79,7 +79,7 @@ class AppConfig {
   
   // Company UPI Details (used for all payments)
   static const String companyUpiId =
-      'MSRAAHICABSERVICESPRIVATELIMITED.eazypay@icici';
+      'MSRAAHICABSERVICESPVTLTD.eazypay@icici';
   static const String companyName = 'Raahi Cab Services';
   static const String companyDisplayName = 'Raahi Cab Services';
 }

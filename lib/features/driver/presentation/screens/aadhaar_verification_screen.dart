@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Screen for Aadhaar card number verification with OTP
 class AadhaarVerificationScreen extends ConsumerStatefulWidget {
@@ -41,9 +42,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
 
   void _sendOtp() async {
     if (_aadhaarController.text.length != 12) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('valid_aadhaar_error'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('valid_aadhaar_error'));
       return;
     }
 
@@ -57,17 +56,13 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
       _isOtpSent = true;
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(ref.tr('otp_sent_mobile'))),
-    );
+    AppMessenger.showErrorBanner(context, ref.tr('otp_sent_mobile'));
   }
 
   void _verifyOtp() async {
     final otp = _otpControllers.map((c) => c.text).join();
     if (otp.length != 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('enter_6_digit_otp'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('enter_6_digit_otp'));
       return;
     }
 

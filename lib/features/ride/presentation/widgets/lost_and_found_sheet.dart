@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/models/ride.dart';
 import '../../../../core/theme/app_colors.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class _ItemCategory {
   final String id;
@@ -468,9 +469,7 @@ class _LostAndFoundSheetState extends State<LostAndFoundSheet> {
     final phone = widget.ride.driver?.phone;
     if (phone == null || phone.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Driver phone number unavailable')),
-        );
+        AppMessenger.showErrorBanner(context, 'Driver phone number unavailable');
       }
       return;
     }

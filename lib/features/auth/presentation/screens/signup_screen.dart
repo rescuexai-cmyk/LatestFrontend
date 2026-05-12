@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../providers/auth_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Input formatter for Indian phone numbers.
 /// - Only allows digits
@@ -149,12 +150,7 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
     }
 
     if (_cooldownSeconds > 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Please wait $_cooldownSeconds seconds before requesting OTP again'),
-          backgroundColor: Colors.orange,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, 'Please wait $_cooldownSeconds seconds before requesting OTP again');
       return;
     }
 
@@ -167,12 +163,7 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
     }
 
     if (phone.isEmpty || phone.length != 10 || !RegExp(r'^[6-9]\d{9}$').hasMatch(phone)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a valid 10-digit mobile number'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, 'Please enter a valid 10-digit mobile number');
       return;
     }
 
@@ -217,20 +208,9 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
           _retryCount++;
           final cooldown = _getCooldownDuration();
           _startCooldown(cooldown);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Too many requests. Please wait $cooldown seconds and try again.'),
-              backgroundColor: Colors.orange,
-              duration: const Duration(seconds: 4),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, 'Too many requests. Please wait $cooldown seconds and try again.');
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result.error ?? 'Failed to send OTP. Please try again.'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, result.error ?? 'Failed to send OTP. Please try again.');
         }
       }
     } catch (e) {
@@ -250,20 +230,9 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
           _retryCount++;
           final cooldown = _getCooldownDuration();
           _startCooldown(cooldown);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Too many requests. Please wait $cooldown seconds and try again.'),
-              backgroundColor: Colors.orange,
-              duration: const Duration(seconds: 4),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, 'Too many requests. Please wait $cooldown seconds and try again.');
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Network error: ${errorStr.split(':').last.trim()}'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, 'Network error: ${errorStr.split(':').last.trim()}');
         }
       }
     } finally {

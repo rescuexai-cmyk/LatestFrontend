@@ -111,31 +111,64 @@ class ApiClient {
             requestPath.contains('/api/auth/refresh') ||
             requestPath.contains('/api/auth/logout');
 
-        // Handle 401 Unauthorized - attempt token refresh
-        if (statusCode == 401 && !isAuthFlowRequest && _refreshToken != null && !_isRefreshing) {
-          _isRefreshing = true;
-          try {
-            final refreshResult = await _attemptTokenRefresh();
-            _isRefreshing = false;
+        // Guard against infinite refresh loop: if this request was already
+        // retried after a successful token refresh and is STILL returning 401,
+        // it's an endpoint-specific issue (e.g. permissions/scope), not a
+        // session-invalid scenario. Don't refresh again, don't force logout —
+        // just propagate the 401 to the caller so the affected feature can
+        // handle/show its own error without kicking the user out of the app.
+        final alreadyRetriedAfterRefresh =
+            error.requestOptions.extra['_retried_after_refresh'] == true;
 
-            if (refreshResult) {
-              _authErrorNotified = false;
-              // Retry the original request with new token
+        // Handle 401 Unauthorized - attempt token refresh (only once per request).
+        // IMPORTANT: refresh and retry are wrapped in SEPARATE try/catch blocks.
+        // - If refresh itself fails  -> session is invalid -> force logout.
+        // - If refresh succeeds but the retried request still 401s -> it's an
+        //   endpoint-specific issue (permissions/scope/backend bug) -> just
+        //   propagate the 401 to the caller, do NOT force logout.
+        if (statusCode == 401 &&
+            !isAuthFlowRequest &&
+            !alreadyRetriedAfterRefresh &&
+            _refreshToken != null &&
+            !_isRefreshing) {
+          _isRefreshing = true;
+          bool refreshSucceeded = false;
+          try {
+            refreshSucceeded = await _attemptTokenRefresh();
+          } catch (e) {
+            debugPrint('Token refresh failed: $e');
+          } finally {
+            _isRefreshing = false;
+          }
+
+          if (refreshSucceeded) {
+            _authErrorNotified = false;
+            // Retry the original request with new token, marked so a second
+            // 401 does NOT trigger another refresh (prevents infinite loop).
+            try {
               final opts = error.requestOptions;
               opts.headers['Authorization'] = 'Bearer $_authToken';
+              opts.extra['_retried_after_refresh'] = true;
               final response = await _dio.fetch(opts);
               return handler.resolve(response);
+            } catch (retryErr) {
+              // Retry failed (e.g. another 401 from a misbehaving endpoint).
+              // Do NOT trigger logout — the session itself is valid because
+              // the refresh just succeeded. Let the caller handle the error.
+              debugPrint('Retry after refresh failed: $retryErr');
+              // fall through to handler.next(error) below
             }
-          } catch (e) {
-            _isRefreshing = false;
-            debugPrint('Token refresh failed: $e');
+          } else {
+            // Refresh genuinely failed - session is invalid, trigger logout
+            if (!_authErrorNotified) {
+              _authErrorNotified = true;
+              _onAuthError?.call();
+            }
           }
-          // Refresh failed - trigger logout via callback
-          if (!_authErrorNotified) {
-            _authErrorNotified = true;
-            _onAuthError?.call();
-          }
-        } else if (statusCode == 401 && !isAuthFlowRequest && _refreshToken == null) {
+        } else if (statusCode == 401 &&
+            !isAuthFlowRequest &&
+            !alreadyRetriedAfterRefresh &&
+            _refreshToken == null) {
           if (!_authErrorNotified) {
             _authErrorNotified = true;
             _onAuthError?.call();

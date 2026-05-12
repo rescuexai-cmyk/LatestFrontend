@@ -12,12 +12,14 @@ import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/providers/settings_provider.dart';
 import 'core/models/user.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'core/services/server_config_service.dart';
 import 'core/services/push_notification_service.dart';
 import 'core/router/app_routes.dart';
 import 'features/auth/providers/auth_provider.dart';
 import 'features/driver/providers/driver_rides_provider.dart';
 import 'features/ride/providers/ride_booking_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 // supportedLanguages is already exported from settings_provider.dart
 
 /// Handle background messages (must be top-level function)
@@ -163,11 +165,20 @@ class _AppInitializerState extends State<_AppInitializer> {
 
   Future<void> _runInitWithTimeout() async {
     const timeout = Duration(seconds: 12);
+    final startTime = DateTime.now();
     try {
       await _doInit().timeout(timeout);
     } on TimeoutException {
       debugPrint('⚠️ Init timed out after 12s, showing app anyway');
     }
+
+    // Ensure splash screen holds long enough for the animation to finish (1.5s + 0.3s delay)
+    final elapsed = DateTime.now().difference(startTime);
+    final minimumSplashDuration = const Duration(milliseconds: 2200);
+    if (elapsed < minimumSplashDuration) {
+      await Future.delayed(minimumSplashDuration - elapsed);
+    }
+
     if (mounted) setState(() => _ready = true);
   }
 
@@ -245,8 +256,40 @@ class _AppInitializerState extends State<_AppInitializer> {
 }
 
 /// Splash screen shown during initialization.
-class _SplashScreen extends StatelessWidget {
+class _SplashScreen extends StatefulWidget {
   const _SplashScreen();
+
+  @override
+  State<_SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<int> _typingAnimation;
+  final String _tagline = 'Butter to your जाम';
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    );
+    _typingAnimation = IntTween(begin: 0, end: _tagline.length).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeIn),
+    );
+    
+    // Start animation slightly after logo appears
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) _controller.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -254,13 +297,41 @@ class _SplashScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Image.asset(
-            'assets/images/splash_logo.png',
-            width: screenWidth * 0.85,
-            fit: BoxFit.contain,
-          ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Image.asset(
+              'assets/images/splash_logo_clean.png',
+              width: screenWidth * 0.55,
+              fit: BoxFit.contain,
+            ),
+            const SizedBox(height: 8),
+            AnimatedBuilder(
+              animation: _typingAnimation,
+              builder: (context, child) {
+                // To keep the layout stable while typing, we can either use a fixed size box 
+                // or just let it type out centered. A fixed height helps avoid jumping.
+                return SizedBox(
+                  height: 30,
+                  child: Text(
+                    _tagline.substring(0, _typingAnimation.value),
+                    style: GoogleFonts.kiteOne(
+                      fontSize: 19.72,
+                      fontWeight: FontWeight.w400,
+                      color: const Color(0xFFFDF1DF),
+                      shadows: [
+                        const Shadow(
+                          offset: Offset(0, 2.18),
+                          blurRadius: 2.18,
+                          color: Color.fromRGBO(0, 0, 0, 0.25),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -630,12 +701,7 @@ class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
       );
     } else if (mounted) {
       setState(() => _retrying = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Still unreachable: ${ServerConfigService.apiUrl}'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, 'Still unreachable: ${ServerConfigService.apiUrl}');
     }
   }
 
@@ -655,11 +721,7 @@ class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
       );
     } else if (mounted) {
       setState(() => _retrying = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Cannot reach this server. Check IP and port.'),
-            backgroundColor: Colors.red),
-      );
+      AppMessenger.showErrorBanner(context, 'Cannot reach this server. Check IP and port.');
     }
   }
 

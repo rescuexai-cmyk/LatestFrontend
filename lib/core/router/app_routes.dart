@@ -2,6 +2,7 @@ class AppRoutes {
   AppRoutes._();
 
   // Auth routes
+  static const String welcomeOnboarding = '/welcome-onboarding';
   static const String login = '/login';
   static const String signup = '/signup';
   static const String otpVerification = '/otp-verification';

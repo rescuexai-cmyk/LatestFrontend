@@ -19,6 +19,7 @@ import '../../../chat/presentation/screens/ride_chat_screen.dart';
 import '../../../chat/providers/chat_provider.dart';
 import '../../providers/driver_rides_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class DriverActiveRideScreen extends ConsumerStatefulWidget {
   final String? initialRideId;
@@ -1242,12 +1243,7 @@ class _DriverActiveRideScreenState
         }
         debugPrint('❌ OTP verification failed: $errorMessage');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(errorMessage),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, errorMessage);
         }
       }
     } catch (e) {
@@ -1256,12 +1252,7 @@ class _DriverActiveRideScreenState
         _otpError = 'Network error. Please try again.';
         _otpLoading = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ref.tr('network_error_retry')),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('network_error_retry'));
     }
   }
 
@@ -1284,26 +1275,15 @@ class _DriverActiveRideScreenState
       });
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content:
-              Text('Arrival confirmed. Please confirm pickup to continue.'),
-          backgroundColor: Color(0xFF2196F3),
-        ),
-      );
+      AppMessenger.showErrorBanner(context, 'Arrival confirmed. Please confirm pickup to continue.');
     } catch (e) {
       debugPrint('Error marking arrived: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_extractErrorMessage(
+      AppMessenger.showErrorBanner(context, _extractErrorMessage(
             e,
             fallback:
                 'Unable to mark arrival. Move closer to pickup and try again.',
-          )),
-          backgroundColor: Colors.red,
-        ),
-      );
+          ));
     }
   }
 
@@ -1549,12 +1529,7 @@ class _DriverActiveRideScreenState
 
   void _confirmPickup() {
     if (!_hasArrivedAtPickup) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please mark "I\'ve Arrived" first.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, 'Please mark "I\'ve Arrived" first.');
       return;
     }
 
@@ -2075,9 +2050,7 @@ class _DriverActiveRideScreenState
     final phone = _normalizePhone(_riderPhone);
     if (phone.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('phone_unavailable'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('phone_unavailable'));
       return;
     }
     final Uri phoneUri = Uri(scheme: 'tel', path: phone);
@@ -2164,12 +2137,7 @@ class _DriverActiveRideScreenState
     // ALWAYS clear and navigate — UI must update even if API fails (network error, etc.)
     ref.read(driverRidesProvider.notifier).clearAcceptedRide();
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ref.tr('ride_cancelled_available')),
-          backgroundColor: const Color(0xFFD4956A),
-        ),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('ride_cancelled_available'));
       context.go(AppRoutes.driverHome);
     }
   }

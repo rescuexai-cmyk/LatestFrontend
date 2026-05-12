@@ -8,6 +8,7 @@ import '../../../../core/services/api_client.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/widgets/fare_breakdown_widget.dart';
 import '../widgets/lost_and_found_sheet.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class RideDetailsScreen extends ConsumerStatefulWidget {
   final String rideId;
@@ -422,9 +423,7 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
       );
     } catch (e) {
       debugPrint('Error submitting rating: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to submit rating'), backgroundColor: AppColors.error),
-      );
+      AppMessenger.showErrorBanner(context, 'Unable to submit rating');
     } finally {
       if (mounted) {
         setState(() => _isSubmittingRating = false);
@@ -483,9 +482,7 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
       await launchUrl(uri);
     } else {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Cannot open link'), backgroundColor: AppColors.error),
-        );
+        AppMessenger.showErrorBanner(context, 'Cannot open link');
       }
     }
   }

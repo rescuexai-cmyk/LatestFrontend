@@ -24,6 +24,7 @@ import '../../providers/ride_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../chat/providers/chat_provider.dart';
 import '../../../chat/presentation/screens/ride_chat_screen.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 // Ride phase enum
 enum _RidePhase { driverEnRoute, rideInProgress, completed }
@@ -699,11 +700,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
 
     if (pickup == null || drop == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(ref.tr('unable_find_driver')),
-              backgroundColor: Colors.orange),
-        );
+        AppMessenger.showErrorBanner(context, ref.tr('unable_find_driver'));
         context.go(AppRoutes.home);
       }
       return;
@@ -743,13 +740,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           ref
               .read(rideBookingProvider.notifier)
               .setRideDetails(rideId: rideId, otp: rideOtp);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(ref.tr('finding_another_driver')),
-              backgroundColor: Color(0xFFD4956A),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, ref.tr('finding_another_driver'));
           context.pushReplacement(AppRoutes.searchingDrivers);
         } else {
           _navigateHomeOnError('Invalid ride data');
@@ -766,9 +757,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
 
   void _navigateHomeOnError(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.orange),
-    );
+    AppMessenger.showErrorBanner(context, message);
     context.go(AppRoutes.home);
   }
 
@@ -1517,9 +1506,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     final phone = _normalizePhone(_driverPhone);
     if (phone.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('driver_phone_unavailable'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('driver_phone_unavailable'));
       return;
     }
     final uri = Uri(scheme: 'tel', path: phone);
@@ -2481,9 +2468,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
     } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('unable_open_dialer'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('unable_open_dialer'));
     }
   }
 
@@ -2502,9 +2487,7 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
       await Share.share(text.trim(), subject: 'Raahi Trip Safety');
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('unable_share_trip'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('unable_share_trip'));
     }
   }
 

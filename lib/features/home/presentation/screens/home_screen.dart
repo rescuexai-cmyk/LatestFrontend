@@ -9,6 +9,7 @@ import '../../../../core/widgets/active_ride_banner.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../auth/presentation/widgets/switch_account_sheet.dart';
 import '../../../driver/providers/driver_onboarding_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Figma: Select frame 390×848, background #F6EFD8
 class HomeScreen extends ConsumerStatefulWidget {
@@ -73,14 +74,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     } catch (e) {
       debugPrint('❌ _openDriversApp error: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '${ref.tr('driver_status_error')}: ${e.toString().replaceAll('Exception: ', '')}',
-            ),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, '${ref.tr('driver_status_error')}: ${e.toString().replaceAll('Exception: ', '')}',);
       }
     } finally {
       if (mounted) setState(() => _isCheckingDriver = false);
@@ -88,13 +82,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _showVerificationBanner(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: _primaryBtn,
-        duration: const Duration(seconds: 5),
-      ),
-    );
+    AppMessenger.showErrorBanner(context, message);
   }
 
   @override

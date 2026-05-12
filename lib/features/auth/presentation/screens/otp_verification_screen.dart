@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/auth_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class OTPVerificationScreen extends ConsumerStatefulWidget {
   final String phone;
@@ -98,9 +99,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
 
   Future<void> _verifyOTP() async {
     if (_otp.length != 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('enter_complete_otp'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('enter_complete_otp'));
       return;
     }
 
@@ -136,18 +135,14 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
             context.go(AppRoutes.home);
           }
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(result.error ?? 'Invalid OTP')),
-          );
+          AppMessenger.showErrorBanner(context, result.error ?? 'Invalid OTP');
           _clearOTP();
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
+        AppMessenger.showErrorBanner(context, 'Error: $e');
       }
     }
   }
@@ -258,20 +253,9 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
         if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
           // Extend cooldown on rate limit
           _resendTimer = 60; // Force 60 second wait
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(ref.tr('too_many_requests_60')),
-              backgroundColor: Colors.orange,
-              duration: Duration(seconds: 4),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, ref.tr('too_many_requests_60'));
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result.error ?? 'Failed to resend OTP'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, result.error ?? 'Failed to resend OTP');
         }
       }
     }

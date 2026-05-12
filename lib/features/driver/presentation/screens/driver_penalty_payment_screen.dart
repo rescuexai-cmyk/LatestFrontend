@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../../core/widgets/upi_app_icon.dart';
 import '../../providers/driver_penalty_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class DriverPenaltyPaymentScreen extends ConsumerStatefulWidget {
   const DriverPenaltyPaymentScreen({super.key});
@@ -60,23 +61,13 @@ class _DriverPenaltyPaymentScreenState
         setState(() => _paymentInitiated = true);
       } else {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No UPI app found. Please install a UPI app.'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, 'No UPI app found. Please install a UPI app.');
         }
       }
     } catch (e) {
       debugPrint('Failed to launch UPI: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to open UPI app: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Failed to open UPI app: $e');
       }
     }
   }
@@ -125,12 +116,7 @@ class _DriverPenaltyPaymentScreenState
         context.pop(true);
       } else if (mounted) {
         final error = ref.read(driverPenaltyProvider).error;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error ?? 'Failed to clear penalty'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, error ?? 'Failed to clear penalty');
       }
     } finally {
       if (mounted) {
@@ -163,12 +149,7 @@ class _DriverPenaltyPaymentScreenState
         context.pop(true);
       } else if (mounted) {
         final error = ref.read(driverPenaltyProvider).error;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error ?? 'Failed to clear penalty'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, error ?? 'Failed to clear penalty');
       }
     } finally {
       if (mounted) {
@@ -541,12 +522,7 @@ class _DriverPenaltyPaymentScreenState
                   onPressed: () {
                     Clipboard.setData(
                         ClipboardData(text: AppConfig.companyUpiId));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('UPI ID copied'),
-                        duration: Duration(seconds: 1),
-                      ),
-                    );
+                    AppMessenger.showErrorBanner(context, 'UPI ID copied');
                   },
                 ),
               ],

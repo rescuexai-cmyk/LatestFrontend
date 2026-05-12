@@ -8,6 +8,7 @@ import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class PaymentScreen extends ConsumerStatefulWidget {
   const PaymentScreen({super.key});
@@ -153,13 +154,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       if (await canLaunchUrl(appSpecificUrl)) {
         await launchUrl(appSpecificUrl, mode: LaunchMode.externalApplication);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Opening ${app['name']}...'),
-              backgroundColor: app['color'] as Color,
-              duration: const Duration(seconds: 2),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, 'Opening ${app['name']}...');
         }
       } else if (await canLaunchUrl(upiUrl)) {
         // Fallback to generic UPI intent
@@ -186,12 +181,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not open ${app['name']}: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Could not open ${app['name']}: $e');
       }
     }
   }
@@ -430,7 +420,24 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     );
   }
 
+  /// Resolve a UPI brand logo asset path for a known brand key/scheme/method id.
+  /// Returns null when no brand asset is available (caller should fall back to
+  /// a Material icon).
+  static String? _upiBrandAssetFor(String? key) {
+    if (key == null) return null;
+    final k = key.toLowerCase();
+    if (k.contains('gpay') || k.contains('google')) {
+      return 'assets/images/upi_gpay.png';
+    }
+    if (k.contains('phonepe')) return 'assets/images/upi_phonepe.png';
+    if (k.contains('paytm')) return 'assets/images/upi_paytm.png';
+    if (k.contains('bhim')) return 'assets/images/upi_bhim.png';
+    return null;
+  }
+
   Widget _buildDirectUpiAppButton(Map<String, dynamic> app) {
+    final brandAsset = _upiBrandAssetFor(app['scheme'] as String?) ??
+        _upiBrandAssetFor(app['name'] as String?);
     return GestureDetector(
       onTap: () => _launchDirectUpiPayment(app),
       child: Column(
@@ -453,11 +460,17 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                 ),
               ],
             ),
-            child: Icon(
-              app['icon'] as IconData,
-              color: app['color'] as Color,
-              size: 26,
-            ),
+            alignment: Alignment.center,
+            child: brandAsset != null
+                ? Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Image.asset(brandAsset, fit: BoxFit.contain),
+                  )
+                : Icon(
+                    app['icon'] as IconData,
+                    color: app['color'] as Color,
+                    size: 26,
+                  ),
           ),
           const SizedBox(height: 6),
           Text(
@@ -492,19 +505,30 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         ),
         child: Row(
           children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: (account['color'] as Color).withOpacity(0.15),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(
-                account['icon'] as IconData,
-                color: account['color'] as Color,
-                size: 24,
-              ),
-            ),
+            Builder(builder: (_) {
+              final brandAsset =
+                  _upiBrandAssetFor(account['methodId'] as String?) ??
+                      _upiBrandAssetFor(account['methodName'] as String?);
+              return Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: (account['color'] as Color).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                alignment: Alignment.center,
+                child: brandAsset != null
+                    ? Padding(
+                        padding: const EdgeInsets.all(7),
+                        child: Image.asset(brandAsset, fit: BoxFit.contain),
+                      )
+                    : Icon(
+                        account['icon'] as IconData,
+                        color: account['color'] as Color,
+                        size: 24,
+                      ),
+              );
+            }),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -565,9 +589,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                   _selectedPaymentMethod = 'cash';
                 }
               });
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('UPI account removed')),
-              );
+              AppMessenger.showErrorBanner(context, 'UPI account removed');
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             child: const Text('Remove', style: TextStyle(color: Colors.white)),
@@ -950,6 +972,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     _buildPaymentMethodTile(
                       icon: Icons.payment,
                       iconColor: const Color(0xFF00BAF2),
+                      iconAsset: 'assets/images/upi_paytm.png',
                       title: 'Paytm UPI',
                       subtitle: 'Assured ₹25-₹200 Cashback',
                       onTap: () {
@@ -962,6 +985,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     _buildPaymentMethodTile(
                       icon: Icons.g_mobiledata,
                       iconColor: const Color(0xFF4285F4),
+                      iconAsset: 'assets/images/upi_gpay.png',
                       title: 'GPay UPI',
                       onTap: () {
                         Navigator.pop(context);
@@ -973,6 +997,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     _buildPaymentMethodTile(
                       icon: Icons.phone_android,
                       iconColor: const Color(0xFF5F259F),
+                      iconAsset: 'assets/images/upi_phonepe.png',
                       title: 'PhonePe',
                       onTap: () {
                         Navigator.pop(context);
@@ -984,6 +1009,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     _buildPaymentMethodTile(
                       icon: Icons.account_balance,
                       iconColor: const Color(0xFF00695C),
+                      iconAsset: 'assets/images/upi_bhim.png',
                       title: 'BHIM UPI',
                       onTap: () {
                         Navigator.pop(context);
@@ -1007,10 +1033,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                       trailing: 'LINK',
                       trailingColor: const Color(0xFF2196F3),
                       onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text('Simpl integration coming soon')),
-                        );
+                        AppMessenger.showErrorBanner(context, 'Simpl integration coming soon');
                       },
                     ),
                     const SizedBox(height: 24),
@@ -1064,6 +1087,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     String? trailing,
     Color? trailingColor,
     required VoidCallback onTap,
+    String? iconAsset,
   }) {
     return GestureDetector(
       onTap: onTap,
@@ -1079,7 +1103,13 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                 color: iconColor.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Icon(icon, color: iconColor, size: 24),
+              alignment: Alignment.center,
+              child: iconAsset != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(7),
+                      child: Image.asset(iconAsset, fit: BoxFit.contain),
+                    )
+                  : Icon(icon, color: iconColor, size: 24),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -1247,10 +1277,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                   onPressed: () {
                     final code = voucherController.text.trim().toUpperCase();
                     if (code.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('Please enter a voucher code')),
-                      );
+                      AppMessenger.showErrorBanner(context, 'Please enter a voucher code');
                       return;
                     }
                     // Check voucher validity
@@ -1271,12 +1298,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                         ),
                       );
                     } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Invalid voucher code'),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
+                      AppMessenger.showErrorBanner(context, 'Invalid voucher code');
                     }
                   },
                   style: ElevatedButton.styleFrom(
@@ -1308,9 +1330,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                         _voucherDiscount = 0;
                       });
                       Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Voucher removed')),
-                      );
+                      AppMessenger.showErrorBanner(context, 'Voucher removed');
                     },
                     child: const Text(
                       'Remove Applied Voucher',
@@ -1644,12 +1664,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     if (hasActive) {
       debugPrint('⚠️ Active ride exists in provider — blocking duplicate');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('You already have an active ride'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'You already have an active ride');
       }
       return;
     }
@@ -1723,35 +1738,18 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         } else {
           debugPrint('❌ Invalid ride data received');
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Invalid ride data received from server'),
-                backgroundColor: Colors.red,
-              ),
-            );
+            AppMessenger.showErrorBanner(context, 'Invalid ride data received from server');
           }
         }
       } else {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                  responseData['error']?.toString() ?? 'Failed to create ride'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, responseData['error']?.toString() ?? 'Failed to create ride');
         }
       }
     } catch (e) {
       debugPrint('❌ Error creating ride: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-                'Error creating ride: ${e.toString().contains('Connection') ? 'Cannot connect to server' : e}'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Error creating ride: ${e.toString().contains('Connection') ? 'Cannot connect to server' : e}');
       }
     } finally {
       if (mounted) {

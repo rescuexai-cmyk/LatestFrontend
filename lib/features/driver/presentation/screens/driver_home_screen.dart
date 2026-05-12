@@ -28,6 +28,7 @@ import '../../providers/driver_rides_provider.dart';
 import '../../providers/driver_subscription_provider.dart';
 import '../../providers/driver_penalty_provider.dart';
 import '../ride_stack/ride_stack_sheet.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
   const DriverHomeScreen({super.key});
@@ -390,13 +391,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         await _clearSessionData();
         setState(() => _isConnecting = false);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(ref.tr('restore_session_failed')),
-              backgroundColor: Colors.orange,
-              duration: const Duration(seconds: 3),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, ref.tr('restore_session_failed'));
         }
         return;
       }
@@ -710,13 +705,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     if (displayPenalty <= 0) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-                'Could not load penalty details. Please try again or contact support.'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Could not load penalty details. Please try again or contact support.');
       }
       return false;
     }
@@ -751,9 +740,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             if (launched) {
               setSheetState(() => paymentInitiated = true);
             } else if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Unable to open UPI app')),
-              );
+              AppMessenger.showErrorBanner(context, 'Unable to open UPI app');
             }
           }
 
@@ -765,12 +752,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               Navigator.of(sheetCtx).pop(true);
             } else if (mounted) {
               final error = ref.read(driverPenaltyProvider).error;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(error ?? 'Failed to clear penalty'),
-                  backgroundColor: Colors.red,
-                ),
-              );
+              AppMessenger.showErrorBanner(context, error ?? 'Failed to clear penalty');
             }
           }
 
@@ -786,12 +768,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               Navigator.of(sheetCtx).pop(true);
             } else if (mounted) {
               final error = ref.read(driverPenaltyProvider).error;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(error ?? 'Failed to verify payment'),
-                  backgroundColor: Colors.red,
-                ),
-              );
+              AppMessenger.showErrorBanner(context, error ?? 'Failed to verify payment');
             }
           }
 
@@ -1404,13 +1381,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _offerCleanupTimer = null;
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ref.tr('you_are_offline')),
-          backgroundColor: Colors.grey,
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('you_are_offline'));
     }
   }
 
@@ -1959,13 +1930,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         // Remove from offers (handles both active and pending)
         ref.read(driverRidesProvider.notifier).removeRide(rideId);
         // Show subtle feedback
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(ref.tr('ride_taken_by_another')),
-            duration: const Duration(seconds: 2),
-            backgroundColor: Colors.orange,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, ref.tr('ride_taken_by_another'));
       }
     } else if (type == 'ride_cancelled') {
       final rideId = data['rideId'] as String? ?? data['ride_id'] as String?;
@@ -1978,14 +1943,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
         if (acceptedRide != null && acceptedRide.id == rideId) {
           notifier.clearAcceptedRide();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                  data['reason'] as String? ?? 'Ride was cancelled by rider'),
-              backgroundColor: Colors.orange,
-              duration: const Duration(seconds: 3),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, data['reason'] as String? ?? 'Ride was cancelled by rider');
         }
       }
     } else if (type == 'ride_completed') {
@@ -2014,14 +1972,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     // Block going online if backend says driver can't start rides
     if (!_isOnline && !_canStartRides) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(_verificationBannerMsg ??
-                'You are not verified to go online yet.'),
-            backgroundColor: const Color(0xFFD4956A),
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        AppMessenger.showErrorBanner(context, _verificationBannerMsg ??
+                'You are not verified to go online yet.');
       }
       return;
     }
@@ -2045,12 +1997,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       if (driverId == 'unknown' || driverId.isEmpty) {
         debugPrint('❌ Cannot go online - invalid driver ID');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(ref.tr('driver_id_error')),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, ref.tr('driver_id_error'));
         }
         return;
       }
@@ -2243,13 +2190,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         }
 
         debugPrint('❌ Failed to accept ride: $errorMessage');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMessage),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        AppMessenger.showErrorBanner(context, errorMessage);
       }
     } finally {
       if (mounted) {
@@ -4928,12 +4869,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                       }
                                     } catch (e) {
                                       if (context.mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(
-                                            content: Text('Failed: $e'),
-                                            backgroundColor: Colors.red,
-                                          ),
-                                        );
+                                        AppMessenger.showErrorBanner(context, 'Failed: $e');
                                       }
                                     }
                                   },
@@ -5854,13 +5790,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                           .catchError((_) {});
 
                       if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content:
-                                Text('${lang.nativeName} - Language changed'),
-                            duration: const Duration(seconds: 2),
-                          ),
-                        );
+                        AppMessenger.showErrorBanner(context, '${lang.nativeName} - Language changed');
                       }
                     },
                   );
@@ -5927,9 +5857,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(trOpeningTerms)),
-              );
+              AppMessenger.showErrorBanner(context, trOpeningTerms);
             },
             child: Text(trTermsPrivacy),
           ),
@@ -6024,9 +5952,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   ),
                   ElevatedButton(
                     onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text(trDialing)),
-                      );
+                      AppMessenger.showErrorBanner(context, trDialing);
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFD4956A),
@@ -6090,9 +6016,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               subtitle: Text(trChatWithAgent),
               onTap: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(trOpeningChat)),
-                );
+                AppMessenger.showErrorBanner(context, trOpeningChat);
               },
             ),
             ListTile(
@@ -6101,9 +6025,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               subtitle: const Text('support@raahi.com'),
               onTap: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(trOpeningEmail)),
-                );
+                AppMessenger.showErrorBanner(context, trOpeningEmail);
               },
             ),
             ListTile(
@@ -6112,9 +6034,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               subtitle: const Text('1800-123-4567'),
               onTap: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(trDialingSupport)),
-                );
+                AppMessenger.showErrorBanner(context, trDialingSupport);
               },
             ),
           ],
@@ -6269,9 +6189,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(trIssueReported)),
-                );
+                AppMessenger.showErrorBanner(context, trIssueReported);
               },
               style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFD4956A)),
@@ -6339,9 +6257,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(trFeedbackThanks)),
-                );
+                AppMessenger.showErrorBanner(context, trFeedbackThanks);
               },
               style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFD4956A)),

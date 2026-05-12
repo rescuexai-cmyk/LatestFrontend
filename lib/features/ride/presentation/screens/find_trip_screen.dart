@@ -30,6 +30,7 @@ import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class FindTripScreen extends ConsumerStatefulWidget {
   final bool autoOpenSearch;
@@ -922,12 +923,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     debugPrint('⚠️ Location unavailable - user must manually select pickup');
     
     // Show a message to the user
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Please enable location or tap to select pickup location'),
-        duration: Duration(seconds: 3),
-      ),
-    );
+    AppMessenger.showErrorBanner(context, 'Please enable location or tap to select pickup location');
   }
 
   /// Safely attempt route calculation - only if both locations are valid
@@ -1732,13 +1728,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               scheduleLabel: () => _scheduleChipLabel,
               onScheduleTap: () {
                 if (!_hasValidPickupAndDestination()) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Please choose both pickup and destination first.',
-                      ),
-                    ),
-                  );
+                  AppMessenger.showErrorBanner(context, 'Please choose both pickup and destination first.',);
                   return;
                 }
                 _showFindTripSchedulePicker(() => modalSetState(() {}));
@@ -1826,12 +1816,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                           _destinationController.text.trim().isNotEmpty) {
                         Navigator.pop(sheetContext);
                       } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                                'Please choose both pickup and destination.'),
-                          ),
-                        );
+                        AppMessenger.showErrorBanner(context, 'Please choose both pickup and destination.');
                       }
                     }
                   : null,
@@ -1844,13 +1829,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   (address, latLng, {bool? asPickup, int? stopIndex}) {
                 _locationWasSelected = true;
                 if (latLng == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                          'Could not get coordinates. Please try a different search.'),
-                      backgroundColor: Colors.orange,
-                    ),
-                  );
+                  AppMessenger.showErrorBanner(context, 'Could not get coordinates. Please try a different search.');
                   return;
                 }
                 if (stopIndex != null) {
@@ -1963,8 +1942,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildHeader(),
-                    const SizedBox(height: 4),
-                    _buildAddStopRow(),
                   ],
                 ),
               ),
@@ -2076,9 +2053,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               title: const Text('Offers & Promos'),
               onTap: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Offers coming soon')),
-                );
+                AppMessenger.showErrorBanner(context, 'Offers coming soon');
               },
             ),
             ListTile(
@@ -2230,9 +2205,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       title: 'QR Pay',
                       onTap: () {
                         Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('QR Pay selected')),
-                        );
+                        AppMessenger.showErrorBanner(context, 'QR Pay selected');
                       },
                     ),
                     const SizedBox(height: 24),
@@ -2316,10 +2289,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       title: 'Credit/Debit Card',
                       onTap: () {
                         Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text('Card payment selected')),
-                        );
+                        AppMessenger.showErrorBanner(context, 'Card payment selected');
                       },
                     ),
                     const Divider(color: Colors.grey, height: 1),
@@ -2463,9 +2433,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             onPressed: () {
               final upiId = controller.text.trim();
               if (upiId.isEmpty || !upiId.contains('@')) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Please enter a valid UPI ID')),
-                );
+                AppMessenger.showErrorBanner(context, 'Please enter a valid UPI ID');
                 return;
               }
               Navigator.pop(context);
@@ -2613,11 +2581,18 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
 
   /// Total route duration in minutes (drop-off pill + route badge).
+  /// Prefer Google Directions ETA so the pill, map badge and "Estimated
+  /// arrival" line stay consistent. Falls back to backend pricing duration
+  /// only if Google's value isn't available yet.
   int _routeMinutesForPill() {
+    if (_durationText.isNotEmpty) {
+      final m = RegExp(r'(\d+)').firstMatch(_durationText);
+      if (m != null) {
+        final v = int.tryParse(m.group(1)!) ?? 0;
+        if (v > 0) return v;
+      }
+    }
     if (_durationMinFromBackend > 0) return _durationMinFromBackend;
-    if (_durationText.isEmpty) return 0;
-    final m = RegExp(r'(\d+)').firstMatch(_durationText);
-    if (m != null) return int.tryParse(m.group(1)!) ?? 0;
     return 0;
   }
 
@@ -2739,26 +2714,48 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 height: pillH,
                 child: ColoredBox(
                   color: _figmaPillBrown,
+                  // Each text sits inside a fixed-height slot via FittedBox so
+                  // glyphs are optically centred regardless of font metrics.
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(
-                        showMinutes ? '$minutesForBrown' : '—',
-                        style: GoogleFonts.poppins(
-                          fontSize: math.min(25 * sx, 22),
-                          fontWeight: FontWeight.w500,
-                          height: 38 / 25,
-                          letterSpacing: -1.25,
-                          color: Colors.black,
+                      SizedBox(
+                        height: pillH * 0.46,
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.center,
+                          child: Text(
+                            showMinutes ? '$minutesForBrown' : '—',
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.poppins(
+                              fontSize: 25,
+                              fontWeight: FontWeight.w500,
+                              height: 1.0,
+                              letterSpacing: (showMinutes &&
+                                      minutesForBrown.toString().length > 1)
+                                  ? -1.25
+                                  : 0,
+                              color: Colors.black,
+                            ),
+                          ),
                         ),
                       ),
-                      Text(
-                        'min',
-                        style: GoogleFonts.poppins(
-                          fontSize: math.min(10 * sx, 10),
-                          fontWeight: FontWeight.w300,
-                          height: 15 / 10,
-                          color: Colors.black,
+                      SizedBox(height: pillH * 0.04),
+                      SizedBox(
+                        height: pillH * 0.22,
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.center,
+                          child: Text(
+                            'min',
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.poppins(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w300,
+                              height: 1.0,
+                              color: Colors.black,
+                            ),
+                          ),
                         ),
                       ),
                     ],
@@ -4663,11 +4660,7 @@ class _AddHomeSheetState extends ConsumerState<_AddHomeSheet> {
 
     if (latLng == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not get coordinates for this place.'),
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Could not get coordinates for this place.');
       }
       return;
     }
@@ -5726,9 +5719,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permission denied')),
-          );
+          AppMessenger.showErrorBanner(context, 'Location permission denied');
         }
         setState(() => _isLoading = false);
         return;
@@ -5791,9 +5782,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     } catch (e) {
       debugPrint('Error getting current location: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error getting location: $e')),
-        );
+        AppMessenger.showErrorBanner(context, 'Error getting location: $e');
       }
       setState(() => _isLoading = false);
     }
@@ -6734,11 +6723,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         }
       } else {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text(
-                    'Could not get location coordinates. Try a different search.')),
-          );
+          AppMessenger.showErrorBanner(context, 'Could not get location coordinates. Try a different search.');
         }
       }
       return;

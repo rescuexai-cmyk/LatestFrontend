@@ -7,6 +7,7 @@ import 'package:truecaller_sdk/truecaller_sdk.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/auth_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -25,9 +26,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _handleTruecallerLogin() async {
     if (_isSocialLoading) return;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Truecaller login is available on Android only.')),
-      );
+      AppMessenger.showErrorBanner(context, 'Truecaller login is available on Android only.');
       return;
     }
     final phone = await _askPhoneNumber(
@@ -41,9 +40,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     if (!mounted) return;
     if (!tcPayload.success) {
       setState(() => _isSocialLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tcPayload.error ?? 'Truecaller verification failed')),
-      );
+      AppMessenger.showErrorBanner(context, tcPayload.error ?? 'Truecaller verification failed');
       return;
     }
 
@@ -57,9 +54,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     setState(() => _isSocialLoading = false);
 
     if (!result.success) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result.error ?? 'Truecaller login failed')),
-      );
+      AppMessenger.showErrorBanner(context, result.error ?? 'Truecaller login failed');
       return;
     }
 
@@ -282,9 +277,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final message = raw.contains('GOOGLE_SERVER_CLIENT_ID')
           ? 'Google login not configured. Please set GOOGLE_SERVER_CLIENT_ID (Web client ID) in build settings.'
           : raw;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
+      AppMessenger.showErrorBanner(context, message);
       return;
     }
 

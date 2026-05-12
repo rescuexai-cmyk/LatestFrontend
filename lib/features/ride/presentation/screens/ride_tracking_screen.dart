@@ -22,6 +22,7 @@ import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/ride_provider.dart';
 import '../../providers/ride_booking_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class RideTrackingScreen extends ConsumerStatefulWidget {
   final String rideId;
@@ -578,13 +579,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     } catch (e) {
       debugPrint('Error submitting rating: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(ref.tr('failed_submit_rating')),
-            backgroundColor: AppColors.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, ref.tr('failed_submit_rating'));
       }
     } finally {
       if (mounted) {
@@ -596,9 +591,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
   Future<void> _callDriver() async {
     final phone = _resolveDriverPhone();
     if (phone.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('driver_phone_unavailable'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('driver_phone_unavailable'));
       return;
     }
 
@@ -607,11 +600,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
       await launchUrl(uri);
     } else {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(ref.tr('could_not_launch_dialer')),
-              backgroundColor: AppColors.error),
-        );
+        AppMessenger.showErrorBanner(context, ref.tr('could_not_launch_dialer'));
       }
     }
   }
@@ -647,9 +636,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
   Future<void> _messageDriver() async {
     if (_chatSheetOpen) return;
     if (_ride == null || _driver == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('driver_info_unavailable'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('driver_info_unavailable'));
       return;
     }
 
@@ -657,9 +644,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     final currentUserId = authState.user?.id ?? '';
 
     if (currentUserId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ref.tr('login_to_message'))),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('login_to_message'));
       return;
     }
 
@@ -713,11 +698,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
       } catch (e) {
         debugPrint('Error cancelling ride: $e');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text(ref.tr('failed_cancel_ride')),
-                backgroundColor: AppColors.error),
-          );
+          AppMessenger.showErrorBanner(context, ref.tr('failed_cancel_ride'));
         }
       }
     }
@@ -1373,13 +1354,7 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
         await launchUrl(appSpecificUrl, mode: LaunchMode.externalApplication);
         // Mark payment as initiated (user will confirm manually)
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Opening ${app['name']}...'),
-              backgroundColor: app['color'] as Color,
-              duration: const Duration(seconds: 2),
-            ),
-          );
+          AppMessenger.showErrorBanner(context, 'Opening ${app['name']}...');
         }
       } else if (await canLaunchUrl(upiUrl)) {
         // Fallback to generic UPI intent
@@ -1407,12 +1382,7 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not open ${app['name']}: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Could not open ${app['name']}: $e');
       }
     }
   }

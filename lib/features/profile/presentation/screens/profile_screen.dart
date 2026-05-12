@@ -20,6 +20,7 @@ import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
@@ -524,12 +525,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                       if (value && !pushEnabled) {
                         // Need to enable notifications first
                         if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(trEnableNotificationsFirst),
-                              backgroundColor: Colors.orange,
-                            ),
-                          );
+                          AppMessenger.showErrorBanner(context, trEnableNotificationsFirst);
                         }
                         return;
                       }
@@ -807,7 +803,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                     child: GestureDetector(
                       onTap: () async {
                         Navigator.pop(context);
-                        await _showAddPlaceScreen(context);
+                        if (!mounted) return;
+                        await _showAddPlaceScreen(this.context);
                       },
                       child: Container(
                         padding: const EdgeInsets.all(16),
@@ -1009,9 +1006,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                 setState(() {});
                 await _savePlacesToPrefs();
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(ref.tr('place_deleted'))),
-                  );
+                  AppMessenger.showErrorBanner(context, ref.tr('place_deleted'));
                 }
               }
             },
@@ -1027,7 +1022,24 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     bool isSearching = false;
     LatLng? userLocation;
 
-    // Try to get user's current location for better search results
+    // Show a non-dismissible loader while we acquire a GPS fix so the user
+    // knows the app is working (the fix can take a few seconds).
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      builder: (_) => const Center(
+        child: SizedBox(
+          width: 56,
+          height: 56,
+          child: CircularProgressIndicator(
+            strokeWidth: 3,
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFD4956A)),
+          ),
+        ),
+      ),
+    );
+
     try {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.medium,
@@ -1036,6 +1048,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     } catch (e) {
       debugPrint('Could not get user location: $e');
     }
+
+    if (!mounted) return;
+    Navigator.of(this.context, rootNavigator: true).pop();
 
     if (!context.mounted) return;
 
@@ -1191,14 +1206,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
                   if (context.mounted) {
                     Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('${newPlace['name']} saved!'),
-                        backgroundColor: const Color(0xFF4CAF50),
-                      ),
-                    );
-                    _openSavedPlaces(context);
                   }
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text('${newPlace['name']} saved!'),
+                      backgroundColor: const Color(0xFF4CAF50),
+                    ),
+                  );
+                  _openSavedPlaces(this.context);
                 }
 
                 return Column(
@@ -1274,7 +1290,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                       child: GestureDetector(
                         onTap: () async {
                           Navigator.pop(context);
-                          await _showMapPicker(context);
+                          if (!mounted) return;
+                          await _showMapPicker(this.context);
                         },
                         child: Container(
                           padding: const EdgeInsets.all(14),
@@ -1820,15 +1837,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
           );
     }
 
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$placeName saved!'),
-          backgroundColor: const Color(0xFF4CAF50),
-        ),
-      );
-      _openSavedPlaces(context);
-    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(this.context).showSnackBar(
+      SnackBar(
+        content: Text('$placeName saved!'),
+        backgroundColor: const Color(0xFF4CAF50),
+      ),
+    );
+    _openSavedPlaces(this.context);
   }
 
   Future<void> _openNotificationPreferences(BuildContext context) async {
@@ -1886,11 +1902,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text(ref.tr('cannot_open_link')),
-            backgroundColor: AppColors.error),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('cannot_open_link'));
     }
   }
 }

@@ -6,8 +6,10 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
+import '../../../auth/providers/auth_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class DriverOnboardingScreen extends ConsumerStatefulWidget {
   final bool isUpdateMode;
@@ -275,11 +277,23 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
   @override
   void initState() {
     super.initState();
-    // Pre-fill with user's existing email if available
+    // Pre-fill email: backend onboarding state first, then auth profile (e.g.
+    // Google sign-in email) when driver onboarding runs for the first time.
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final onboardingState = ref.read(driverOnboardingProvider);
-      if (onboardingState.email != null && onboardingState.email!.isNotEmpty) {
-        _emailController.text = onboardingState.email!;
+      final authUser = ref.read(currentUserProvider);
+
+      String? emailToFill;
+      if (onboardingState.email != null &&
+          onboardingState.email!.trim().isNotEmpty) {
+        emailToFill = onboardingState.email!.trim();
+      } else if (authUser?.email.trim().isNotEmpty == true) {
+        emailToFill = authUser!.email.trim();
+      }
+
+      if (emailToFill != null && emailToFill.isNotEmpty) {
+        setState(() => _emailController.text = emailToFill!);
       }
     });
   }
@@ -302,23 +316,13 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     
     if (email.isEmpty) {
       setState(() => _isEmailValid = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ref.tr('enter_email_prompt')),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('enter_email_prompt'));
       return;
     }
 
     if (!_validateEmail(email)) {
       setState(() => _isEmailValid = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ref.tr('enter_valid_email')),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('enter_valid_email'));
       return;
     }
 
@@ -337,23 +341,13 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
         if (success) {
           widget.onContinue();
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(ref.tr('email_save_failed')),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppMessenger.showErrorBanner(context, ref.tr('email_save_failed'));
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isSavingEmail = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${e.toString().replaceAll('Exception: ', '')}'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Error: ${e.toString().replaceAll('Exception: ', '')}');
       }
     }
   }
@@ -826,12 +820,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
       debugPrint('❌ Submit error: $e');
       if (mounted) {
         setState(() => _isSubmitting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${e.toString()}'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Error: ${e.toString()}');
         widget.onContinue();
       }
     }
@@ -1244,12 +1233,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to pick image: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Failed to pick image: $e');
       }
     }
   }
@@ -1260,12 +1244,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
     final imagePath = _uploadedPaths[docId];
     
     if (imagePath == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(ref.tr('please_select_image')),
-          backgroundColor: Colors.orange,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, ref.tr('please_select_image'));
       return;
     }
 

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import 'error_banner.dart';
 import 'figma_square_back_button.dart';
 
 /// Shared "schedule for later" bottom sheet — Figma: mandala + gradient, 3-column wheel.
@@ -634,63 +635,11 @@ class _ScheduleRidePickerSheetState extends State<ScheduleRidePickerSheet> {
                   const SizedBox(height: 8),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: Container(
-                        padding: const EdgeInsets.only(
-                          left: 12,
-                          right: 4,
-                          top: 5,
-                          bottom: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color:
-                              const Color.fromRGBO(209, 69, 68, 0.1),
-                          borderRadius: BorderRadius.circular(172),
-                        ),
-                        child: Row(
-                          children: [
-                            const Expanded(
-                              child: Text(
-                                'Please Select a time at least 15 mins from now',
-                                style: TextStyle(
-                                  fontFamily: 'Poppins',
-                                  fontWeight: FontWeight.w400,
-                                  fontSize: 14,
-                                  height: 21 / 14,
-                                  color: Color(0xFFD14544),
-                                ),
-                              ),
-                            ),
-                            InkWell(
-                              onTap: () =>
-                                  setState(() => _showValidationBanner = false),
-                              borderRadius: BorderRadius.circular(12),
-                              child: SizedBox(
-                                width: 24,
-                                height: 24,
-                                child: Center(
-                                  child: Container(
-                                    width: 24,
-                                    height: 24,
-                                    alignment: Alignment.center,
-                                    decoration: BoxDecoration(
-                                      color: const Color.fromRGBO(
-                                          209, 69, 68, 0.12),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: const Icon(
-                                      Icons.close,
-                                      size: 14,
-                                      color: Color(0xFFD14544),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                    child: ErrorBanner(
+                      message:
+                          'Please Select a time at least 15 mins from now',
+                      onDismiss: () =>
+                          setState(() => _showValidationBanner = false),
                     ),
                   ),
                 ],

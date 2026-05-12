@@ -7,7 +7,9 @@ import '../../features/auth/presentation/screens/signup_screen.dart';
 import '../../features/auth/presentation/screens/otp_verification_screen.dart';
 import '../../features/auth/presentation/screens/terms_screen.dart';
 import '../../features/auth/presentation/screens/name_entry_screen.dart';
+import '../../features/auth/presentation/screens/welcome_onboarding_screen.dart';
 import '../../features/auth/providers/auth_provider.dart';
+import '../../features/auth/providers/welcome_onboarding_provider.dart';
 import '../../features/home/presentation/screens/home_screen.dart';
 import '../../features/home/presentation/screens/services_screen.dart';
 import '../../features/history/presentation/screens/history_screen.dart';
@@ -41,10 +43,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
   final isAuthenticated = ref.watch(isAuthenticatedProvider);
   final pendingOnboarding = ref.watch(pendingOnboardingProvider);
   final pendingPhoneLink = ref.watch(pendingPhoneLinkProvider);
+  final hasSeenWelcome = ref.watch(welcomeOnboardingProvider);
   
   // Determine initial location based on server config state
   final initialLocation = ServerConfigService.isConfigured
-      ? AppRoutes.login
+      ? (hasSeenWelcome ? AppRoutes.login : AppRoutes.welcomeOnboarding)
       : AppRoutes.serverConfig;
 
   return GoRouter(
@@ -97,9 +100,21 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       }
 
       // If not authenticated and trying to access protected routes, go to login
-      if (!isAuthenticated && !isAuthRoute) {
-        debugPrint('🔀 Redirecting to login (not authenticated)');
-        return AppRoutes.login;
+      // But if they haven't seen the welcome onboarding, send them there first
+      if (!isAuthenticated) {
+        if (!hasSeenWelcome && currentLocation != AppRoutes.welcomeOnboarding) {
+          debugPrint('🔀 Redirecting to welcome onboarding (first time user)');
+          return AppRoutes.welcomeOnboarding;
+        }
+        
+        if (hasSeenWelcome && currentLocation == AppRoutes.welcomeOnboarding) {
+           return AppRoutes.login;
+        }
+
+        if (!isAuthRoute && currentLocation != AppRoutes.welcomeOnboarding) {
+          debugPrint('🔀 Redirecting to login (not authenticated)');
+          return AppRoutes.login;
+        }
       }
 
       if (isAuthenticated && pendingPhoneLink && !isPhoneLinkRoute) {
@@ -127,6 +142,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
     },
     routes: [
       // Auth routes
+      GoRoute(
+        path: AppRoutes.welcomeOnboarding,
+        name: 'welcomeOnboarding',
+        builder: (context, state) => const WelcomeOnboardingScreen(),
+      ),
       GoRoute(
         path: AppRoutes.login,
         name: 'login',

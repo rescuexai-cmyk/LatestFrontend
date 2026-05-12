@@ -8,6 +8,7 @@ import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Screen for managing/updating driver documents.
 /// Shows all uploaded documents with status, expiry warnings, and re-upload options.
@@ -147,12 +148,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
         _pendingUploadDocTypes.add(backendId);
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$title re-uploaded. Status changed to Pending.'),
-          backgroundColor: _success,
-        ),
-      );
+      AppMessenger.showErrorBanner(context, '$title re-uploaded. Status changed to Pending.');
       await _refreshStatus();
     } catch (e) {
       if (mounted) {

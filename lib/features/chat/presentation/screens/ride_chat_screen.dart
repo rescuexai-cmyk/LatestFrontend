@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../widgets/ride_chat_widget.dart';
 import '../../providers/chat_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class RideChatScreen extends ConsumerWidget {
   final String rideId;
@@ -128,12 +129,7 @@ class RideChatScreen extends ConsumerWidget {
 
   void _callUser(BuildContext context, WidgetRef ref) {
     // You can integrate url_launcher here to make calls
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(ref.tr('calling').replaceAll('{name}', otherUserName)),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+    AppMessenger.showErrorBanner(context, ref.tr('calling').replaceAll('{name}', otherUserName));
   }
 }
 

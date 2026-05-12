@@ -7,6 +7,7 @@ import '../../../../core/router/app_routes.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Welcome screen shown after driver completes onboarding.
 /// Shows verification status, document checklist, rejection reasons,
@@ -496,17 +497,13 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
     if (email.isNotEmpty) {
       final emailRegex = RegExp(r'^[\w\-.]+@([\w\-]+\.)+[\w\-]{2,4}$');
       if (!emailRegex.hasMatch(email)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Please enter a valid email address'), backgroundColor: _error),
-        );
+        AppMessenger.showErrorBanner(context, 'Please enter a valid email address');
         return;
       }
     }
 
     if (aadhaar.isNotEmpty && aadhaar.length != 12) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Aadhaar number must be exactly 12 digits'), backgroundColor: _error),
-      );
+      AppMessenger.showErrorBanner(context, 'Aadhaar number must be exactly 12 digits');
       return;
     }
 
@@ -549,12 +546,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isSavingDetails = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${e.toString().replaceAll('Exception: ', '')}'),
-            backgroundColor: _error,
-          ),
-        );
+        AppMessenger.showErrorBanner(context, 'Error: ${e.toString().replaceAll('Exception: ', '')}');
       }
     }
   }
@@ -1082,23 +1074,17 @@ class _EditDetailsSheetState extends ConsumerState<_EditDetailsSheet> {
     final vehicleModel = _showVehicle ? _vehicleModelController.text.trim() : '';
 
     if (email.isEmpty && aadhaar.isEmpty && vehicleNumber.isEmpty && vehicleModel.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please update at least one field')),
-      );
+      AppMessenger.showErrorBanner(context, 'Please update at least one field');
       return;
     }
 
     if (aadhaar.isNotEmpty && !RegExp(r'^\d{12}$').hasMatch(aadhaar)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Aadhaar must be exactly 12 digits')),
-      );
+      AppMessenger.showErrorBanner(context, 'Aadhaar must be exactly 12 digits');
       return;
     }
 
     if (email.isNotEmpty && !RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a valid email address')),
-      );
+      AppMessenger.showErrorBanner(context, 'Please enter a valid email address');
       return;
     }
 
@@ -1133,16 +1119,12 @@ class _EditDetailsSheetState extends ConsumerState<_EditDetailsSheet> {
         Navigator.pop(context);
         notifier.fetchOnboardingStatus();
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to update details.'), backgroundColor: Colors.red),
-        );
+        AppMessenger.showErrorBanner(context, 'Failed to update details.');
       }
     } catch (e) {
       if (!mounted) return;
       setState(() => _isSubmitting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
-      );
+      AppMessenger.showErrorBanner(context, 'Error: $e');
     }
   }
 
