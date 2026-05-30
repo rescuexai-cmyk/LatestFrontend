@@ -24,6 +24,15 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
   bool _isLoading = true;
   String? _error;
 
+  /// `go()` to this screen leaves no stack entry; pop would exit the app.
+  void _exitHistory(BuildContext context) {
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go(AppRoutes.home);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -79,18 +88,30 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
   Widget build(BuildContext context) {
     final tr = ref.read(settingsProvider.notifier).tr;
 
-    return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
-        title: Text(tr('ride_history')),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadRides,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          _exitHistory(context);
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+            onPressed: () => _exitHistory(context),
           ),
-        ],
-      ),
-      body: Stack(
+          title: Text(tr('ride_history')),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _loadRides,
+            ),
+          ],
+        ),
+        body: Stack(
         children: [
           _buildBody(),
           // Active ride banner at bottom
@@ -102,6 +123,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           ),
         ],
       ),
+      ),
     );
   }
 
@@ -111,7 +133,12 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     if (_isLoading) {
       return UberShimmer(
         child: ListView.separated(
-          padding: const EdgeInsets.all(16),
+          padding: EdgeInsets.fromLTRB(
+            16,
+            16,
+            16,
+            16 + MediaQuery.of(context).viewPadding.bottom,
+          ),
           itemCount: 6,
           separatorBuilder: (_, __) => const SizedBox(height: 12),
           itemBuilder: (_, __) => Container(

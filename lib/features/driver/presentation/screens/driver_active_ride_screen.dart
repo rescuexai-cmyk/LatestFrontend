@@ -20,6 +20,7 @@ import '../../../chat/providers/chat_provider.dart';
 import '../../providers/driver_rides_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import '../../../../core/utils/cab_map_icon.dart';
 
 class DriverActiveRideScreen extends ConsumerStatefulWidget {
   final String? initialRideId;
@@ -42,8 +43,8 @@ class _DriverActiveRideScreenState
   final Completer<GoogleMapController> _mapController = Completer();
   final DirectionsService _directionsService = DirectionsService();
 
-  // Earnings - fetched from API, 0 until real data loads
-  double _todayEarnings = 0.0;
+  // Wallet balance shown in header (from GET /api/driver/wallet).
+  double _walletBalance = 0.0;
   final String _todayDate = '26.07.2025';
 
   // Ride data - will be populated from provider
@@ -88,11 +89,6 @@ class _DriverActiveRideScreenState
   bool _isPickedUp = false; // false = going to pickup, true = going to drop
   String _rideStatus = 'DRIVER_ASSIGNED';
 
-  // Fare adjustments (driver input at ride completion)
-  final TextEditingController _tollsController = TextEditingController();
-  final TextEditingController _parkingController = TextEditingController();
-  final TextEditingController _extraStopsController = TextEditingController();
-
   // Chat state
   final List<Map<String, dynamic>> _chatMessages = [];
   final Set<String> _chatMessageIds = {}; // For deduplication
@@ -113,6 +109,8 @@ class _DriverActiveRideScreenState
   bool _chatSheetOpen = false;
   bool _autoChatHandled = false;
   bool _pendingPushChatOpen = false;
+  bool _exitingActiveRide = false;
+  bool _rideCompletionFlowActive = false;
   String? _activeRideIdForChat;
   StreamSubscription<Map<String, dynamic>>? _chatOpenSubscription;
 
@@ -134,7 +132,7 @@ class _DriverActiveRideScreenState
     _calculateRoute();
     _subscribeToRideCancellation();
     _initializeDriverLocation();
-    _fetchEarnings();
+    _fetchWalletBalance();
     _startLocationStream();
     _subscribeToNotificationChatOpens();
     // Sync ride status so we show correct UI when returning (OTP already verified)
@@ -159,10 +157,11 @@ class _DriverActiveRideScreenState
       // Uber/Rapido style: ~40-50 logical pixels, with device pixel ratio for crisp rendering
       const config =
           ImageConfiguration(size: Size(44, 44), devicePixelRatio: 2.5);
-      _vehicleIcon = await BitmapDescriptor.asset(
-        config,
-        'assets/map_icons/icon_cab.png',
-      );
+      _vehicleIcon = await loadCabMapIconProcessed(
+            'assets/map_icons/icon_cab.png',
+            debugLabel: 'driver_active_ride cab',
+          ) ??
+          await BitmapDescriptor.asset(config, 'assets/map_icons/icon_cab.png');
       if (mounted) _setupMapElements();
     } catch (e) {
       debugPrint('Vehicle icon load failed: $e');
@@ -280,6 +279,14 @@ class _DriverActiveRideScreenState
           _riderPhone = backendRiderPhone;
         });
       }
+      final backendRiderName = resolveRidePassengerDisplayNameFromRideJson(data);
+      if (backendRiderName != null &&
+          backendRiderName.isNotEmpty &&
+          isPlaceholderRidePassengerName(_riderName)) {
+        setState(() {
+          _riderName = backendRiderName;
+        });
+      }
       if (backendFare > 0 || backendPayment.isNotEmpty) {
         setState(() {
           if (backendFare > 0) _earning = backendFare;
@@ -309,6 +316,12 @@ class _DriverActiveRideScreenState
         _updateRealtimeEtaTexts();
         debugPrint('📡 Ride already started — skipping OTP screen');
         _calculateRoute(); // Recalc route for pickup→drop
+      } else if (status.contains('CANCEL')) {
+        _exitAfterRiderCancellation(
+          reason: data['cancelReason']?.toString() ??
+              data['reason']?.toString() ??
+              ref.tr('ride_cancelled_by_rider'),
+        );
       } else if (status.isNotEmpty) {
         setState(() {
           _rideStatus = status;
@@ -330,20 +343,40 @@ class _DriverActiveRideScreenState
     return _normalizePhone(raw);
   }
 
-  /// Fetch real driver earnings from API (shows 0 until loaded)
-  Future<void> _fetchEarnings() async {
+  /// Wallet available balance for header badge.
+  Future<void> _fetchWalletBalance() async {
     try {
-      final data = await apiClient.getDriverEarnings();
+      final resp = await apiClient.getDriverWallet();
       if (!mounted) return;
-      if (data['success'] == true) {
-        final earnings = data['data'] as Map<String, dynamic>? ?? {};
-        setState(() {
-          _todayEarnings = (earnings['today']?['amount'] ?? 0).toDouble();
-        });
+      if (resp['success'] == true) {
+        final payload = resp['data'] as Map<String, dynamic>? ?? {};
+        final balDyn = payload['balance'];
+        double available = 0;
+        if (balDyn is Map) {
+          final bm = Map<String, dynamic>.from(balDyn as Map);
+          final a = bm['available'] ?? bm['balance'];
+          available = _parseAmount(a);
+        } else {
+          available = _parseAmount(balDyn);
+        }
+        if (available == 0) {
+          available = _parseAmount(
+            payload['availableBalance'] ??
+                payload['available_balance'] ??
+                payload['balance'],
+          );
+        }
+        setState(() => _walletBalance = available);
       }
     } catch (_) {
       // Keep 0 on error
     }
+  }
+
+  double _parseAmount(dynamic v) {
+    if (v == null) return 0;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString()) ?? 0;
   }
 
   /// Initialize driver's actual location using GPS and update backend
@@ -427,9 +460,6 @@ class _DriverActiveRideScreenState
     _positionStream?.cancel();
     _chatOpenSubscription?.cancel();
     _otpController.dispose();
-    _tollsController.dispose();
-    _parkingController.dispose();
-    _extraStopsController.dispose();
     _chatController.dispose();
     _chatScrollController.dispose();
     _unsubscribeChat?.call();
@@ -464,110 +494,33 @@ class _DriverActiveRideScreenState
     });
   }
 
-  /// Subscribe to ride cancellation events from rider
+  /// Subscribe to ride cancellation events from rider (Socket.io path).
   void _subscribeToRideCancellation() {
     _unsubscribeRideCancelled =
         webSocketService.subscribe('ride_cancelled', (message) {
       final data = message.data as Map<String, dynamic>?;
       if (data == null) return;
 
-      final cancelledRideId = data['rideId'] as String? ?? '';
-
-      // Check if this cancellation is for our current ride
-      if (cancelledRideId == _rideId) {
-        debugPrint('⚠️ Ride $_rideId was cancelled by rider');
-        _handleRideCancelledByRider(data);
+      final cancelledRideId = rideIdFromRealtimePayload(data);
+      if (cancelledRideId != null && cancelledRideId == _rideId) {
+        debugPrint('⚠️ Ride $_rideId was cancelled by rider (socket)');
+        _exitAfterRiderCancellation(
+          reason: data['reason'] as String? ??
+              data['cancelReason'] as String? ??
+              ref.tr('ride_cancelled_by_rider'),
+        );
       }
     });
   }
 
-  /// Handle when rider cancels the ride
-  void _handleRideCancelledByRider(Map<String, dynamic> data) {
-    if (!mounted) return;
+  /// Clear ride state and return driver to home when rider cancels.
+  void _exitAfterRiderCancellation({required String reason}) {
+    if (!mounted || _exitingActiveRide || _rideCompletionFlowActive) return;
+    _exitingActiveRide = true;
 
-    final reason = data['reason'] as String? ?? 'Rider cancelled the ride';
-
-    // Clear the accepted ride from provider
     ref.read(driverRidesProvider.notifier).clearAcceptedRide();
-
-    // Show alert dialog to driver
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.red.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Icon(Icons.cancel, color: Colors.red, size: 28),
-            ),
-            const SizedBox(width: 12),
-            Text(ref.tr('ride_cancelled')),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              reason,
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF3E0),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.info_outline,
-                      color: Color(0xFFFF9800), size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      ref.tr('available_new_requests'),
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF5D4037),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                context.go(AppRoutes.driverHome);
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1A1A1A),
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-              child: const Text(
-                'Back to Home',
-                style: TextStyle(color: Colors.white, fontSize: 16),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
+    AppMessenger.showDriverErrorBanner(context, reason);
+    context.go(AppRoutes.driverHome);
   }
 
   void _subscribeToChatMessages() {
@@ -797,11 +750,9 @@ class _DriverActiveRideScreenState
         _passengerId = (data['passengerId']?.toString() ??
             passenger?['id']?.toString() ??
             _passengerId);
-        final firstName = passenger?['firstName']?.toString() ?? '';
-        final lastName = passenger?['lastName']?.toString() ?? '';
-        final passengerName = '$firstName $lastName'.trim();
-        if (passengerName.isNotEmpty) {
-          _riderName = passengerName;
+        final resolvedName = resolveRidePassengerDisplayNameFromRideJson(data);
+        if (resolvedName != null && resolvedName.isNotEmpty) {
+          _riderName = resolvedName;
         }
         final backendPhone = _normalizePhone(
           passenger?['phone']?.toString() ??
@@ -1243,7 +1194,7 @@ class _DriverActiveRideScreenState
         }
         debugPrint('❌ OTP verification failed: $errorMessage');
         if (mounted) {
-          AppMessenger.showErrorBanner(context, errorMessage);
+          AppMessenger.showDriverErrorBanner(context, errorMessage);
         }
       }
     } catch (e) {
@@ -1252,7 +1203,7 @@ class _DriverActiveRideScreenState
         _otpError = 'Network error. Please try again.';
         _otpLoading = false;
       });
-      AppMessenger.showErrorBanner(context, ref.tr('network_error_retry'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('network_error_retry'));
     }
   }
 
@@ -1275,11 +1226,11 @@ class _DriverActiveRideScreenState
       });
 
       if (!mounted) return;
-      AppMessenger.showErrorBanner(context, 'Arrival confirmed. Please confirm pickup to continue.');
+      AppMessenger.showDriverErrorBanner(context, 'Arrival confirmed. Please confirm pickup to continue.');
     } catch (e) {
       debugPrint('Error marking arrived: $e');
       if (!mounted) return;
-      AppMessenger.showErrorBanner(context, _extractErrorMessage(
+      AppMessenger.showDriverErrorBanner(context, _extractErrorMessage(
             e,
             fallback:
                 'Unable to mark arrival. Move closer to pickup and try again.',
@@ -1529,7 +1480,7 @@ class _DriverActiveRideScreenState
 
   void _confirmPickup() {
     if (!_hasArrivedAtPickup) {
-      AppMessenger.showErrorBanner(context, 'Please mark "I\'ve Arrived" first.');
+      AppMessenger.showDriverErrorBanner(context, 'Please mark "I\'ve Arrived" first.');
       return;
     }
 
@@ -1585,7 +1536,7 @@ class _DriverActiveRideScreenState
               Navigator.pop(context);
               // Complete on backend first (no adjustments for prepaid)
               if (_paymentMethod.toLowerCase() == 'cash') {
-                _showCashPaymentQR(); // Payment sheet has adjustment fields
+                _showCashPaymentQR();
               } else {
                 _completeRideOnBackend(); // Prepaid - complete with no adjustments
                 _showRideSummary();
@@ -1762,66 +1713,6 @@ class _DriverActiveRideScreenState
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
-
-              // Additional charges (optional)
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Row(
-                  children: [
-                    const Icon(Icons.add_road,
-                        size: 20, color: Color(0xFF888888)),
-                    const SizedBox(width: 8),
-                    Text(ref.tr('add_charges'),
-                        style: const TextStyle(
-                            fontSize: 14, color: Color(0xFF666666))),
-                  ],
-                ),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Column(
-                      children: [
-                        TextField(
-                          controller: _tollsController,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            labelText: 'Tolls (₹)',
-                            hintText: '0',
-                            border: OutlineInputBorder(),
-                            contentPadding: EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 10),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _parkingController,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            labelText: 'Parking fees (₹)',
-                            hintText: '0',
-                            border: OutlineInputBorder(),
-                            contentPadding: EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 10),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _extraStopsController,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            labelText: 'Extra stops (count)',
-                            hintText: '0',
-                            border: OutlineInputBorder(),
-                            contentPadding: EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 10),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
               const SizedBox(height: 12),
               // Cash received option
               Container(
@@ -1856,7 +1747,7 @@ class _DriverActiveRideScreenState
                   onPressed: () {
                     debugPrint('💰 Driver: Payment Received button clicked');
                     Navigator.pop(context);
-                    _completeRideWithAdjustments();
+                    _completeRideOnBackend();
                     _showRideSummary();
                   },
                   style: ElevatedButton.styleFrom(
@@ -1922,57 +1813,43 @@ class _DriverActiveRideScreenState
     }
   }
 
+  /// Prefer popping the stacked [DriverHomeScreen] underneath so in-memory ride
+  /// state (accepted ride card) survives; fall back when there is nothing to pop.
+  void _returnToDriverHomeLeavingStackWhenPossible() {
+    if (!mounted) return;
+    final router = GoRouter.of(context);
+    if (router.canPop()) {
+      context.pop();
+    } else {
+      context.go(AppRoutes.driverHome);
+    }
+  }
+
   Future<void> _refreshDriverFinancialsAfterRide() async {
     try {
-      final walletResp = await apiClient.getDriverWallet();
-      final walletData = walletResp['data'] as Map<String, dynamic>? ?? {};
-      final balanceData = walletData['balance'] as Map<String, dynamic>? ?? {};
-      final available = (balanceData['available'] as num?)?.toDouble();
-      if (available != null) {
-        debugPrint(
-            '💰 Wallet refreshed after ride completion: available=₹${available.toStringAsFixed(2)}');
-      }
+      await _fetchWalletBalance();
+      debugPrint(
+          '💰 Wallet refreshed after ride completion: available=₹${_walletBalance.toStringAsFixed(2)}');
     } catch (e) {
       debugPrint('⚠️ Wallet refresh after ride completion failed: $e');
     }
-
-    try {
-      await _fetchEarnings();
-      debugPrint('💰 Earnings refreshed after ride completion');
-    } catch (e) {
-      debugPrint('⚠️ Earnings refresh after ride completion failed: $e');
-    }
-  }
-
-  void _completeRideWithAdjustments() {
-    final tollsStr = _tollsController.text.trim();
-    final parkingStr = _parkingController.text.trim();
-    final extraStopsStr = _extraStopsController.text.trim();
-
-    final tolls = tollsStr.isEmpty ? null : double.tryParse(tollsStr);
-    final parkingFees = parkingStr.isEmpty ? null : double.tryParse(parkingStr);
-    final extraStops =
-        extraStopsStr.isEmpty ? null : int.tryParse(extraStopsStr);
-
-    _completeRideOnBackend(
-      tolls: tolls,
-      parkingFees: parkingFees,
-      extraStopsCount: extraStops,
-    );
   }
 
   void _showRideSummary() {
+    _rideCompletionFlowActive = true;
     // Clear the accepted ride from provider
     ref.read(driverRidesProvider.notifier).clearAcceptedRide();
 
     showModalBottomSheet(
       context: context,
       isDismissible: false,
+      isScrollControlled: true,
+      useSafeArea: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) => Container(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -2050,7 +1927,7 @@ class _DriverActiveRideScreenState
     final phone = _normalizePhone(_riderPhone);
     if (phone.isEmpty) {
       if (!mounted) return;
-      AppMessenger.showErrorBanner(context, ref.tr('phone_unavailable'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('phone_unavailable'));
       return;
     }
     final Uri phoneUri = Uri(scheme: 'tel', path: phone);
@@ -2135,15 +2012,28 @@ class _DriverActiveRideScreenState
     }
 
     // ALWAYS clear and navigate — UI must update even if API fails (network error, etc.)
-    ref.read(driverRidesProvider.notifier).clearAcceptedRide();
     if (mounted) {
-      AppMessenger.showErrorBanner(context, ref.tr('ride_cancelled_available'));
+      _exitingActiveRide = true;
+      ref.read(driverRidesProvider.notifier).clearAcceptedRide();
+      AppMessenger.showDriverErrorBanner(context, ref.tr('ride_cancelled_available'));
       context.go(AppRoutes.driverHome);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<String?>(
+      driverRidesProvider.select((s) => s.acceptedRide?.id),
+      (previous, next) {
+        if (!mounted || _exitingActiveRide || _rideCompletionFlowActive) return;
+        if (previous != null &&
+            previous == _rideId &&
+            next == null) {
+          _exitAfterRiderCancellation(reason: ref.tr('ride_cancelled_by_rider'));
+        }
+      },
+    );
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
@@ -2196,7 +2086,7 @@ class _DriverActiveRideScreenState
               if (value == 'cancel' && !_otpVerified) {
                 _cancelRide();
               } else if (value == 'back' && _otpVerified) {
-                context.go(AppRoutes.driverHome);
+                _returnToDriverHomeLeavingStackWhenPossible();
               }
             },
             itemBuilder: (context) => [
@@ -2229,41 +2119,7 @@ class _DriverActiveRideScreenState
 
           const Spacer(),
 
-          // Score badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFE0E0E0)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 24,
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF4CAF50),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Center(
-                    child: Text(
-                      '90',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(width: 8),
-
-          // Earnings badge
+          // Wallet balance badge
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
@@ -2271,7 +2127,7 @@ class _DriverActiveRideScreenState
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
-              '₹ ${_todayEarnings.toStringAsFixed(2)}',
+              '₹ ${_walletBalance.toStringAsFixed(2)}',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 16,
@@ -2588,40 +2444,25 @@ class _DriverActiveRideScreenState
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF5F5F5),
-                    borderRadius: BorderRadius.circular(8),
+                const Text(
+                  "You're Online",
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A1A),
                   ),
-                  child: const Icon(Icons.tune,
-                      color: Color(0xFF1A1A1A), size: 20),
                 ),
-                const Spacer(),
-                Row(
-                  children: [
-                    const Text(
-                      "You're Online",
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1A1A1A),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF4CAF50),
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                  ],
+                const SizedBox(width: 8),
+                Container(
+                  width: 10,
+                  height: 10,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF4CAF50),
+                    shape: BoxShape.circle,
+                  ),
                 ),
-                const Spacer(),
-                const Icon(Icons.menu, color: Color(0xFF1A1A1A)),
               ],
             ),
           ),

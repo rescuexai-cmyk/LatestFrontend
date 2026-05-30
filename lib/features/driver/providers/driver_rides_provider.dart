@@ -8,6 +8,146 @@ const Duration _offerFreshnessWindow = Duration(seconds: 90);
 const Set<String> _allowedIncomingStatuses = {'searching', 'pending'};
 const Set<String> _terminalStatuses = {'cancelled', 'completed', 'expired'};
 
+/// Normalizes rider/backend/driver vehicle strings into one comparable slug.
+///
+/// Returns null when the incoming type is ambiguous (e.g. [standard]) so callers
+/// avoid hiding offers the app cannot classify reliably.
+String? canonicalVehicleServiceType(String? raw) {
+  if (raw == null) return null;
+  var t = raw.toLowerCase().trim().replaceAll(RegExp(r'[\s\-]+'), '_');
+  if (t.isEmpty) return null;
+
+  // Two-wheel / rescue (driver onboarding uses `motorbike`, riders use `bike_rescue`)
+  if (t.contains('bike_rescue') ||
+      t == 'motorbike' ||
+      t.contains('motorbike') ||
+      (t.contains('bike') && t.contains('rescue')) ||
+      t == 'bike' ||
+      t == 'motorcycle') {
+    return 'bike_rescue';
+  }
+
+  // Ambiguous default from some APIs — don't filter on this alone
+  if (t == 'standard') return null;
+
+  // Auto / e-rickshaw
+  if (t == 'auto' || t.contains('rickshaw') || t.contains('e_rickshaw')) {
+    return 'auto';
+  }
+
+  // Cab tiers (more specific first)
+  if (t.contains('cab_xl') ||
+      (t.contains('xl') && (t.contains('cab') || t.contains('commercial')))) {
+    return 'cab_xl';
+  }
+  if (t.contains('cab_premium') ||
+      (t.contains('premium') &&
+          (t.contains('cab') || t.contains('luxury'))) ||
+      (t.contains('suv') && t.contains('premium'))) {
+    return 'cab_premium';
+  }
+  if (t.contains('cab_mini') ||
+      t == 'mini' ||
+      t.endsWith('_mini') ||
+      t.startsWith('mini_') ||
+      (t.contains('mini') && t.contains('cab')) ||
+      t.contains('hatch')) {
+    return 'cab_mini';
+  }
+
+  // Private car / generic cab (driver `commercial_car`, generic backend `cab`)
+  if (t == 'commercial_car' ||
+      t.contains('commercial_car') ||
+      (t.contains('commercial') && t.contains('car')) ||
+      t == 'sedan' ||
+      (t == 'cab' || t == 'car') ||
+      (t.contains('cab') &&
+          !t.contains('mini') &&
+          !t.contains('xl') &&
+          !t.contains('premium'))) {
+    return 'commercial_car';
+  }
+
+  return t;
+}
+
+/// Flattens Socket/EventBus envelopes so [RideOffer.fromJson] sees ride fields.
+Map<String, dynamic> normalizeRideOfferEventJson(Map<String, dynamic> raw) {
+  final merged = Map<String, dynamic>.from(raw);
+  final payload = raw['payload'];
+  if (payload is Map) {
+    for (final entry in Map<String, dynamic>.from(payload as Map).entries) {
+      merged.putIfAbsent(entry.key, () => entry.value);
+    }
+  }
+  final nestedRide = raw['ride'];
+  if (nestedRide is Map) {
+    for (final entry in Map<String, dynamic>.from(nestedRide as Map).entries) {
+      merged.putIfAbsent(entry.key, () => entry.value);
+    }
+  }
+  return merged;
+}
+
+/// Resolves a ride id from realtime / websocket cancellation payloads.
+String? rideIdFromRealtimePayload(Map<String, dynamic> data) {
+  final id = data['rideId'] ?? data['ride_id'] ?? data['id'];
+  if (id == null) return null;
+  final normalized = id.toString().trim();
+  return normalized.isEmpty ? null : normalized;
+}
+
+/// Frontend guard: only enqueue offers that match the driver's registered vehicle class.
+///
+/// Car/cab tiers are grouped (commercial_car drivers receive cab_mini/cab/cab_xl/etc.).
+/// When either side is unclassified, returns true (legacy permissive behavior).
+@visibleForTesting
+bool rideOfferMatchesDriverVehicle(
+  String offerVehicleType,
+  String? driverRegisteredType,
+) {
+  if (driverRegisteredType == null ||
+      driverRegisteredType.trim().isEmpty) {
+    return true;
+  }
+
+  final offerCanon = canonicalVehicleServiceType(offerVehicleType);
+  if (offerCanon == null) return true;
+
+  final driverCanon = canonicalVehicleServiceType(driverRegisteredType);
+  if (driverCanon == null) return true;
+
+  final offerFamily = _vehicleServiceFamily(offerCanon) ?? offerCanon;
+  final driverFamily = _vehicleServiceFamily(driverCanon) ?? driverCanon;
+  if (offerFamily == driverFamily) return true;
+
+  // Unknown backend slugs: do not block (old APK had no client-side vehicle filter).
+  if (!_knownVehicleFamilies.contains(offerFamily) ||
+      !_knownVehicleFamilies.contains(driverFamily)) {
+    return true;
+  }
+
+  return false;
+}
+
+const _knownVehicleFamilies = {'two_wheeler', 'auto', 'four_wheel_cab'};
+
+String? _vehicleServiceFamily(String canon) {
+  switch (canon) {
+    case 'bike_rescue':
+      return 'two_wheeler';
+    case 'auto':
+      return 'auto';
+    case 'commercial_car':
+    case 'cab_mini':
+    case 'cab_xl':
+    case 'cab_premium':
+      return 'four_wheel_cab';
+    default:
+      return null;
+  }
+}
+
 /// Calculate ETA from distance string (e.g., "1.5 km" -> "5 min away")
 /// Assumes average city traffic speed of 20 km/h
 String _calculateEtaFromDistance(String distanceStr) {
@@ -37,6 +177,70 @@ String _calculateEtaFromDistance(String distanceStr) {
     return mins > 0 ? '$hours hr $mins min away' : '$hours hr away';
   }
   return '$etaMinutes min away';
+}
+
+/// True for generic backend placeholders that should not override a real name.
+bool isPlaceholderRidePassengerName(String? raw) {
+  if (raw == null) return true;
+  final t = raw.trim().toLowerCase();
+  return t.isEmpty ||
+      t == 'passenger' ||
+      t == 'rider' ||
+      t == 'user' ||
+      t == 'customer' ||
+      t == 'unknown';
+}
+
+/// Best display name for the rider from REST/socket-shaped ride JSON.
+String? resolveRidePassengerDisplayNameFromRideJson(Map<String, dynamic> json) {
+  Map<String, dynamic>? mapFrom(dynamic v) {
+    if (v is Map<String, dynamic>) return v;
+    if (v is Map) return Map<String, dynamic>.from(v);
+    return null;
+  }
+
+  final passenger = mapFrom(json['passenger']);
+  final rider = mapFrom(json['rider']);
+  final user = mapFrom(json['user']);
+
+  String? trimmed(dynamic v) {
+    final s = v?.toString().trim();
+    if (s == null || s.isEmpty) return null;
+    return s;
+  }
+
+  String? combinedName(Map<String, dynamic>? m) {
+    if (m == null) return null;
+    final fn = trimmed(m['firstName']) ?? '';
+    final ln = trimmed(m['lastName']) ?? '';
+    final c = '$fn $ln'.trim();
+    return c.isEmpty ? null : c;
+  }
+
+  final candidates = <String?>[
+    trimmed(json['passengerName']),
+    trimmed(json['passenger_name']),
+    trimmed(json['riderName']),
+    trimmed(json['rider_name']),
+    trimmed(json['customerName']),
+    trimmed(json['customer_name']),
+    combinedName(passenger),
+    combinedName(rider),
+    trimmed(passenger?['name']),
+    trimmed(passenger?['fullName']),
+    trimmed(passenger?['full_name']),
+    trimmed(rider?['name']),
+    trimmed(rider?['fullName']),
+    trimmed(rider?['full_name']),
+    trimmed(user?['name']),
+    trimmed(user?['fullName']),
+    trimmed(user?['full_name']),
+  ];
+
+  for (final c in candidates) {
+    if (c != null && !isPlaceholderRidePassengerName(c)) return c;
+  }
+  return null;
 }
 
 // Ride offer model
@@ -147,8 +351,14 @@ class RideOffer {
             0)
         .toDouble();
 
-    // Parse rider name - handle both field names
-    final riderName = json['passengerName'] ?? json['rider_name'];
+    final rawNameFallback =
+        (json['passengerName'] ?? json['rider_name'])?.toString().trim();
+    final riderName = resolveRidePassengerDisplayNameFromRideJson(json) ??
+        (rawNameFallback != null &&
+                rawNameFallback.isNotEmpty &&
+                !isPlaceholderRidePassengerName(rawNameFallback)
+            ? rawNameFallback
+            : null);
 
     // Parse timestamp
     DateTime createdAt;
@@ -321,7 +531,18 @@ class DriverRidesState {
 class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
   final ApiClient _apiClient;
 
+  /// From [driverOnboardingProvider]. When null/empty we do not filter (legacy behavior).
+  String? _registeredDriverVehicleType;
+
   DriverRidesNotifier(this._apiClient) : super(DriverRidesState());
+
+  void setRegisteredDriverVehicleType(String? type) {
+    final t = type?.trim();
+    final next = (t == null || t.isEmpty) ? null : t;
+    if (next == _registeredDriverVehicleType) return;
+    _registeredDriverVehicleType = next;
+    debugPrint('🚕 Driver rides filter vehicle: $_registeredDriverVehicleType');
+  }
 
   bool _isOfferStatusValid(RideOffer offer) {
     final status = offer.status.toLowerCase();
@@ -392,35 +613,37 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
   /// - If offer was already seen, ignore (prevents duplicates)
   /// - If no activeOffer, set as activeOffer
   /// - Else, add to pendingOffers queue
-  void _processIncomingOffer(RideOffer offer) {
+  ///
+  /// Returns false if the offer was ignored (stale, dismissed, duplicate, etc.).
+  bool _processIncomingOffer(RideOffer offer) {
     if (!_isOfferValid(offer)) {
       debugPrint(
           '🧹 Ignoring stale/invalid offer ${offer.id} (status=${offer.status}, age=${DateTime.now().difference(offer.createdAt).inSeconds}s)');
-      return;
+      return false;
     }
 
     // Skip if already dismissed
     if (state.dismissedOfferIds.contains(offer.id)) {
       debugPrint('🚫 Offer ${offer.id} was dismissed, ignoring');
-      return;
+      return false;
     }
     
     // Skip if already seen (duplicate prevention)
     if (state.seenOfferIds.contains(offer.id)) {
       debugPrint('🔄 Offer ${offer.id} already seen, ignoring duplicate');
-      return;
+      return false;
     }
     
     // Skip if this is the current active offer
     if (state.activeOffer?.id == offer.id) {
       debugPrint('🔄 Offer ${offer.id} is already active, ignoring');
-      return;
+      return false;
     }
     
     // Skip if already in pending queue
     if (state.pendingOffers.any((o) => o.id == offer.id)) {
       debugPrint('🔄 Offer ${offer.id} already in queue, ignoring');
-      return;
+      return false;
     }
     
     // Mark as seen
@@ -442,13 +665,16 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
         seenOfferIds: newSeenIds,
       );
     }
+    return true;
   }
 
   /// Add a new ride offer (from socket/SSE/push event)
   /// Public API for external callers
-  void addRideOffer(RideOffer offer) {
+  ///
+  /// Returns false when the offer was discarded (duplicate, stale, or vehicle mismatch).
+  bool addRideOffer(RideOffer offer) {
     cleanupStaleOffers();
-    _processIncomingOffer(offer);
+    return _processIncomingOffer(offer);
   }
 
   /// Decline the current active offer
@@ -650,11 +876,22 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
     );
   }
 
-  /// Full reset for fresh login/session.
-  /// Clears active/pending/offer history so old offers are never replayed.
-  void resetForNewSession() {
-    state = DriverRidesState();
-    debugPrint('🧼 Driver offer state reset for new session');
+  /// Full reset for fresh login/session or when explicitly discarding all driver-ride memory.
+  ///
+  /// When [preserveAcceptedRide] is true, only offer-queue / seen / loading state is cleared
+  /// so a driver returning to [DriverHomeScreen] can still resume an in-progress trip card.
+  /// Callers that must wipe everything (logout) pass [preserveAcceptedRide]: false (default).
+  void resetForNewSession({bool preserveAcceptedRide = false}) {
+    if (preserveAcceptedRide) {
+      final ride = state.acceptedRide;
+      state = DriverRidesState(acceptedRide: ride);
+      debugPrint(
+        '🧼 Driver offer state reset (preserved accepted ride id=${ride?.id})',
+      );
+    } else {
+      state = DriverRidesState();
+      debugPrint('🧼 Driver offer state reset for new session');
+    }
   }
 
   /// Reset dismissed IDs (used when going online fresh)
@@ -672,19 +909,20 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
   }
 
   /// Removes stale/invalid offers from active and pending queues.
-  void cleanupStaleOffers({Duration maxAge = const Duration(seconds: 30)}) {
+  void cleanupStaleOffers({Duration? maxAge}) {
+    final ageLimit = maxAge ?? _offerFreshnessWindow;
     final active = state.activeOffer;
     final pending = Queue<RideOffer>.from(state.pendingOffers);
     final dismissed = Set<String>.from(state.dismissedOfferIds);
 
     RideOffer? nextActive = active;
-    if (active != null && !_isOfferValid(active, maxAge: maxAge)) {
+    if (active != null && !_isOfferValid(active, maxAge: ageLimit)) {
       dismissed.add(active.id);
       nextActive = null;
     }
 
     pending.removeWhere((offer) {
-      final invalid = !_isOfferValid(offer, maxAge: maxAge);
+      final invalid = !_isOfferValid(offer, maxAge: ageLimit);
       if (invalid) dismissed.add(offer.id);
       return invalid;
     });

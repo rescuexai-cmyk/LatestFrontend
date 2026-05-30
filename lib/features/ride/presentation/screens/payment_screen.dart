@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
+import '../widgets/figma_ride_selection_widgets.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
@@ -1501,86 +1502,137 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         Text(
           'Selected method',
           style: TextStyle(
-            fontSize: 13,
+            fontSize: 11,
             fontWeight: FontWeight.w600,
-            color: Colors.grey.shade800,
-            letterSpacing: 0.2,
+            color: Colors.grey.shade700,
+            letterSpacing: 0.3,
           ),
         ),
-        const SizedBox(height: 10),
-        Container(
-          padding: const EdgeInsets.all(16),
+        const SizedBox(height: 6),
+        DecoratedBox(
           decoration: BoxDecoration(
-            color: const Color(0xFFFAF8F5),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFFD4956A)),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: paymentColor,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(paymentIcon, color: Colors.white, size: 22),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      paymentName,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1A1A1A),
-                      ),
-                    ),
-                    Text(
-                      paymentSubtitle,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF888888),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    '₹${totalAmount.toStringAsFixed(2)}',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1A1A1A),
-                    ),
-                  ),
-                  if (discountAmount > 0) ...[
-                    Text(
-                      '₹${baseAmount.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF888888),
-                        decoration: TextDecoration.lineThrough,
-                      ),
-                    ),
-                    Text(
-                      '-₹${discountAmount.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Color(0xFF4CAF50),
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ],
+            color: const Color(0xFFFFFBF7),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: const Color(0xFFD4956A).withValues(alpha: 0.45),
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
               ),
             ],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(9),
+                    boxShadow: [
+                      BoxShadow(
+                        color: paymentColor.withValues(alpha: 0.28),
+                        blurRadius: 4,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: paymentColor,
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(paymentIcon, color: Colors.white, size: 17),
+                  ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        paymentName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1A1A1A),
+                          height: 1.15,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        paymentSubtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w400,
+                          color: Color(0xFF888888),
+                          height: 1.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5EDE4),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 4),
+                        child: Text(
+                          '₹${totalAmount.toStringAsFixed(2)}',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFFB8743A),
+                            height: 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (discountAmount > 0) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        '₹${baseAmount.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF9E9E9E),
+                          decoration: TextDecoration.lineThrough,
+                          height: 1,
+                        ),
+                      ),
+                      Text(
+                        '-₹${discountAmount.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF4CAF50),
+                          fontWeight: FontWeight.w600,
+                          height: 1.1,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ],
@@ -1715,39 +1767,35 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     }
   }
   Widget _buildConfirmButton() {
-    return Container(
+    return Padding(
       padding: const EdgeInsets.all(20),
-      child: GestureDetector(
-        onTap: _isLoading ? null : _confirmAndCreateRide,
-        child: Container(
-          width: double.infinity,
-          height: 56,
-          decoration: BoxDecoration(
-            color:
-                _isLoading ? const Color(0xFFE0E0E0) : const Color(0xFFD4956A),
-            borderRadius: BorderRadius.circular(28),
-          ),
-          child: Center(
-            child: _isLoading
-                ? const UberShimmer(
-                    baseColor: Color(0x99FFFFFF),
-                    highlightColor: Color(0xFFFFFFFF),
-                    child: UberShimmerBox(
-                      width: 140,
-                      height: 16,
-                      borderRadius: BorderRadius.all(Radius.circular(8)),
-                    ),
-                  )
-                : const Text(
-                    'Confirm Payment',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+      child: SizedBox(
+        width: double.infinity,
+        child: _isLoading
+            ? Container(
+                height: FigmaSlideToBookButton.trackHeight,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE0E0E0),
+                  borderRadius: BorderRadius.circular(
+                    FigmaSlideToBookButton.trackHeight / 2,
                   ),
-          ),
-        ),
+                ),
+                child: const UberShimmer(
+                  baseColor: Color(0x99CCCCCC),
+                  highlightColor: Color(0xFFFFFFFF),
+                  child: UberShimmerBox(
+                    width: 180,
+                    height: 14,
+                    borderRadius: BorderRadius.all(Radius.circular(7)),
+                  ),
+                ),
+              )
+            : FigmaSlideToBookButton(
+                enabled: !_isLoading,
+                trackLabel: 'Slide to confirm payment!',
+                onSlideComplete: _confirmAndCreateRide,
+              ),
       ),
     );
   }

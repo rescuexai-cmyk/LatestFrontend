@@ -384,49 +384,6 @@ class _ScheduleRidePickerSheetState extends State<ScheduleRidePickerSheet> {
                           ),
                         ),
                       ),
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEDEDED),
-                          borderRadius: BorderRadius.circular(200),
-                          border: Border.all(
-                            color: const Color(0xFFCBC6BB),
-                            width: 0.92,
-                          ),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 10,
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.access_time_rounded,
-                                size: 15,
-                                color: Color(0xFF000000),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                'Later',
-                                style: TextStyle(
-                                  fontFamily: 'Poppins',
-                                  fontSize: 14,
-                                  height: 21 / 14,
-                                  letterSpacing: -0.42,
-                                  color: Colors.black.withValues(alpha: 0.95),
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                              Icon(
-                                Icons.keyboard_arrow_down_rounded,
-                                size: 18,
-                                color: Colors.black.withValues(alpha: 0.85),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
                     ],
                   ),
                 ),

@@ -18,6 +18,7 @@ import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
+import '../../../../core/utils/cab_map_icon.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
@@ -41,6 +42,51 @@ class _PolylineSnapResult {
     required this.segmentIndex,
   });
 }
+
+/// Normalizes REST/Socket ride `status` values for comparisons.
+///
+/// Uses strict equality downstream — **never** substring matching against tokens
+/// like `"started"` (that incorrectly matches `"not_started"`).
+String _canonicalRiderRideStatus(dynamic raw) {
+  if (raw == null) return '';
+  var s = raw.toString().trim().toLowerCase();
+  if (s.isEmpty) return '';
+  s = s.replaceAll(RegExp(r'[\s-]+'), '_');
+  while (s.contains('__')) {
+    s = s.replaceAll('__', '_');
+  }
+  return s;
+}
+
+/// Status values that mean: OTP verified / passenger on board → trip navigation UI.
+///
+/// Keep in sync across [_syncPhaseFromStatus], [_pollRideStatus],
+/// [_handleStatusUpdate].
+const Set<String> _riderStatusesTripStarted = {
+  'in_progress',
+  'inprogress',
+  'ride_in_progress',
+  'ridestarted',
+  'ride_started',
+  'trip_started',
+  'started',
+  'ongoing',
+};
+
+const Set<String> _riderStatusesCompleted = {
+  'completed',
+  'ride_completed',
+  'trip_completed',
+};
+
+bool _riderStatusMeansTripStarted(String canonicalStatus) =>
+    _riderStatusesTripStarted.contains(canonicalStatus);
+
+bool _riderStatusMeansCompleted(String canonicalStatus) =>
+    _riderStatusesCompleted.contains(canonicalStatus);
+
+bool _riderStatusMeansCancelled(String canonicalStatus) =>
+    canonicalStatus == 'cancelled' || canonicalStatus == 'canceled';
 
 class DriverAssignedScreen extends ConsumerStatefulWidget {
   final String? initialRideId;
@@ -344,23 +390,21 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   /// Sync _phase from backend status (handles missed real-time events)
   void _syncPhaseFromStatus(Map<String, dynamic> rideData) {
     if (!mounted) return;
-    final status = (rideData['status']?.toString() ??
-            rideData['rideStatus']?.toString() ??
-            '')
-        .toLowerCase();
-    if (status.isEmpty) return;
-    final startedStatuses = ['in_progress', 'started', 'ride_started'];
-    final completedStatuses = ['completed', 'ride_completed'];
-    if (startedStatuses.any((s) => status.contains(s)) &&
+    final canon = _canonicalRiderRideStatus(
+      rideData['status'] ?? rideData['rideStatus'],
+    );
+    if (canon.isEmpty) return;
+
+    if (_riderStatusMeansTripStarted(canon) &&
         _phase == _RidePhase.driverEnRoute) {
       debugPrint(
-          '📡 Syncing phase to rideInProgress from backend status: $status');
+          '📡 Syncing phase to rideInProgress from backend status: $canon');
       _transitionToInProgress();
-    } else if (completedStatuses.any((s) => status.contains(s)) &&
+    } else if (_riderStatusMeansCompleted(canon) &&
         _phase != _RidePhase.completed) {
-      debugPrint('📡 Syncing phase to completed from backend status: $status');
+      debugPrint('📡 Syncing phase to completed from backend status: $canon');
       _transitionToCompleted();
-    } else if (status == 'cancelled' || status == 'canceled') {
+    } else if (_riderStatusMeansCancelled(canon)) {
       _handleRideCancelled(
           {'reason': rideData['cancelReason'] ?? 'Ride was cancelled'});
     }
@@ -468,17 +512,17 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       final response = await apiClient.getRide(_rideId!);
       if (!mounted) return;
       final data = response['data'] as Map<String, dynamic>? ?? response;
-      final status = (data['status'] ?? '').toString().toLowerCase();
-      if ((status == 'in_progress' || status.contains('ride_started')) &&
+      final canon = _canonicalRiderRideStatus(data['status']);
+      if (_riderStatusMeansTripStarted(canon) &&
           _phase == _RidePhase.driverEnRoute) {
         ref
             .read(activeRideProvider.notifier)
             .updateActiveRideStatus(RideStatus.inProgress);
         _transitionToInProgress();
-      } else if ((status == 'completed' || status.contains('ride_completed')) &&
+      } else if (_riderStatusMeansCompleted(canon) &&
           _phase != _RidePhase.completed) {
         _transitionToCompleted();
-      } else if (status == 'cancelled' || status == 'canceled') {
+      } else if (_riderStatusMeansCancelled(canon)) {
         _handleRideCancelled(
             {'reason': data['cancelReason'] ?? 'Ride was cancelled'});
       }
@@ -506,11 +550,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   void _handleStatusUpdate(Map<String, dynamic> data) {
     if (!mounted) return;
     // Status can be at top-level or in payload (depending on backend event format)
-    final status = ((data['status'] ?? data['payload']?['status']) as String?)
-            ?.toLowerCase() ??
-        '';
+    final canon = _canonicalRiderRideStatus(
+      data['status'] ?? data['payload']?['status'],
+    );
     debugPrint(
-        '📡 Rider: Status update received: $status (current phase: $_phase)');
+        '📡 Rider: Status update received: $canon (current phase: $_phase)');
 
     // Update driver info if available
     if (data['driver'] != null && data['driver'] is Map<String, dynamic>) {
@@ -546,37 +590,25 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       });
     }
 
-    // Handle ride started - backend sends RIDE_STARTED, in_progress, or started
-    final startedStatuses = [
-      'in_progress',
-      'started',
-      'ride_started',
-      'RIDE_STARTED',
-      'IN_PROGRESS'
-    ];
-    if (startedStatuses.contains(status) &&
+    // Trip started → switch to navigation-to-drop phase (OTP sheet hidden upstream)
+    if (_riderStatusMeansTripStarted(canon) &&
         _phase == _RidePhase.driverEnRoute) {
       debugPrint('📡 Rider: Transitioning to rideInProgress');
-      // Sync activeRideProvider so the banner hides OTP
       ref
           .read(activeRideProvider.notifier)
           .updateActiveRideStatus(RideStatus.inProgress);
       _transitionToInProgress();
-    } else if ((status == 'completed' || status.contains('ride_completed')) &&
+    } else if (_riderStatusMeansCompleted(canon) &&
         _phase != _RidePhase.completed) {
       debugPrint('📡 Rider: Transitioning to completed');
       _transitionToCompleted();
-    } else if (status == 'cancelled' || status == 'canceled') {
+    } else if (_riderStatusMeansCancelled(canon)) {
       // Handle ride cancelled via status update
       _handleRideCancelled({'reason': data['reason'] ?? 'Ride was cancelled'});
-    } else if (status == 'accepted' ||
-        status == 'arriving' ||
-        status == 'driver_arriving' ||
-        status == 'driver_assigned' ||
-        status == 'confirmed' ||
-        status == 'driver_arrived') {
-      // Driver is still coming or just arrived — keep current phase
-      debugPrint('📡 Rider: Driver en route status: $status');
+    } else if (canon.isNotEmpty &&
+        {'accepted', 'arriving', 'driver_arriving', 'driver_assigned', 'confirmed', 'driver_arrived'}
+            .contains(canon)) {
+      debugPrint('📡 Rider: Driver en route status: $canon');
     }
   }
 
@@ -833,7 +865,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         _vehicleIcon = await loadAutoMapIconProcessed(debugLabel: 'auto') ??
             await BitmapDescriptor.asset(imageConfig, assetPath);
       } else {
-        _vehicleIcon = await BitmapDescriptor.asset(imageConfig, assetPath);
+        _vehicleIcon = await loadCabMapIconProcessed(
+              assetPath,
+              debugLabel: normalizedType,
+            ) ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
       }
       debugPrint('🚗 Vehicle icon loaded from asset: $assetPath');
       if (mounted) _updateDriverMarker();

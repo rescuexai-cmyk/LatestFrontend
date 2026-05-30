@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
@@ -68,6 +69,21 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
 
   String get _otp => _controllers.map((c) => c.text).join();
 
+  /// [context.pop()] is no-op when this screen replaced the stack via [context.go].
+  void _handleOtpExit() {
+    final router = GoRouter.of(context);
+    if (router.canPop()) {
+      router.pop();
+      return;
+    }
+    firebasePhoneAuth.clearVerification();
+    if (widget.isPhoneLinkMode) {
+      router.go('${AppRoutes.signup}?mode=linkPhone');
+    } else {
+      router.go(AppRoutes.signup);
+    }
+  }
+
   /// Returns the 10-digit phone number without country code
   String get _cleanPhone {
     String phone = widget.phone;
@@ -129,7 +145,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
               context.go(AppRoutes.home);
             }
           } else if (result.isNewUser) {
-            // New user → collect name first, then terms
+            // New user → name entry (terms already accepted on login)
             context.push('${AppRoutes.nameEntry}?phone=$phoneForApi');
           } else {
             context.go(AppRoutes.home);
@@ -380,7 +396,11 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
                       borderRadius: BorderRadius.circular(28),
                     ),
                     child: IconButton(
-                      onPressed: _isLoading ? null : () => context.pop(),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                          minWidth: 56, minHeight: 56),
+                      splashRadius: 28,
+                      onPressed: _isLoading ? null : _handleOtpExit,
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
                     ),
                   ),

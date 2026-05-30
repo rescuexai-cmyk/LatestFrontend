@@ -37,6 +37,80 @@ class Ride extends Equatable {
   final Driver? driver;
   final Map<String, dynamic>? fareBreakdown;
 
+  /// Normalize GET /rides/:id and similar responses: unwrap `data`, then optional `ride`.
+  static Map<String, dynamic> unwrapRidePayload(Map<String, dynamic> raw) {
+    final data = raw['data'];
+    if (data is Map<String, dynamic>) {
+      final nested = data['ride'];
+      if (nested is Map<String, dynamic>) {
+        return Map<String, dynamic>.from(nested);
+      }
+      return Map<String, dynamic>.from(data);
+    }
+    return Map<String, dynamic>.from(raw);
+  }
+
+  static String? _nonEmpty(dynamic v) {
+    if (v == null) return null;
+    final s = v.toString().trim();
+    if (s.isEmpty) return null;
+    return s;
+  }
+
+  static double _parseDistanceKm(Map<String, dynamic> json) {
+    if (json['distanceKm'] != null || json['distance_km'] != null) {
+      return _toDouble(json['distanceKm'] ?? json['distance_km']);
+    }
+    if (json['totalDistanceKm'] != null ||
+        json['total_distance_km'] != null) {
+      return _toDouble(json['totalDistanceKm'] ?? json['total_distance_km']);
+    }
+    if (json['distanceMeters'] != null ||
+        json['distance_in_meters'] != null ||
+        json['distance_meters'] != null) {
+      return _toDouble(json['distanceMeters'] ??
+              json['distance_in_meters'] ??
+              json['distance_meters']) /
+          1000.0;
+    }
+    final unit =
+        (json['distanceUnit'] ?? json['distance_unit'])?.toString().toLowerCase();
+    final d = _toDouble(json['distance']);
+    if (d <= 0) return 0;
+    if (unit == 'm' ||
+        unit == 'meter' ||
+        unit == 'meters' ||
+        unit == 'metre') {
+      return d / 1000.0;
+    }
+    // Many gateways send distance as integer meters while history lists use km.
+    if ((unit == null || unit == 'km') &&
+        d >= 1000 &&
+        d == d.roundToDouble()) {
+      return d / 1000.0;
+    }
+    return d;
+  }
+
+  static int _parseDurationMinutes(Map<String, dynamic> json) {
+    return _toInt(json['duration'] ??
+        json['estimated_duration'] ??
+        json['estimatedDuration'] ??
+        json['estimatedDurationMinutes'] ??
+        json['tripDurationMinutes'] ??
+        json['trip_duration_minutes'] ??
+        json['estimated_time_minutes']);
+  }
+
+  static double _parseTotalFare(Map<String, dynamic> json) {
+    return _toDouble(json['totalFare'] ??
+        json['fare'] ??
+        json['finalFare'] ??
+        json['final_fare'] ??
+        json['estimatedFare'] ??
+        json['amount']);
+  }
+
   const Ride({
     required this.id,
     required this.riderId,
@@ -76,7 +150,10 @@ class Ride extends Equatable {
       pickupLoc = AddressLocation(
         latitude: _toDouble(json['pickupLat'] ?? json['pickupLatitude'] ?? 0),
         longitude: _toDouble(json['pickupLng'] ?? json['pickupLongitude'] ?? 0),
-        address: json['pickupAddress'] as String? ?? json['pickup_address'] as String? ?? 'Unknown pickup',
+        address: _nonEmpty(json['pickupAddress']) ??
+            _nonEmpty(json['pickup_address']) ??
+            _nonEmpty(json['pickup']) ??
+            'Unknown pickup',
       );
     }
 
@@ -90,7 +167,11 @@ class Ride extends Equatable {
       destLoc = AddressLocation(
         latitude: _toDouble(json['dropLat'] ?? json['dropLatitude'] ?? 0),
         longitude: _toDouble(json['dropLng'] ?? json['dropLongitude'] ?? 0),
-        address: json['dropAddress'] as String? ?? json['destination_address'] as String? ?? 'Unknown destination',
+        address: _nonEmpty(json['dropAddress']) ??
+            _nonEmpty(json['drop_address']) ??
+            _nonEmpty(json['destination_address']) ??
+            _nonEmpty(json['destinationAddress']) ??
+            'Unknown destination',
       );
     }
 
@@ -140,11 +221,13 @@ class Ride extends Equatable {
     }
 
     // Parse fare breakdown from backend
-    Map<String, dynamic>? fareBreakdown;
+    final Map<String, dynamic> fareBreakdown;
     if (json['breakdown'] is Map<String, dynamic>) {
-      fareBreakdown = json['breakdown'] as Map<String, dynamic>;
+      fareBreakdown =
+          Map<String, dynamic>.from(json['breakdown'] as Map<String, dynamic>);
     } else if (json['fareBreakdown'] is Map<String, dynamic>) {
-      fareBreakdown = json['fareBreakdown'] as Map<String, dynamic>;
+      fareBreakdown = Map<String, dynamic>.from(
+          json['fareBreakdown'] as Map<String, dynamic>);
     } else {
       fareBreakdown = {
         'startingFee': _toDouble(json['baseFare'] ?? 30),
@@ -164,6 +247,25 @@ class Ride extends Equatable {
         'minimumFareApplied': json['minimumFareApplied'] ?? false,
       };
     }
+    // Harmonize keys widgets expect (`startingFee` vs `baseFare`, etc.)
+    fareBreakdown['startingFee'] ??= fareBreakdown['baseFare'];
+    fareBreakdown['baseFare'] ??= fareBreakdown['startingFee'];
+    fareBreakdown['ratePerKm'] ??= fareBreakdown['perKmRate'];
+    fareBreakdown['ratePerMin'] ??= fareBreakdown['perMinRate'];
+
+    var fare = _parseTotalFare(json);
+    if (fare <= 0) {
+      fare = _toDouble(
+          fareBreakdown['totalFare'] ?? fareBreakdown['subtotal']);
+    }
+    if (fare <= 0) {
+      final b = _toDouble(json['baseFare']);
+      final df = _toDouble(json['distanceFare']);
+      final tf = _toDouble(json['timeFare']);
+      if (b + df + tf > 0) {
+        fare = b + df + tf;
+      }
+    }
 
     return Ride(
       id: json['id']?.toString() ?? '',
@@ -172,9 +274,9 @@ class Ride extends Equatable {
       pickupLocation: pickupLoc,
       destinationLocation: destLoc,
       status: _parseStatus(json['status']?.toString() ?? 'PENDING'),
-      fare: _toDouble(json['totalFare'] ?? json['fare'] ?? 0),
-      distance: _toDouble(json['distance'] ?? 0),
-      estimatedDuration: _toInt(json['duration'] ?? json['estimated_duration'] ?? 0),
+      fare: fare,
+      distance: _parseDistanceKm(json),
+      estimatedDuration: _parseDurationMinutes(json),
       rideType: json['rideType'] ?? json['ride_type'] ?? json['vehicleType'] ?? 'standard',
       paymentMethod: _parsePaymentMethod(json['paymentMethod']?.toString() ?? json['payment_method']?.toString() ?? 'CASH'),
       createdAt: createdAt,

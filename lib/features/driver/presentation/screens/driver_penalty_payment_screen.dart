@@ -61,13 +61,13 @@ class _DriverPenaltyPaymentScreenState
         setState(() => _paymentInitiated = true);
       } else {
         if (mounted) {
-          AppMessenger.showErrorBanner(context, 'No UPI app found. Please install a UPI app.');
+          AppMessenger.showDriverErrorBanner(context, 'No UPI app found. Please install a UPI app.');
         }
       }
     } catch (e) {
       debugPrint('Failed to launch UPI: $e');
       if (mounted) {
-        AppMessenger.showErrorBanner(context, 'Failed to open UPI app: $e');
+        AppMessenger.showDriverErrorBanner(context, 'Failed to open UPI app: $e');
       }
     }
   }
@@ -116,7 +116,7 @@ class _DriverPenaltyPaymentScreenState
         context.pop(true);
       } else if (mounted) {
         final error = ref.read(driverPenaltyProvider).error;
-        AppMessenger.showErrorBanner(context, error ?? 'Failed to clear penalty');
+        AppMessenger.showDriverErrorBanner(context, error ?? 'Failed to clear penalty');
       }
     } finally {
       if (mounted) {
@@ -149,7 +149,7 @@ class _DriverPenaltyPaymentScreenState
         context.pop(true);
       } else if (mounted) {
         final error = ref.read(driverPenaltyProvider).error;
-        AppMessenger.showErrorBanner(context, error ?? 'Failed to clear penalty');
+        AppMessenger.showDriverErrorBanner(context, error ?? 'Failed to clear penalty');
       }
     } finally {
       if (mounted) {
@@ -522,7 +522,7 @@ class _DriverPenaltyPaymentScreenState
                   onPressed: () {
                     Clipboard.setData(
                         ClipboardData(text: AppConfig.companyUpiId));
-                    AppMessenger.showErrorBanner(context, 'UPI ID copied');
+                    AppMessenger.showDriverErrorBanner(context, 'UPI ID copied');
                   },
                 ),
               ],

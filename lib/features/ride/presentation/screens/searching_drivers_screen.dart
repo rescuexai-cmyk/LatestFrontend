@@ -24,7 +24,7 @@ class SearchingDriversScreen extends ConsumerStatefulWidget {
       _SearchingDriversScreenState();
 }
 class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late AnimationController _animationController;
   late AnimationController _matchFoundController;
   late Animation<double> _driverMarkerScaleAnimation;

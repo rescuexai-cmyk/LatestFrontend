@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'package:image/image.dart' as img;
 import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
@@ -29,6 +28,7 @@ import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/models/pricing_v2.dart';
 import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
+import '../../../../core/utils/cab_map_icon.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
@@ -162,6 +162,19 @@ class CabType {
     );
   }
 }
+
+/// Reopens `_showLocationSearchSheet` after hiding it to show only the schedule time picker.
+class _LocationSheetReplayArgs {
+  final bool isPickup;
+  final int? addStopAt;
+  final int? editStopAt;
+  const _LocationSheetReplayArgs({
+    required this.isPickup,
+    this.addStopAt,
+    this.editStopAt,
+  });
+}
+
 class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   static const Color _findTripAccent = Color(0xFFD4956A);
   /// Figma map pills (Frame 1410081802)
@@ -183,6 +196,12 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   /// User chose ride-now on a hub defer-later (`scheduleAfterLocations`) flow — suppress gray chrome until they tap Later again.
   bool _userChoseRideNowOverride = false;
 
+  /// Inner "Later" from gold chrome: defer time picker until pickup + destination are chosen (parity with hub [scheduleAfterLocations]).
+  bool _localDeferScheduleUntilLocations = false;
+
+  bool get _deferScheduleUntilLocations =>
+      widget.scheduleAfterLocations || _localDeferScheduleUntilLocations;
+
   /// Cool gray gradient + gray mandala (Figma later flow), vs golden “ride now.”
   bool get _usesLaterBookingChrome =>
       !_userChoseRideNowOverride &&
@@ -190,8 +209,21 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           _explicitLaterScheduleMode ||
           _scheduledTime != null);
 
-  /// Prevents stacking multiple auto-opens from _tryCalculateRoute.
+  /// Avoids stacking multiple deferred schedule-sheet opens across post-frame callbacks.
   bool _deferredSchedulePickerShown = false;
+
+  /// Tracks the location-search modal — schedule sheet must layer above after it closes.
+  bool _locationSearchSheetOpen = false;
+
+  /// When true, suppresses [showModalBottomSheet]'s [.then] auto-[pop] to home/guard route.
+  /// Inner "Later" calls [pushReplacement] which dismisses the sheet; old route can still see
+  /// [.then] with [_locationWasSelected] false → would incorrectly pop the booking screen.
+  bool _suppressSheetDismissWithoutLocationPop = false;
+  /// Last pickup+drop coordinate pair when deferring schedule until locations; OD change resets deferral latch.
+  String? _lastScheduleDeferralOdKey;
+
+  /// Last location-search sheet args — used after schedule picker dismisses underlying modal.
+  _LocationSheetReplayArgs? _lastLocationSheetArgs;
   // Cab types fetched from backend
   List<CabType> _cabTypes = [];
   bool _isLoadingPricing = false;
@@ -302,70 +334,139 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       _stops = List.from(booking.stops);
     }
   }
-  /// Chip label: "Later" for ride now, localized "Now" when in later chrome without a picked time yet, otherwise formatted time.
-  String get _scheduleChipLabel {
+  /// Label for Later / Now chip (strings must be prefetched — no [Ref] in modal rebuilds).
+  String _scheduleChipLabelWithCachedTr(
+    BuildContext context, {
+    required String scheduleChipLater,
+    required String nowLabel,
+    required String tomorrowCommaTime,
+  }) {
     if (!_usesLaterBookingChrome) {
-      return _scheduledTime == null ? 'Later' : _formatScheduledTimeLabel(_scheduledTime!);
+      return _scheduledTime == null
+          ? scheduleChipLater
+          : _formatScheduledTimeLabel(
+              context, _scheduledTime!, tomorrowCommaTime);
     }
     if (_scheduledTime != null) {
-      return _formatScheduledTimeLabel(_scheduledTime!);
+      return _formatScheduledTimeLabel(context, _scheduledTime!, tomorrowCommaTime);
     }
     // Later chrome, no time yet: hub defer keeps "Later"; inner explicit later uses "Now" to switch back.
     if (widget.scheduleAfterLocations) {
-      return 'Later';
+      return scheduleChipLater;
     }
-    return ref.tr('now');
+    return nowLabel;
   }
 
-  String _formatScheduledTimeLabel(DateTime scheduled) {
+  String _formatScheduledTimeLabel(
+      BuildContext context, DateTime scheduled, String tomorrowCommaTemplate) {
+    final locId = Localizations.localeOf(context).toString();
     final now = DateTime.now();
+    final timeStr = DateFormat.jm(locId).format(scheduled);
     if (scheduled.day == now.day &&
         scheduled.month == now.month &&
         scheduled.year == now.year) {
-      return DateFormat('h:mm a').format(scheduled);
+      return timeStr;
     }
     final tomorrow = now.add(const Duration(days: 1));
     if (scheduled.day == tomorrow.day &&
         scheduled.month == tomorrow.month &&
         scheduled.year == tomorrow.year) {
-      return 'Tomorrow, ${DateFormat('h:mm a').format(scheduled)}';
+      return tomorrowCommaTemplate.replaceAll('{time}', timeStr);
     }
-    return DateFormat('MMM d, h:mm a').format(scheduled);
+    return '${DateFormat.yMMMd(locId).format(scheduled)}, $timeStr';
   }
 
   void _exitRideLaterUiMode() {
     setState(() {
       _explicitLaterScheduleMode = false;
       _scheduledTime = null;
+      _localDeferScheduleUntilLocations = false;
       if (widget.scheduleAfterLocations) {
         _userChoseRideNowOverride = true;
       }
     });
   }
 
+  bool _needsPickupForDeferSchedule() {
+    final p = _pickupLocation;
+    return !_pickupLocationReady ||
+        p == null ||
+        !_isValidCoordinate(p) ||
+        _pickupController.text.trim().isEmpty;
+  }
+
+  bool _needsDestinationForDeferSchedule() {
+    final d = _destinationLocation;
+    return d == null ||
+        !_isValidCoordinate(d) ||
+        _destinationController.text.trim().isEmpty;
+  }
+
+  /// Open pickup or drop sheet when Later is tapped before both points are valid (matches hub defer-later UX).
+  void _promptLocationsForDeferSchedule({BuildContext? closeModalFirst}) {
+    void openPickupOrDrop(bool isPickup) {
+      if (closeModalFirst != null && closeModalFirst.mounted) {
+        Navigator.of(closeModalFirst).pop();
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showLocationSearchSheet(isPickup: isPickup);
+      });
+    }
+
+    if (_needsPickupForDeferSchedule()) {
+      openPickupOrDrop(true);
+      return;
+    }
+    if (_needsDestinationForDeferSchedule()) {
+      openPickupOrDrop(false);
+      return;
+    }
+  }
+
+  /// Matches hub top "Later": full find-trip route with deferred schedule sheet (opaque stack, not modal-on-hub).
+  void _pushLaterFlowReplacementLikeHub() {
+    // Closing the sheet programmatically completes the modal future; [.then] would otherwise treat
+    // it as user dismiss-without-selection and pop Find Trip → home (/).
+    _suppressSheetDismissWithoutLocationPop = true;
+    final svc = widget.initialServiceType ?? 'bike_rescue';
+    final qp = <String, String>{
+      'autoSearch': 'true',
+      'scheduleAfterLocations': 'true',
+      'serviceType': svc,
+    };
+    final t = _scheduledTime ?? widget.scheduledTime;
+    if (t != null) qp['scheduledTime'] = t.toIso8601String();
+    final q = Uri(queryParameters: qp).query;
+    context.pushReplacement('${AppRoutes.findTrip}?$q');
+  }
+
   /// Inner header chip: enters later chrome / opens picker from gold; "Now" exits later chrome without time; edits time when set.
-  void _handleScheduleChipTap(VoidCallback? modalOverlayBump) {
+  void _handleScheduleChipTap(
+    VoidCallback? modalOverlayBump, [
+    BuildContext? locationSheetModalContext,
+  ]) {
     void bump() {
       if (mounted) setState(() {});
       modalOverlayBump?.call();
     }
 
     if (!_usesLaterBookingChrome) {
-      setState(() {
-        _explicitLaterScheduleMode = true;
-        _userChoseRideNowOverride = false;
-      });
-      bump();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _showFindTripSchedulePicker(() => bump());
-      });
+      if (!mounted) return;
+      _pushLaterFlowReplacementLikeHub();
       return;
     }
 
     if (_scheduledTime == null) {
-      if (widget.scheduleAfterLocations && !_userChoseRideNowOverride) {
-        _showFindTripSchedulePicker(() => bump());
+      if (_deferScheduleUntilLocations && !_userChoseRideNowOverride) {
+        if (!_hasValidPickupAndDestination()) {
+          _promptLocationsForDeferSchedule(closeModalFirst: locationSheetModalContext);
+          bump();
+          return;
+        }
+        // Locations are complete: reopen trip overview so the user taps Book Now (schedule time runs there — same as hub flow).
+        _openTripOverviewForDeferredBookNow(closeModalFirst: locationSheetModalContext);
+        bump();
         return;
       }
       _exitRideLaterUiMode();
@@ -373,7 +474,10 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       return;
     }
 
-    _showFindTripSchedulePicker(() => bump());
+    _showFindTripSchedulePicker(
+      afterClose: () => bump(),
+      replaceParentSheetContext: locationSheetModalContext,
+    );
   }
   bool _hasValidPickupAndDestination() {
     return _pickupLocationReady &&
@@ -384,94 +488,159 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         _isValidCoordinate(_pickupLocation!) &&
         _isValidCoordinate(_destinationLocation!);
   }
-  /// Hub "Later" flow: open schedule sheet only after pickup + drop are set.
-  void _maybeShowDeferredSchedulePicker() {
-    if (!widget.scheduleAfterLocations) return;
+
+  /// Stable key for the current OD pair (defer-schedule-until-locations bookkeeping).
+  String _scheduleDeferralOdKey() {
+    final p = _pickupLocation;
+    final d = _destinationLocation;
+    if (p == null ||
+        d == null ||
+        !_isValidCoordinate(p) ||
+        !_isValidCoordinate(d)) {
+      return '';
+    }
+    return '${p.latitude.toStringAsFixed(5)}_${p.longitude.toStringAsFixed(5)}|'
+        '${d.latitude.toStringAsFixed(5)}_${d.longitude.toStringAsFixed(5)}';
+  }
+
+  /// Updates deferral bookkeeping when OD is fully valid — call inside [setState].
+  void _syncHubLaterDeferralForCurrentOd() {
+    if (!_deferScheduleUntilLocations) return;
+    final key = _scheduleDeferralOdKey();
+    if (key.isEmpty) return;
+    final prev = _lastScheduleDeferralOdKey;
+    if (prev != null && prev != key) {
+      _deferredSchedulePickerShown = false;
+      _scheduledTime = null;
+    }
+    _lastScheduleDeferralOdKey = key;
+  }
+
+  /// Deferred schedule picker: hub [scheduleAfterLocations] or inner Later from gold chrome ([_localDeferScheduleUntilLocations]).
+  /// Call after trip overview commits ([onBookNowTap] / auto-close), not during [_tryCalculateRoute].
+  void _maybeShowDeferredSchedulePicker(
+      {bool forceAfterLocationDismiss = false}) {
+    if (!_deferScheduleUntilLocations) return;
     if (_userChoseRideNowOverride) return;
     if (_deferredSchedulePickerShown) return;
     if (_scheduledTime != null) return;
     if (!_hasValidPickupAndDestination()) return;
-    _deferredSchedulePickerShown = true;
+    if (!forceAfterLocationDismiss && _locationSearchSheetOpen) return;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      if (_deferredSchedulePickerShown) return;
+      if (_scheduledTime != null) return;
+      if (!_hasValidPickupAndDestination()) return;
+      if (_userChoseRideNowOverride) return;
+      if (!_deferScheduleUntilLocations) return;
+      if (!forceAfterLocationDismiss && _locationSearchSheetOpen) return;
+      _deferredSchedulePickerShown = true;
       _showFindTripSchedulePicker();
     });
   }
-  void _showFindTripSchedulePicker([VoidCallback? afterClose]) {
-    final showRideNowBtn = _scheduledTime != null;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => ScheduleRidePickerSheet(
-        currentSchedule: _scheduledTime,
-        accentColor: _findTripAccent,
-        switchToImmediateLabel: ref.tr('now'),
-        onSwitchToImmediateRide: showRideNowBtn
-            ? () {
-                Navigator.of(ctx).pop();
-                _exitRideLaterUiMode();
-                afterClose?.call();
-              }
-            : null,
-        onConfirm: (DateTime selected) {
-          if (mounted) {
-            setState(() {
-              _scheduledTime = selected;
-              _userChoseRideNowOverride = false;
-              _explicitLaterScheduleMode = true;
-            });
-          }
-          Navigator.pop(ctx);
-          afterClose?.call();
-        },
-      ),
-    );
+
+  /// Present schedule sheet after pickup+drop committed from trip overview (Book Now / auto-dismiss).
+  void _tryPresentDeferredScheduleAfterTripCommit() {
+    if (!_deferScheduleUntilLocations || _userChoseRideNowOverride) return;
+    if (_scheduledTime != null) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _maybeShowDeferredSchedulePicker(forceAfterLocationDismiss: true);
+    });
   }
-  /// Top-down vehicle icon: remove black bg, resize, bottom shadow — only on opaque pixels.
-  Future<BitmapDescriptor?> _loadVehicleMapIconProcessed(String assetPath,
-      {String debugLabel = 'vehicle'}) async {
-    try {
-      final bytes = await rootBundle.load(assetPath);
-      final original = img.decodeImage(bytes.buffer.asUint8List());
-      if (original == null) return null;
-      var image = original.convert(numChannels: 4);
-      const thresh = 55;
-      for (var y = 0; y < image.height; y++) {
-        for (var x = 0; x < image.width; x++) {
-          final pixel = image.getPixel(x, y);
-          final r = pixel.r.toInt();
-          final g = pixel.g.toInt();
-          final b = pixel.b.toInt();
-          if (r < thresh && g < thresh && b < thresh) {
-            image.setPixelRgba(x, y, r, g, b, 0);
-          }
+
+  /// Pops trip/locations modal then shows deferred schedule picker on the frame after close.
+  void _closeLocationSheetThenOfferDeferredSchedule(BuildContext sheetContext) {
+    if (sheetContext.mounted && Navigator.of(sheetContext).canPop()) {
+      Navigator.of(sheetContext).pop();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _tryPresentDeferredScheduleAfterTripCommit();
+    });
+  }
+
+  /// Opens trip overview (drop search sheet) after pickup and drop exist so user taps Book Now.
+  void _openTripOverviewForDeferredBookNow({BuildContext? closeModalFirst}) {
+    if (closeModalFirst != null && closeModalFirst.mounted) {
+      Navigator.of(closeModalFirst).pop();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _showLocationSearchSheet(isPickup: false);
+    });
+  }
+
+  void _showFindTripSchedulePicker({
+    VoidCallback? afterClose,
+    BuildContext? replaceParentSheetContext,
+  }) {
+    if (!mounted) return;
+    final showRideNowBtn = _scheduledTime != null;
+    // Capture translations before async modal — avoids "Cannot use ref after disposal".
+    final nowLabel = ref.tr('now');
+
+    Future<void> runPicker() async {
+      try {
+        await showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: Colors.transparent,
+          builder: (ctx) => ScheduleRidePickerSheet(
+            currentSchedule: _scheduledTime,
+            accentColor: _findTripAccent,
+            switchToImmediateLabel: nowLabel,
+            onSwitchToImmediateRide: showRideNowBtn
+                ? () {
+                    Navigator.of(ctx).pop();
+                    _exitRideLaterUiMode();
+                  }
+                : null,
+            onConfirm: (DateTime selected) {
+              if (mounted) {
+                setState(() {
+                  _scheduledTime = selected;
+                  _userChoseRideNowOverride = false;
+                  _explicitLaterScheduleMode = true;
+                });
+              }
+              Navigator.pop(ctx);
+            },
+          ),
+        );
+      } finally {
+        // User dismissed without confirming time — allow deferred picker to show again.
+        if (mounted &&
+            _scheduledTime == null &&
+            _deferScheduleUntilLocations &&
+            !_userChoseRideNowOverride) {
+          _deferredSchedulePickerShown = false;
         }
       }
-      image = img.copyResize(image, width: 120, height: 120,
-          interpolation: img.Interpolation.cubic);
-      final shadowStartY = (image.height * 0.52).floor();
-      for (var y = shadowStartY; y < image.height; y++) {
-        final t = (y - shadowStartY) / (image.height - shadowStartY);
-        final blend = (t * 0.92).clamp(0.0, 1.0);
-        for (var x = 0; x < image.width; x++) {
-          final pixel = image.getPixel(x, y);
-          if (pixel.a > 0.1) {
-            final r = (pixel.r * (1 - blend)).round().clamp(0, 255);
-            final g = (pixel.g * (1 - blend)).round().clamp(0, 255);
-            final b = (pixel.b * (1 - blend)).round().clamp(0, 255);
-            image.setPixelRgba(x, y, r, g, b, 255);
-          }
-        }
+      if (!mounted) return;
+      afterClose?.call();
+      if (replaceParentSheetContext != null) {
+        _restoreLocationSheetAfterSchedulePickerDismissed();
       }
-      final pngBytes = Uint8List.fromList(img.encodePng(image));
-      return BitmapDescriptor.fromBytes(pngBytes);
-    } catch (e) {
-      debugPrint('$debugLabel map icon load failed: $e');
-      return null;
+    }
+
+    if (replaceParentSheetContext != null &&
+        replaceParentSheetContext.mounted &&
+        Navigator.of(replaceParentSheetContext).canPop()) {
+      Navigator.of(replaceParentSheetContext).pop();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(runPicker());
+        }
+      });
+    } else {
+      unawaited(runPicker());
     }
   }
-  /// Load custom vehicle icons from assets (bike, auto, cab, cab premium)
+
+  /// Load custom vehicle markers (bike strips edge plate; cab uses shared pipeline).
   /// Uber/Rapido style: ~40-50 logical pixels with device pixel ratio for crisp rendering
   Future<void> _loadCustomMarkers() async {
     try {
@@ -493,7 +662,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             config,
             'assets/map_icons/icon_auto.png',
           );
-      _carIcon = await _loadVehicleMapIconProcessed(
+      _carIcon = await loadCabMapIconProcessed(
             'assets/map_icons/icon_cab.png',
             debugLabel: 'Cab',
           ) ??
@@ -977,17 +1146,27 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     // STRICT GUARD: Only calculate if BOTH locations are valid
     if (!_pickupLocationReady || _pickupLocation == null || _destinationLocation == null) {
       debugPrint('⏳ Route calculation skipped - waiting for valid locations');
+      if (mounted && _deferScheduleUntilLocations) {
+        setState(() => _deferredSchedulePickerShown = false);
+      }
       return;
     }
     
     // SAFETY CHECK: Validate coordinates are reasonable
     if (!_isValidCoordinate(_pickupLocation!) || !_isValidCoordinate(_destinationLocation!)) {
       debugPrint('⚠️ Invalid coordinates detected - skipping route calculation');
+      if (mounted && _deferScheduleUntilLocations) {
+        setState(() => _deferredSchedulePickerShown = false);
+      }
       return;
     }
     
     debugPrint('✅ Both locations valid - calculating route');
-    _maybeShowDeferredSchedulePicker();
+    if (mounted && _deferScheduleUntilLocations) {
+      setState(() {
+        _syncHubLaterDeferralForCurrentOd();
+      });
+    }
     _calculateRoute();
   }
   
@@ -1667,8 +1846,27 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
   }
   bool _locationWasSelected = false;
+
+  void _restoreLocationSheetAfterSchedulePickerDismissed() {
+    final replay = _lastLocationSheetArgs;
+    if (!mounted || replay == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _showLocationSearchSheet(
+        isPickup: replay.isPickup,
+        addStopAt: replay.addStopAt,
+        editStopAt: replay.editStopAt,
+      );
+    });
+  }
+
   void _showLocationSearchSheet(
       {required bool isPickup, int? addStopAt, int? editStopAt}) {
+    _lastLocationSheetArgs = _LocationSheetReplayArgs(
+      isPickup: isPickup,
+      addStopAt: addStopAt,
+      editStopAt: editStopAt,
+    );
     _locationWasSelected = false;
     final isStop = addStopAt != null || editStopAt != null;
     final initialVal = isPickup
@@ -1679,6 +1877,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 ? ''
                 : _destinationController.text;
     final bias = isPickup ? _destinationLocation : _pickupLocation;
+    if (!mounted) return;
+    // Capture translations here — [StatefulBuilder] rebuilds must not call [ref.tr] after [FindTripScreen] disposes.
+    final trEnterPickup = ref.tr('enter_pickup');
+    final trEnterDestination = ref.tr('enter_destination');
+    final trChipLater = ref.tr('schedule_chip_later');
+    final trNow = ref.tr('now');
+    final trTomorrowComma = ref.tr('tomorrow_comma_time');
+    _locationSearchSheetOpen = true;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1692,18 +1898,25 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               initialValue: initialVal,
               biasLocation: bias,
               useLaterBookingChrome: _usesLaterBookingChrome,
+              showHeaderScheduleChip:
+                  !_usesLaterBookingChrome || _scheduledTime != null,
               showTripOverview: !isStop,
               pickupDisplay: _pickupController.text.isEmpty
-                  ? ref.tr('enter_pickup')
+                  ? trEnterPickup
                   : _pickupController.text,
               destinationDisplay: _destinationController.text.isEmpty
-                  ? ref.tr('enter_destination')
+                  ? trEnterDestination
                   : _destinationController.text,
               stops: List<RideStop>.from(_stops),
-              scheduleLabel: () => _scheduleChipLabel,
+              scheduleLabel: () => _scheduleChipLabelWithCachedTr(
+                    sheetContext,
+                    scheduleChipLater: trChipLater,
+                    nowLabel: trNow,
+                    tomorrowCommaTime: trTomorrowComma,
+                  ),
               onScheduleTap: () {
                 void bumpOverlay() => modalSetState(() {});
-                _handleScheduleChipTap(bumpOverlay);
+                _handleScheduleChipTap(bumpOverlay, sheetContext);
               },
               onTripPickupTap: () {
                 Navigator.pop(sheetContext);
@@ -1719,6 +1932,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   _showLocationSearchSheet(isPickup: false);
                 });
               },
+              tripPickupSeed: !isStop ? _pickupController.text : '',
               onTripAddStopTap: _stops.length < 3
                   ? () {
                       if (isStop) {
@@ -1758,7 +1972,6 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 modalSetState(() {});
                 _tryCalculateRoute();
               },
-              tripPickupController: !isStop ? _pickupController : null,
               onTripDestinationClear: !isStop
                   ? () {
                       setState(() {
@@ -1780,13 +1993,36 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       _updateDriverMarkers();
                     }
                   : null,
+              onTripPickupClear: !isStop
+                  ? () {
+                      setState(() {
+                        _pickupController.clear();
+                        _pickupLocation = null;
+                        _pickupLocationReady = false;
+                        _pickupPillAnchor = null;
+                        _distanceText = '';
+                        _durationText = '';
+                        _estimatedFare = 0;
+                        _polylines = {};
+                        _routeLegCount = 0;
+                        _firstLegDurationMin = 0;
+                      });
+                      ref
+                          .read(rideBookingProvider.notifier)
+                          .clearPickupAndRoutePreview();
+                      modalSetState(() {});
+                      _setupMapElements();
+                      _updateDriverMarkers();
+                    }
+                  : null,
               onBookNowTap: !isStop
                   ? () {
                       if (_pickupLocation != null &&
                           _destinationLocation != null &&
                           _pickupController.text.trim().isNotEmpty &&
                           _destinationController.text.trim().isNotEmpty) {
-                        Navigator.pop(sheetContext);
+                        _closeLocationSheetThenOfferDeferredSchedule(
+                            sheetContext);
                       } else {
                         AppMessenger.showErrorBanner(context, 'Please choose both pickup and destination.');
                       }
@@ -1867,9 +2103,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     _pickupLocation != null &&
                     _destinationLocation != null) {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (Navigator.canPop(sheetContext)) {
-                      Navigator.pop(sheetContext);
-                    }
+                    _closeLocationSheetThenOfferDeferredSchedule(sheetContext);
                   });
                 }
               },
@@ -1877,7 +2111,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           },
         );
       },
-    ).then((_) {
+    ).whenComplete(() {
+      if (mounted) {
+        _locationSearchSheetOpen = false;
+      }
+    }    ).then((_) {
+      if (_suppressSheetDismissWithoutLocationPop) {
+        _suppressSheetDismissWithoutLocationPop = false;
+        return;
+      }
       // If sheet was dismissed without selecting a location AND we came via auto-open,
       // pop back to the home screen
       if (!_locationWasSelected &&
@@ -2531,13 +2773,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   /// arrival" line stay consistent. Falls back to backend pricing duration
   /// only if Google's value isn't available yet.
   int _routeMinutesForPill() {
-    if (_durationText.isNotEmpty) {
-      final m = RegExp(r'(\d+)').firstMatch(_durationText);
-      if (m != null) {
-        final v = int.tryParse(m.group(1)!) ?? 0;
-        if (v > 0) return v;
-      }
-    }
+    final fromLabel = figmaParseTripDurationMinutes(_durationText);
+    if (fromLabel != null && fromLabel > 0) return fromLabel;
     if (_durationMinFromBackend > 0) return _durationMinFromBackend;
     return 0;
   }
@@ -3382,9 +3619,12 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     final distanceKm = _distanceText.isNotEmpty
         ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0
         : 0;
-    final durationMin = _durationText.isNotEmpty
-        ? double.tryParse(_durationText.replaceAll(' min', '')) ?? 0
-        : 0;
+    final durationMinParsed = figmaParseTripDurationMinutes(_durationText);
+    final durationMin = (durationMinParsed != null && durationMinParsed > 0)
+        ? durationMinParsed.toDouble()
+        : (_durationMinFromBackend > 0
+            ? _durationMinFromBackend.toDouble()
+            : 0);
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -3485,6 +3725,33 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
   static const double _intercityThresholdKm = 50;
 
+  /// After cab + fare selected: persist cab type then open payment route.
+  void _pushRidePaymentWithSelectedCab(CabType selectedCab, double fare) {
+    if (!mounted) return;
+    final isEcoPickup = selectedCab.id == 'eco_pickup';
+    ref.read(rideBookingProvider.notifier).setCabType(
+          id: selectedCab.id,
+          name: selectedCab.name,
+          fare: fare,
+          originalFare: _riderSubsidy != null && _riderSubsidy!.isActive
+              ? fare / (1 - _riderSubsidy!.subsidyPct)
+              : fare,
+          subsidyAmount: _savingsAmount,
+          isSubsidyApplied: _riderSubsidy?.isActive ?? false,
+          isEcoPickup: isEcoPickup,
+          ecoPickupAddress:
+              isEcoPickup ? _ecoPickup?.suggestedPickupAddress : null,
+          ecoPickupLocation: isEcoPickup && _ecoPickup != null
+              ? LatLng(
+                  _ecoPickup!.suggestedLat,
+                  _ecoPickup!.suggestedLng,
+                )
+              : null,
+        );
+    ref.read(rideBookingProvider.notifier).setDriverCount(1);
+    context.push(AppRoutes.ridePayment);
+  }
+
   void _onBookRideSlideComplete() {
     final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType);
     final fare = _cabFares[_selectedCabType] ?? selectedCab.baseFare;
@@ -3519,35 +3786,51 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       return;
     }
 
-    final isEcoPickup = selectedCab.id == 'eco_pickup';
-    ref.read(rideBookingProvider.notifier).setCabType(
-          id: selectedCab.id,
-          name: selectedCab.name,
-          fare: fare,
-          originalFare: _riderSubsidy != null && _riderSubsidy!.isActive
-              ? fare / (1 - _riderSubsidy!.subsidyPct)
-              : fare,
-          subsidyAmount: _savingsAmount,
-          isSubsidyApplied: _riderSubsidy?.isActive ?? false,
-          isEcoPickup: isEcoPickup,
-          ecoPickupAddress:
-              isEcoPickup ? _ecoPickup?.suggestedPickupAddress : null,
-          ecoPickupLocation: isEcoPickup && _ecoPickup != null
-              ? LatLng(
-                  _ecoPickup!.suggestedLat,
-                  _ecoPickup!.suggestedLng,
-                )
-              : null,
-        );
-    ref.read(rideBookingProvider.notifier).setDriverCount(1);
-    context.push(AppRoutes.ridePayment);
+    if (_deferScheduleUntilLocations &&
+        !_userChoseRideNowOverride &&
+        _scheduledTime == null) {
+      _showFindTripSchedulePicker(
+        afterClose: () {
+          if (!mounted || _scheduledTime == null) return;
+          _pushRidePaymentWithSelectedCab(selectedCab, fare);
+        },
+      );
+      return;
+    }
+
+    _pushRidePaymentWithSelectedCab(selectedCab, fare);
   }
 
   Widget _buildBookRideButton() {
-    return SizedBox(
-      width: double.infinity,
-      child: FigmaSlideToBookButton(
-        onSlideComplete: _onBookRideSlideComplete,
+    return Material(
+      color: const Color(0xFF2E2C2A),
+      borderRadius: BorderRadius.circular(280),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(280),
+        onTap: _onBookRideSlideComplete,
+        child: Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(minHeight: 56),
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 18,
+          ),
+          child: Text(
+            'Book Now',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.poppins(
+              fontSize: 16.65,
+              fontWeight: FontWeight.w500,
+              height: 1.0,
+              color: Colors.white,
+            ),
+            textHeightBehavior: const TextHeightBehavior(
+              applyHeightToFirstAscent: false,
+              applyHeightToLastDescent: false,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -4779,16 +5062,22 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
   /// [stopIndex] when non-null updates intermediate stop at that index (inline plan-ride UI).
   final void Function(String address, LatLng? latLng,
       {bool? asPickup, int? stopIndex}) onLocationSelected;
-  /// Parent pickup controller — required for editable pickup when [ showTripOverview ] is true.
-  final TextEditingController? tripPickupController;
+  /// Initial pickup text copied from parent when the sheet opens. The sheet edits a **local**
+  /// [TextEditingController] — never attaches to [FindTripScreen]'s disposable controllers.
+  final String tripPickupSeed;
   /// Trip overview only: primary CTA; parent should pop or show SnackBar.
   final VoidCallback? onBookNowTap;
   /// Visual emphasis when pickup + destination are ready (parent-owned state).
   final bool bookNowEnabled;
   /// Plan Your Ride: clear drop-off in parent + provider (× on destination field).
   final VoidCallback? onTripDestinationClear;
+  /// Plan Your Ride: clear pickup in parent + provider (× on pickup field).
+  final VoidCallback? onTripPickupClear;
   /// Gray mandala + cool gradient cue (defer-later / scheduled-time flows).
   final bool useLaterBookingChrome;
+  /// When false, hide clock/Later/Now pill in Plan/Schedule hero — user already in later flow without a pickup time yet, or edits time once [_scheduledTime] is set elsewhere.
+  final bool showHeaderScheduleChip;
+
   const _LocationSearchSheet({
     required this.isPickup,
     this.selectingStop = false,
@@ -4807,10 +5096,12 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
     required this.initialValue,
     this.biasLocation,
     required this.onLocationSelected,
-    this.tripPickupController,
+    this.tripPickupSeed = '',
     this.onBookNowTap,
     this.bookNowEnabled = false,
     this.onTripDestinationClear,
+    this.onTripPickupClear,
+    this.showHeaderScheduleChip = true,
   });
   @override
   ConsumerState<_LocationSearchSheet> createState() =>
@@ -4818,6 +5109,8 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
 }
 class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   late TextEditingController _searchController;
+  /// Trip overview only; disposed in [dispose].
+  TextEditingController? _tripPickupField;
   List<TextEditingController> _stopControllers = [];
   /// When set, suggestion / current-location apply to this intermediate stop index.
   int? _editingStopIndex;
@@ -4854,12 +5147,28 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   }
   bool get _tripOverviewMode =>
       widget.showTripOverview && !widget.selectingStop;
-  /// Whether the next suggestion tap should update pickup (vs drop) in trip-overview mode.
+  /// Plan Your Ride: show × on pickup when there is text to clear.
+  bool get _planRidePickupClearVisible {
+    if (!_tripOverviewMode) return false;
+    final t = _tripPickupField?.text.trim() ?? '';
+    return t.isNotEmpty;
+  }
+
+  /// Whether focus / last row implies pickup vs drop in trip-overview mode.
   bool get _tapAppliesToPickup {
     if (!_tripOverviewMode) return widget.isPickup;
     if (_editingStopIndex != null) return false;
     return _lastPlanRideFieldWasPickup;
   }
+
+  /// Pickup vs drop for suggestion taps and "current location" in trip-overview mode.
+  ///
+  /// Previously we treated any non-empty [_searchController] as "user is searching drop-off".
+  /// That is wrong: [_searchController] holds the **committed** drop-off address while the user
+  /// can still be editing pickup in [_tripPickupField], so suggestions must follow
+  /// [_lastPlanRideFieldWasPickup] from focus / [onChanged] / [onTap] on each row.
+  bool get _suggestionTapTargetsPickup => _tapAppliesToPickup;
+
   @override
   void initState() {
     super.initState();
@@ -4873,6 +5182,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       _lastPlanRideFieldWasPickup = widget.isPickup;
       _tripPickupFocusNode.addListener(_onTripPickupFocusChanged);
       _tripDestFocusNode.addListener(_onTripDestFocusChanged);
+      _tripPickupField = TextEditingController(text: widget.tripPickupSeed);
     }
     _searchController = TextEditingController();
     if (_tripOverviewMode || !widget.isPickup) {
@@ -4885,6 +5195,11 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   @override
   void didUpdateWidget(covariant _LocationSearchSheet oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (_tripOverviewMode &&
+        _tripPickupField != null &&
+        widget.tripPickupSeed != oldWidget.tripPickupSeed) {
+      _tripPickupField!.text = widget.tripPickupSeed;
+    }
     if (widget.initialValue != oldWidget.initialValue) {
       if (_tripOverviewMode || !widget.isPickup) {
         _searchController.value = _destTextValue(widget.initialValue);
@@ -5013,6 +5328,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     }
     _tripPickupFocusNode.dispose();
     _tripDestFocusNode.dispose();
+    _tripPickupField?.dispose();
     _debounce?.cancel();
     // End Places API session when sheet closes
     _placesService.endSession();
@@ -5092,6 +5408,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             '📍 Using device location for search bias: $searchBiasLocation');
       } catch (e) {
         debugPrint('📍 Geolocator failed, using fallback for search bias: $e');
+        if (!mounted) return;
         searchBiasLocation = widget.biasLocation;
         if (searchBiasLocation == null) {
           final booking = ref.read(rideBookingProvider);
@@ -5106,9 +5423,11 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           debugPrint('📍 Using India fallback for search bias');
         }
       }
+      if (!mounted) return;
       final placesResults = await _placesService.searchPlacesWithFallback(query,
           location: searchBiasLocation);
       debugPrint('🔍 Places API returned ${placesResults.length} results');
+      if (!mounted) return;
       if (placesResults.isNotEmpty) {
         setState(() {
           _suggestions = placesResults
@@ -5130,6 +5449,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           query,
           localeIdentifier: 'en_IN',
         );
+        if (!mounted) return;
         if (locations.isNotEmpty) {
           final suggestions = <_LocationSuggestion>[];
           for (final location in locations.take(5)) {
@@ -5161,6 +5481,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               ));
             }
           }
+          if (!mounted) return;
           if (suggestions.isNotEmpty) {
             setState(() {
               _suggestions = suggestions;
@@ -5173,6 +5494,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         debugPrint('Geocoding fallback error: $e');
       }
       // No results found
+      if (!mounted) return;
       setState(() {
         _suggestions = [
           _LocationSuggestion(
@@ -5186,6 +5508,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       });
     } catch (e) {
       debugPrint('Search error: $e');
+      if (!mounted) return;
       setState(() {
         _suggestions = [
           _LocationSuggestion(
@@ -5212,7 +5535,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         if (mounted) {
           AppMessenger.showErrorBanner(context, 'Location permission denied');
         }
-        setState(() => _isLoading = false);
+        if (mounted) setState(() => _isLoading = false);
         return;
       }
       // Get current position
@@ -5242,7 +5565,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           stopIndex: stopIdx,
         );
       } else {
-        final applyPickup = _tapAppliesToPickup;
+        final applyPickup = _suggestionTapTargetsPickup;
         widget.onLocationSelected(
           address,
           LatLng(position.latitude, position.longitude),
@@ -5257,7 +5580,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
               text: address,
               selection: TextSelection.collapsed(offset: address.length),
             );
-          } else if (!_tapAppliesToPickup) {
+          } else if (!_suggestionTapTargetsPickup) {
             _searchController.value = _destTextValue(address);
           }
           _loadInitialSuggestions();
@@ -5270,7 +5593,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       if (mounted) {
         AppMessenger.showErrorBanner(context, 'Error getting location: $e');
       }
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
   /// Destination / single-mode search field. When [hideInnerPrefix] is true, outer row supplies the map pin.
@@ -5446,50 +5769,53 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             ),
           ),
         ),
-        const SizedBox(width: 8),
-        Material(
-          color: Color(later ? 0xFFEDEDED : 0x80EDEDED),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(184),
-            side: BorderSide(
-              color: Color(later ? 0xFFCBC6BB : 0x80CBC6BB),
-              width: 0.92,
+        if (widget.showHeaderScheduleChip) ...[
+          const SizedBox(width: 8),
+          Material(
+            color: Color(later ? 0xFFEDEDED : 0x80EDEDED),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(184),
+              side: BorderSide(
+                color: Color(later ? 0xFFCBC6BB : 0x80CBC6BB),
+                width: 0.92,
+              ),
             ),
-          ),
-          child: InkWell(
-            onTap: widget.onScheduleTap,
-            borderRadius: BorderRadius.circular(184),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14.5, vertical: 12),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.access_time_rounded,
-                      size: 14.7, color: Color(0xFF000000)),
-                  const SizedBox(width: 7),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 120),
-                    child: Text(
-                      schedule,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontFamily: 'Poppins',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w400,
-                        letterSpacing: -0.4,
-                        color: Color(0xFF000000),
-                        height: 1.5,
+            child: InkWell(
+              onTap: widget.onScheduleTap,
+              borderRadius: BorderRadius.circular(184),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14.5, vertical: 12),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.access_time_rounded,
+                        size: 14.7, color: Color(0xFF000000)),
+                    const SizedBox(width: 7),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 120),
+                      child: Text(
+                        schedule,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontFamily: 'Poppins',
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          letterSpacing: -0.4,
+                          color: Color(0xFF000000),
+                          height: 1.5,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 6),
-                  const Icon(Icons.keyboard_arrow_down_rounded,
-                      size: 16, color: Color(0xFF000000)),
-                ],
+                    const SizedBox(width: 6),
+                    const Icon(Icons.keyboard_arrow_down_rounded,
+                        size: 16, color: Color(0xFF000000)),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -5530,70 +5856,103 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
                 children: [
                   const Text('Pick-up', style: labelStyle),
                   const SizedBox(height: 2),
-                  if (widget.tripPickupController != null)
-                    TextField(
-                      controller: widget.tripPickupController,
-                      focusNode: _tripPickupFocusNode,
-                      autofocus: widget.isPickup,
-                      minLines: 1,
-                      maxLines: 2,
-                      onChanged: _onTripPickupSearchChanged,
-                      onTap: () => setState(() {
-                        _editingStopIndex = null;
-                        _tripSelectionIsPickup = true;
-                        _lastPlanRideFieldWasPickup = true;
-                      }),
-                      style: const TextStyle(
-                        fontFamily: 'Poppins',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: Color(0xFF000000),
-                        height: 1.2,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: _tripPickupField != null
+                            ? TextField(
+                                controller: _tripPickupField,
+                                focusNode: _tripPickupFocusNode,
+                                autofocus: widget.isPickup,
+                                minLines: 1,
+                                maxLines: 2,
+                                onChanged: _onTripPickupSearchChanged,
+                                onTap: () => setState(() {
+                                  _editingStopIndex = null;
+                                  _tripSelectionIsPickup = true;
+                                  _lastPlanRideFieldWasPickup = true;
+                                }),
+                                style: const TextStyle(
+                                  fontFamily: 'Poppins',
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xFF000000),
+                                  height: 1.2,
+                                ),
+                                strutStyle: const StrutStyle(
+                                  fontFamily: 'Poppins',
+                                  fontSize: 14,
+                                  height: 1.2,
+                                  forceStrutHeight: true,
+                                  leading: 0,
+                                ),
+                                decoration: InputDecoration(
+                                  hintText: 'My current location',
+                                  hintStyle: const TextStyle(
+                                    fontFamily: 'Poppins',
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFF929292),
+                                    height: 1.2,
+                                  ),
+                                  filled: false,
+                                  fillColor: Colors.transparent,
+                                  isDense: true,
+                                  isCollapsed: true,
+                                  border: InputBorder.none,
+                                  enabledBorder: InputBorder.none,
+                                  focusedBorder: InputBorder.none,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              )
+                            : InkWell(
+                                onTap: widget.onTripPickupTap,
+                                child: Text(
+                                  widget.pickupDisplay.isEmpty
+                                      ? 'My current location'
+                                      : widget.pickupDisplay,
+                                  style: TextStyle(
+                                    fontFamily: 'Poppins',
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    height: 1.2,
+                                    color: widget.pickupDisplay.isEmpty
+                                        ? const Color(0xFF929292)
+                                        : const Color(0xFF000000),
+                                  ),
+                                ),
+                              ),
                       ),
-                      strutStyle: const StrutStyle(
-                        fontFamily: 'Poppins',
-                        fontSize: 14,
-                        height: 1.2,
-                        forceStrutHeight: true,
-                        leading: 0,
-                      ),
-                      decoration: InputDecoration(
-                        hintText: 'My current location',
-                        hintStyle: const TextStyle(
-                          fontFamily: 'Poppins',
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: Color(0xFF929292),
-                          height: 1.2,
+                      if (_planRidePickupClearVisible &&
+                          widget.onTripPickupClear != null) ...[
+                        const SizedBox(width: 4),
+                        IconButton(
+                          tooltip: 'Clear pickup',
+                          icon: Icon(
+                            Icons.close_rounded,
+                            size: 18,
+                            color: Colors.grey.shade600,
+                          ),
+                          onPressed: () {
+                            _tripPickupField?.clear();
+                            _onTripPickupSearchChanged('');
+                            widget.onTripPickupClear!.call();
+                            setState(() {});
+                          },
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 28,
+                            minHeight: 28,
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          style: IconButton.styleFrom(
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
                         ),
-                        filled: false,
-                        fillColor: Colors.transparent,
-                        isDense: true,
-                        isCollapsed: true,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    )
-                  else
-                    InkWell(
-                      onTap: widget.onTripPickupTap,
-                      child: Text(
-                        widget.pickupDisplay.isEmpty
-                            ? 'My current location'
-                            : widget.pickupDisplay,
-                        style: TextStyle(
-                          fontFamily: 'Poppins',
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          height: 1.2,
-                          color: widget.pickupDisplay.isEmpty
-                              ? const Color(0xFF929292)
-                              : const Color(0xFF000000),
-                        ),
-                      ),
-                    ),
+                      ],
+                    ],
+                  ),
                   if (widget.stops.isEmpty) ...[
                     const SizedBox(height: 12),
                     const Divider(
@@ -6189,17 +6548,20 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
           debugPrint('Geocoding fallback also failed: $e');
         }
       }
+      if (!mounted) return;
       setState(() => _isLoading = false);
       if (latLng != null) {
         final stopIdx = _editingStopIndex;
         final tripOv = _tripOverviewMode;
         if (stopIdx != null && tripOv) {
-          ref.read(savedLocationsProvider.notifier).addRecentLocation(
-                name: suggestion.name,
-                address: suggestion.address,
-                location: latLng,
-                placeId: suggestion.placeId,
-              );
+          if (mounted) {
+            ref.read(savedLocationsProvider.notifier).addRecentLocation(
+                  name: suggestion.name,
+                  address: suggestion.address,
+                  location: latLng,
+                  placeId: suggestion.placeId,
+                );
+          }
           final line = '${suggestion.name}, ${suggestion.address}';
           widget.onLocationSelected(line, latLng, stopIndex: stopIdx);
           if (mounted) {
@@ -6211,15 +6573,17 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
             _loadInitialSuggestions();
           }
         } else {
-          final applyPickup = _tapAppliesToPickup;
+          final applyPickup = _suggestionTapTargetsPickup;
           final destinationSide = !applyPickup;
           if (destinationSide) {
-            ref.read(savedLocationsProvider.notifier).addRecentLocation(
-                  name: suggestion.name,
-                  address: suggestion.address,
-                  location: latLng,
-                  placeId: suggestion.placeId,
-                );
+            if (mounted) {
+              ref.read(savedLocationsProvider.notifier).addRecentLocation(
+                    name: suggestion.name,
+                    address: suggestion.address,
+                    location: latLng,
+                    placeId: suggestion.placeId,
+                  );
+            }
           }
           final asPickup = tripOv ? applyPickup : null;
           final line = '${suggestion.name}, ${suggestion.address}';
@@ -6247,18 +6611,20 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
     if (suggestion.latLng == null) {
       _searchLocation(suggestion.name,
           asPickupBias:
-              _tripOverviewMode ? _tapAppliesToPickup : null);
+              _tripOverviewMode ? _suggestionTapTargetsPickup : null);
       return;
     }
     final stopIdx = _editingStopIndex;
     final tripOv = _tripOverviewMode;
     if (stopIdx != null && tripOv) {
-      ref.read(savedLocationsProvider.notifier).addRecentLocation(
-            name: suggestion.name,
-            address: suggestion.address,
-            location: suggestion.latLng!,
-            placeId: suggestion.placeId,
-          );
+      if (mounted) {
+        ref.read(savedLocationsProvider.notifier).addRecentLocation(
+              name: suggestion.name,
+              address: suggestion.address,
+              location: suggestion.latLng!,
+              placeId: suggestion.placeId,
+            );
+      }
       final line =
           '${suggestion.name}${suggestion.address.isNotEmpty ? ', ${suggestion.address}' : ''}';
       widget.onLocationSelected(
@@ -6275,17 +6641,19 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         _loadInitialSuggestions();
       }
     } else {
-      final applyPickup = _tapAppliesToPickup;
+      final applyPickup = _suggestionTapTargetsPickup;
       final destinationSide = !applyPickup;
       if (destinationSide &&
           suggestion.latLng != null &&
           suggestion.name != 'Current Location') {
-        ref.read(savedLocationsProvider.notifier).addRecentLocation(
-              name: suggestion.name,
-              address: suggestion.address,
-              location: suggestion.latLng!,
-              placeId: suggestion.placeId,
-            );
+        if (mounted) {
+          ref.read(savedLocationsProvider.notifier).addRecentLocation(
+                name: suggestion.name,
+                address: suggestion.address,
+                location: suggestion.latLng!,
+                placeId: suggestion.placeId,
+              );
+        }
       }
       final asPickup = tripOv ? applyPickup : null;
       final line =
@@ -6308,7 +6676,7 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
   Widget _buildSuggestionTile(_LocationSuggestion suggestion) {
     final tripOverview = _tripOverviewMode;
     final destinationSide = tripOverview
-        ? (_editingStopIndex != null || !_tapAppliesToPickup)
+        ? (_editingStopIndex != null || !_suggestionTapTargetsPickup)
         : !widget.isPickup;
     final showHomeHeart = destinationSide &&
         !tripOverview &&

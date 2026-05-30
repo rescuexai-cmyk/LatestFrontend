@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -19,8 +21,15 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen> {
+class _HomeScreenState extends ConsumerState<HomeScreen>
+    with SingleTickerProviderStateMixin {
   bool _isCheckingDriver = false;
+
+  /// User chip "peek": animate in, stay ~2–2.5s, animate out, then remove from tree.
+  late final AnimationController _userChipRevealController;
+  late final Animation<double> _userChipRevealOpacity;
+  late final Animation<Offset> _userChipRevealSlide;
+  bool _userChipRemoved = false;
 
   /// Extra space below status bar so the header isn’t cramped against the notch.
   static const _topContentInset = 14.0;
@@ -34,8 +43,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   static const _borderBrown = Color(0xFFA89C8A);
   static const _textDark = Color(0xFF353535);
   static const _textSwitch = Color(0xFF353330);
-  static const _textFooter = Color(0xFF606060);
-
   Future<void> _openDriversApp() async {
     if (_isCheckingDriver) return;
     setState(() => _isCheckingDriver = true);
@@ -47,6 +54,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       if (!mounted) return;
 
       debugPrint('📋 Driver onboarding status: ${status.onboardingStatus.name}');
+
+      if (status.shouldRouteToDriverOnboardingStepper) {
+        context.push(AppRoutes.driverOnboarding);
+        return;
+      }
 
       switch (status.onboardingStatus) {
         case OnboardingStatus.completed:
@@ -88,6 +100,46 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _userChipRevealController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 360),
+      reverseDuration: const Duration(milliseconds: 320),
+    );
+    final curve = CurvedAnimation(
+      parent: _userChipRevealController,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    _userChipRevealOpacity = curve;
+    _userChipRevealSlide = Tween<Offset>(
+      begin: const Offset(0, -0.22),
+      end: Offset.zero,
+    ).animate(curve);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _runUserChipPeekAnimation());
+  }
+
+  Future<void> _runUserChipPeekAnimation() async {
+    if (!mounted || _userChipRemoved) return;
+    await _userChipRevealController.forward();
+    if (!mounted || _userChipRemoved) return;
+    final dwellMs = 2000 + Random().nextInt(501); // 2000–2500 ms inclusive
+    await Future<void>.delayed(Duration(milliseconds: dwellMs));
+    if (!mounted || _userChipRemoved) return;
+    await _userChipRevealController.reverse();
+    if (!mounted) return;
+    setState(() => _userChipRemoved = true);
+  }
+
+  @override
+  void dispose() {
+    _userChipRevealController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final user = ref.watch(currentUserProvider);
     final mq = MediaQuery.of(context);
@@ -98,6 +150,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final pt = mq.padding.top;
     final pl = mq.padding.left;
     final pr = mq.padding.right;
+    final bottomSafe = mq.viewPadding.bottom;
 
     /// Figma tops are from frame top; overlay is laid out below status bar.
     double y(double figmaTop) => (figmaTop * vy - pt).clamp(0.0, double.infinity);
@@ -157,17 +210,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             child: SizedBox(
               width: w - pl - pr,
-              height: h - pt - _topContentInset,
+              height: h - pt - _topContentInset - bottomSafe,
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  Positioned(
-                    left: (w - 236 * vx) / 2 - pl,
-                    top: y(70),
-                    width: 236 * vx,
-                    height: 38 * vx,
-                    child: _buildUserChip(context, user, vx),
-                  ),
+                  if (!_userChipRemoved)
+                    Positioned(
+                      top: y(70),
+                      left: 16,
+                      right: 16,
+                      child: Center(
+                        child: FadeTransition(
+                          opacity: _userChipRevealOpacity,
+                          child: SlideTransition(
+                            position: _userChipRevealSlide,
+                            child: _buildUserChip(
+                              context,
+                              user,
+                              vx,
+                              max(
+                                120.0,
+                                (w - pl - pr) - 32,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   Positioned(
                     left: (w - 311 * vx) / 2 - pl,
                     top: y(264),
@@ -179,12 +248,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     top: y(583),
                     width: contentW,
                     child: _buildActionColumn(context, vx),
-                  ),
-                  Positioned(
-                    left: -pl,
-                    right: -pr,
-                    top: y(808.34),
-                    child: _buildFooter(),
                   ),
                 ],
               ),
@@ -202,69 +265,91 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  Widget _buildUserChip(BuildContext context, User? user, double vx) {
-    final label = (user != null && user.email.isNotEmpty)
-        ? user.email
-        : (user?.name ?? 'User');
+  Widget _buildUserChip(
+    BuildContext context,
+    User? user,
+    double vx,
+    double maxChipOuterWidth,
+  ) {
+    final trimmedName = (user?.name ?? '').trim();
+    final trimmedEmail = (user?.email ?? '').trim();
+    final label = trimmedName.isNotEmpty
+        ? trimmedName
+        : (trimmedEmail.isNotEmpty ? trimmedEmail : 'User');
     final initial = label.isNotEmpty ? label[0].toUpperCase() : 'U';
 
-    return Material(
-      color: Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(38),
-        side: const BorderSide(color: _borderBrown, width: 0.36),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => showSwitchAccountSheet(context),
-        borderRadius: BorderRadius.circular(38),
-        child: Padding(
-          padding: EdgeInsets.only(
-            left: 5.5 * vx,
-            right: 10 * vx,
-            top: 9.75 * vx,
-            bottom: 9.75 * vx,
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 24.3 * vx,
-                height: 24.3 * vx,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFD4956A),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 0.55),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  initial,
-                  style: GoogleFonts.poppins(
-                    fontSize: 11 * vx,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
+    /// Horizontal chrome: paddings + avatar + gaps + chevron (pill grows/shrinks with label).
+    final hPadChip = (5.5 + 10) * vx;
+    final rowFixed =
+        (24.3 + 11 + 4 + 18) * vx; // avatar, gap text↔arrow, spacer, arrow
+    final maxLabelWidth = max(
+      40.0,
+      maxChipOuterWidth - hPadChip - rowFixed,
+    );
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxChipOuterWidth),
+      child: Material(
+        color: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(38),
+          side: const BorderSide(color: _borderBrown, width: 0.36),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => showSwitchAccountSheet(context),
+          borderRadius: BorderRadius.circular(38),
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 5.5 * vx,
+              right: 10 * vx,
+              top: 9.75 * vx,
+              bottom: 9.75 * vx,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 24.3 * vx,
+                  height: 24.3 * vx,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD4956A),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 0.55),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    initial,
+                    style: GoogleFonts.poppins(
+                      fontSize: 11 * vx,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
-              ),
-              SizedBox(width: 11 * vx),
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.poppins(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    height: 18 / 12,
-                    color: _textDark,
+                SizedBox(width: 11 * vx),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxLabelWidth),
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      height: 18 / 12,
+                      color: _textDark,
+                    ),
                   ),
                 ),
-              ),
-              Icon(
-                Icons.keyboard_arrow_down_rounded,
-                size: 18 * vx,
-                color: _borderBrown,
-              ),
-            ],
+                SizedBox(width: 4 * vx),
+                Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  size: 18 * vx,
+                  color: _borderBrown,
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -380,22 +465,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           color: _textSwitch,
           decoration: TextDecoration.underline,
           decorationColor: _textSwitch,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFooter() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Text(
-        'Curated with love in Delhi, NCR 💛',
-        textAlign: TextAlign.center,
-        style: GoogleFonts.poppins(
-          fontSize: 14,
-          fontWeight: FontWeight.w300,
-          height: 21 / 14,
-          color: _textFooter,
         ),
       ),
     );

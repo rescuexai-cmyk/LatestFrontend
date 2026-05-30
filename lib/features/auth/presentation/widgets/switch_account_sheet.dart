@@ -1,3 +1,5 @@
+import 'dart:math' show max;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -486,12 +488,26 @@ class _SwitchAccountSheetState extends ConsumerState<SwitchAccountSheet> {
   }
 }
 
+/// Combines OS insets so transparent bottom sheets stay above gesture / 3-button nav.
+/// Uses a small minimum when overlays report zero (misreported by some fullscreen configs).
+double _bottomOverlayInset(BuildContext context) {
+  final mq = MediaQuery.of(context);
+  return max(max(mq.viewPadding.bottom, mq.padding.bottom), 40.0);
+}
+
 /// Show the switch account bottom sheet
 Future<void> showSwitchAccountSheet(BuildContext context) {
-  return showModalBottomSheet(
+  return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (context) => const SwitchAccountSheet(),
+    useSafeArea: false,
+    builder: (sheetContext) {
+      final bottom = _bottomOverlayInset(sheetContext);
+      return Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: const SwitchAccountSheet(),
+      );
+    },
   );
 }

@@ -159,41 +159,50 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
   Future<void> _animateDismiss(SwipeDirection direction) async {
     _isAnimating = true;
     _countdownTimer?.cancel();
-    
-    final screenWidth = MediaQuery.of(context).size.width;
-    final targetX = direction == SwipeDirection.right ? screenWidth * 1.5 : -screenWidth * 1.5;
-    
-    final startDx = _swipeController.dx;
-    
-    _dismissAnimation = Tween<Offset>(
-      begin: Offset(startDx, _swipeController.dy),
-      end: Offset(targetX, _swipeController.dy),
-    ).animate(
-      CurvedAnimation(
-        parent: _animationController,
-        curve: Curves.easeOutExpo,
-      ),
-    );
-    
-    _animationController.duration = const Duration(milliseconds: 180);
-    _animationController.reset();
-    
-    _dismissAnimation.addListener(() {
-      if (mounted) {
-        _swipeController.dx = _dismissAnimation.value.dx;
-        setState(() {});
+
+    try {
+      // Decline: clear provider FIRST (removes RideStackOverlay) — no stuck blank sheet while
+      // the card flies off-screen. Accept keeps the outward swipe animation + flow unchanged.
+      if (direction == SwipeDirection.left) {
+        HapticFeedback.lightImpact();
+        if (mounted) widget.onDecline();
+        return;
       }
-    });
-    
-    await _animationController.forward();
-    
-    if (mounted) {
-      if (direction == SwipeDirection.right) {
+
+      final screenWidth = MediaQuery.of(context).size.width;
+      final targetX = screenWidth * 1.5;
+
+      final startDx = _swipeController.dx;
+
+      _dismissAnimation = Tween<Offset>(
+        begin: Offset(startDx, _swipeController.dy),
+        end: Offset(targetX, _swipeController.dy),
+      ).animate(
+        CurvedAnimation(
+          parent: _animationController,
+          curve: Curves.easeOutExpo,
+        ),
+      );
+
+      _animationController.duration = const Duration(milliseconds: 180);
+      _animationController.reset();
+
+      _dismissAnimation.addListener(() {
+        if (mounted) {
+          _swipeController.dx = _dismissAnimation.value.dx;
+          setState(() {});
+        }
+      });
+
+      await _animationController.forward();
+
+      if (mounted) {
         await Vibration.vibrate(duration: 50, amplitude: 128);
         widget.onAccept();
-      } else {
-        await Vibration.vibrate(duration: 30, amplitude: 64);
-        widget.onDecline();
+      }
+    } finally {
+      if (mounted) {
+        _isAnimating = false;
       }
     }
   }
@@ -246,6 +255,7 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
   Widget _buildCardContent() {
     return Container(
       width: double.infinity,
+      height: double.infinity,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(24),
@@ -348,9 +358,9 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
           
           const SizedBox(height: 16),
           
-          // Pickup and Drop addresses - Flexible to adapt to text length
-          Flexible(
-            child: Padding(
+          // Pickup and Drop addresses — scroll when card height is tight
+          Expanded(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: IntrinsicHeight(
                 child: Row(
@@ -371,17 +381,15 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
                             ),
                           ),
                           const SizedBox(height: 4),
-                          Flexible(
-                            child: Text(
-                              widget.ride.pickupAddress,
-                              style: const TextStyle(
-                                color: _textGrey,
-                                fontSize: 12,
-                                height: 1.3,
-                              ),
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
+                          Text(
+                            widget.ride.pickupAddress,
+                            style: const TextStyle(
+                              color: _textGrey,
+                              fontSize: 12,
+                              height: 1.3,
                             ),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ],
                       ),
@@ -412,17 +420,15 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
                             ),
                           ),
                           const SizedBox(height: 4),
-                          Flexible(
-                            child: Text(
-                              widget.ride.dropAddress,
-                              style: const TextStyle(
-                                color: _textGrey,
-                                fontSize: 12,
-                                height: 1.3,
-                              ),
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
+                          Text(
+                            widget.ride.dropAddress,
+                            style: const TextStyle(
+                              color: _textGrey,
+                              fontSize: 12,
+                              height: 1.3,
                             ),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ],
                       ),
@@ -433,11 +439,9 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
             ),
           ),
           
-          const SizedBox(height: 8),
-          
-          // Swipe hint at bottom
+          // Swipe hint pinned above system nav / overlay edge
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
             child: _SwipeHintBar(
               secondsLeft: _secondsLeft,
               totalSeconds: widget.timeoutSeconds,

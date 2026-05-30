@@ -35,13 +35,19 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
   bool _isCompleted = false;
   late AnimationController _animationController;
   late Animation<double> _resetAnimation;
-  
+
+  /// Thumb slot width (includes horizontal inset padding on the track).
   static const double _sliderWidth = 60;
   static const double _padding = 4;
   static const double _threshold = 0.85;
 
-  double get _maxDrag => _trackWidth - _sliderWidth;
-  double get _trackWidth => MediaQuery.of(context).size.width - 48;
+  double _currentMaxDrag = 0;
+
+  double get _thumbWidth => _sliderWidth - (_padding * 2);
+
+  double _maxDragForTrack(double trackWidth) {
+    return (trackWidth - _thumbWidth - (_padding * 2)).clamp(0.0, double.infinity);
+  }
 
   @override
   void initState() {
@@ -64,23 +70,24 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
-    if (!widget.enabled || _isCompleted) return;
-    
+    if (!widget.enabled || _isCompleted || _currentMaxDrag <= 0) return;
+
     setState(() {
-      _dragPosition = (_dragPosition + details.delta.dx).clamp(0.0, _maxDrag);
+      _dragPosition =
+          (_dragPosition + details.delta.dx).clamp(0.0, _currentMaxDrag);
     });
-    
-    if (_dragPosition / _maxDrag >= _threshold && !_isCompleted) {
+
+    if (_dragPosition / _currentMaxDrag >= _threshold && !_isCompleted) {
       HapticFeedback.mediumImpact();
     }
   }
 
   void _onPanEnd(DragEndDetails details) {
-    if (!widget.enabled || _isCompleted) return;
-    
+    if (!widget.enabled || _isCompleted || _currentMaxDrag <= 0) return;
+
     setState(() => _isDragging = false);
-    
-    if (_dragPosition / _maxDrag >= _threshold) {
+
+    if (_dragPosition / _currentMaxDrag >= _threshold) {
       _completeSlide();
     } else {
       _resetSlider();
@@ -89,28 +96,28 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
 
   void _completeSlide() async {
     setState(() => _isCompleted = true);
-    
+
     await Vibration.vibrate(duration: 50, amplitude: 128);
-    
+
     final startPos = _dragPosition;
     _resetAnimation = Tween<double>(
       begin: startPos,
-      end: _maxDrag,
+      end: _currentMaxDrag,
     ).animate(CurvedAnimation(
       parent: _animationController,
       curve: Curves.easeOutCubic,
     ));
-    
+
     _resetAnimation.addListener(() {
       if (mounted) {
         setState(() => _dragPosition = _resetAnimation.value);
       }
     });
-    
+
     await _animationController.forward(from: 0);
-    
+
     widget.onSlideComplete();
-    
+
     await Future.delayed(const Duration(milliseconds: 300));
     if (mounted) {
       setState(() {
@@ -129,27 +136,24 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
       parent: _animationController,
       curve: Curves.easeOutCubic,
     ));
-    
+
     _resetAnimation.addListener(() {
       if (mounted) {
         setState(() => _dragPosition = _resetAnimation.value);
       }
     });
-    
+
     _animationController.forward(from: 0);
   }
 
   @override
   Widget build(BuildContext context) {
-    final progress = _maxDrag > 0 ? (_dragPosition / _maxDrag) : 0.0;
-    final textOpacity = (1 - progress * 1.5).clamp(0.0, 1.0);
-    
     return Container(
       height: widget.height,
       margin: widget.margin,
       decoration: BoxDecoration(
-        color: widget.enabled 
-            ? widget.backgroundColor 
+        color: widget.enabled
+            ? widget.backgroundColor
             : widget.backgroundColor.withOpacity(0.5),
         borderRadius: BorderRadius.circular(widget.height / 2),
         boxShadow: [
@@ -160,91 +164,108 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
           ),
         ],
       ),
-      child: Stack(
-        children: [
-          // Text label (centered)
-          Center(
-            child: Opacity(
-              opacity: textOpacity,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    widget.text,
-                    style: TextStyle(
-                      color: widget.sliderColor,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    Icons.arrow_forward_ios,
-                    color: widget.sliderColor.withOpacity(0.7),
-                    size: 16,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          
-          // Slider thumb
-          Positioned(
-            left: _padding + _dragPosition,
-            top: _padding,
-            child: GestureDetector(
-              onPanStart: _onPanStart,
-              onPanUpdate: _onPanUpdate,
-              onPanEnd: _onPanEnd,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 100),
-                width: _sliderWidth - (_padding * 2),
-                height: widget.height - (_padding * 2),
-                decoration: BoxDecoration(
-                  color: widget.sliderColor,
-                  borderRadius: BorderRadius.circular((widget.height - (_padding * 2)) / 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(_isDragging ? 0.2 : 0.1),
-                      blurRadius: _isDragging ? 8 : 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Center(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 200),
-                    child: _isCompleted
-                        ? Icon(
-                            Icons.check,
-                            key: const ValueKey('check'),
-                            color: widget.backgroundColor,
-                            size: 24,
-                          )
-                        : Icon(
-                            widget.icon,
-                            key: const ValueKey('icon'),
-                            color: widget.backgroundColor,
-                            size: 24,
+      clipBehavior: Clip.hardEdge,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxDrag = _maxDragForTrack(constraints.maxWidth);
+          _currentMaxDrag = maxDrag;
+          final drag = _dragPosition.clamp(0.0, maxDrag);
+
+          final progress =
+              maxDrag > 0 ? (drag / maxDrag).clamp(0.0, 1.0) : 0.0;
+          final textOpacity = (1 - progress * 1.5).clamp(0.0, 1.0);
+
+          return Stack(
+            clipBehavior: Clip.hardEdge,
+            children: [
+              Center(
+                child: Opacity(
+                  opacity: textOpacity,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          widget.text,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: widget.sliderColor,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
                           ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Icon(
+                        Icons.arrow_forward_ios,
+                        color: widget.sliderColor.withOpacity(0.7),
+                        size: 16,
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          ),
-          
-          // Shimmer effect hint
-          if (!_isDragging && _dragPosition == 0 && widget.enabled)
-            Positioned(
-              left: _sliderWidth + 8,
-              top: 0,
-              bottom: 0,
-              child: Center(
-                child: _ShimmerArrows(color: widget.sliderColor.withOpacity(0.5)),
+              Positioned(
+                left: _padding + drag,
+                top: _padding,
+                child: GestureDetector(
+                  onPanStart: _onPanStart,
+                  onPanUpdate: _onPanUpdate,
+                  onPanEnd: _onPanEnd,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 100),
+                    width: _thumbWidth,
+                    height: widget.height - (_padding * 2),
+                    decoration: BoxDecoration(
+                      color: widget.sliderColor,
+                      borderRadius: BorderRadius.circular(
+                        (widget.height - (_padding * 2)) / 2,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color:
+                              Colors.black.withOpacity(_isDragging ? 0.2 : 0.1),
+                          blurRadius: _isDragging ? 8 : 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 200),
+                        child: _isCompleted
+                            ? Icon(
+                                Icons.check,
+                                key: const ValueKey('check'),
+                                color: widget.backgroundColor,
+                                size: 24,
+                              )
+                            : Icon(
+                                widget.icon,
+                                key: const ValueKey('icon'),
+                                color: widget.backgroundColor,
+                                size: 24,
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
-        ],
+              if (!_isDragging && _dragPosition == 0 && widget.enabled)
+                Positioned(
+                  left: _sliderWidth + 8,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: _ShimmerArrows(
+                      color: widget.sliderColor.withOpacity(0.5),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -252,7 +273,7 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
 
 class _ShimmerArrows extends StatefulWidget {
   final Color color;
-  
+
   const _ShimmerArrows({required this.color});
 
   @override
@@ -293,8 +314,9 @@ class _ShimmerArrowsState extends State<_ShimmerArrows>
           children: List.generate(3, (index) {
             final delay = index * 0.2;
             final value = ((_animation.value - delay) % 1.0).clamp(0.0, 1.0);
-            final opacity = (value < 0.5 ? value * 2 : (1 - value) * 2).clamp(0.2, 0.8);
-            
+            final opacity =
+                (value < 0.5 ? value * 2 : (1 - value) * 2).clamp(0.2, 0.8);
+
             return Padding(
               padding: const EdgeInsets.only(right: 2),
               child: Icon(

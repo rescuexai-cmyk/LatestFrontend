@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -17,7 +19,7 @@ class AuthState {
   final bool isLoading;
   final String? error;
   final String? currentSessionId; // Store phone for OTP verification
-  final bool pendingOnboarding; // True when new user needs name entry + terms
+  final bool pendingOnboarding; // True when new user still needs name entry
   final bool pendingPhoneLink; // True when social login must add phone
   final bool onboardingAfterPhoneLink; // Preserve onboarding requirement until phone is linked
   final bool isLoggingOut;
@@ -122,12 +124,28 @@ class AuthNotifier extends StateNotifier<AuthState> {
     '9999999999',
   ];
 
+  /// Completes when [_initializeAuth] has finished cold-start hydration.
+  Completer<void>? _initialHydrationCompleter;
+
   AuthNotifier(this._secureStorage, this._ref)
       : super(const AuthState(isLoading: true)) {
+    _initialHydrationCompleter = Completer<void>();
     // Set up auth error callback for automatic logout on 401/403
     apiClient.setOnAuthError(_handleAuthError);
     // Defer initialization to next microtask to avoid blocking constructor
     Future.microtask(() => _initializeAuth());
+  }
+
+  /// Await once before showing router so returning users don't flash login.
+  Future<void> waitForInitialHydration() =>
+      _initialHydrationCompleter?.future ?? Future.value();
+
+  void _completeInitialHydration() {
+    final c = _initialHydrationCompleter;
+    _initialHydrationCompleter = null;
+    if (c != null && !c.isCompleted) {
+      c.complete();
+    }
   }
   
   /// Handle auth errors (401 after refresh fails, 403 deactivated user)
@@ -299,6 +317,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
     } catch (e) {
       debugPrint('Auth initialization error: $e');
       state = AuthState(error: e.toString());
+    } finally {
+      _completeInitialHydration();
     }
   }
   

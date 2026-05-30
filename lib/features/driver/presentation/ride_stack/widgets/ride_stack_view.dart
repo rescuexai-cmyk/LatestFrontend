@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/driver_rides_provider.dart';
@@ -56,16 +58,18 @@ class _RideStackViewState extends ConsumerState<RideStackView>
 
   Future<void> _handleDecline(RideOffer ride) async {
     if (_isPromoting || _isProcessing) return;
-    
-    _isPromoting = true;
-    
-    await _promotionController.forward(from: 0);
-    
-    if (mounted) {
-      _isPromoting = false;
+
+    _isProcessing = true;
+    try {
+      // Run decline immediately (updates activeOffer / queue synchronously inside).
+      // Avoiding a promotion animation BEFORE this kept the overlay up with no card painted.
+      await widget.onDecline(ride);
+    } finally {
+      if (mounted) {
+        _isProcessing = false;
+        _isPromoting = false;
+      }
     }
-    
-    await widget.onDecline(ride);
   }
 
   @override
@@ -108,14 +112,18 @@ class _RideStackViewState extends ConsumerState<RideStackView>
         top: 0,
         left: 16,
         right: 16,
-        bottom: 16,
+        bottom: 20,
         child: RideCard(
           key: ValueKey(ride.id),
           ride: ride,
           stackIndex: index,
           isTop: isTop,
-          onAccept: () => _handleAccept(ride),
-          onDecline: () => _handleDecline(ride),
+          onAccept: () {
+            unawaited(_handleAccept(ride));
+          },
+          onDecline: () {
+            unawaited(_handleDecline(ride));
+          },
         ),
       );
     }
@@ -138,7 +146,7 @@ class _RideStackViewState extends ConsumerState<RideStackView>
           top: translateY,
           left: 16,
           right: 16,
-          bottom: 16 - translateY,
+          bottom: 20 - translateY,
           child: Transform.scale(
             scale: scale,
             alignment: Alignment.topCenter,

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/models/chat_message.dart';
 import '../../../core/services/api_client.dart';
+import '../../../core/services/push_notification_service.dart';
 import '../../../core/services/websocket_service.dart';
 
 final chatProvider = StateNotifierProvider.family<ChatNotifier, ChatState, String>(
@@ -203,6 +204,19 @@ class ChatNotifier extends StateNotifier<ChatState> {
       otherUserTyping: false,
       unreadCount: _isChatOpen ? state.unreadCount : state.unreadCount + 1,
     );
+
+    if (!_isChatOpen) {
+      unawaited(pushNotificationService.showChatMessageNotification(
+        data: {
+          ...messageData,
+          'type': NotificationTypes.chatMessage,
+          'rideId': rideId,
+          'message': msgText,
+          'sender': senderRole,
+          if (senderId.isNotEmpty) 'senderId': senderId,
+        },
+      ));
+    }
   }
 
   void _handleChatHistory(dynamic data) {

@@ -25,8 +25,7 @@ import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 /// Handle background messages (must be top-level function)
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp();
-  debugPrint('📬 Background message: ${message.messageId}');
+  await processFirebaseBackgroundMessage(message);
 }
 
 void main() async {
@@ -73,19 +72,21 @@ void main() async {
           scaffoldBackgroundColor: const Color(0xFFF6EFE4),
           colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFD4956A)),
         ),
-        home: _AppInitializer(),
+        home: const _AppInitializer(),
       ),
     ),
   );
 }
 
 /// Shows splash during init, then the real app or error screen.
-class _AppInitializer extends StatefulWidget {
+class _AppInitializer extends ConsumerStatefulWidget {
+  const _AppInitializer();
+
   @override
-  State<_AppInitializer> createState() => _AppInitializerState();
+  ConsumerState<_AppInitializer> createState() => _AppInitializerState();
 }
 
-class _AppInitializerState extends State<_AppInitializer> {
+class _AppInitializerState extends ConsumerState<_AppInitializer> {
   String? _initError;
   bool _ready = false;
 
@@ -166,17 +167,28 @@ class _AppInitializerState extends State<_AppInitializer> {
   Future<void> _runInitWithTimeout() async {
     const timeout = Duration(seconds: 12);
     final startTime = DateTime.now();
+    // Start persisted-session read in parallel with Firebase / push / server checks.
+    ref.read(authStateProvider);
     try {
       await _doInit().timeout(timeout);
     } on TimeoutException {
       debugPrint('⚠️ Init timed out after 12s, showing app anyway');
     }
 
-    // Ensure splash screen holds long enough for the animation to finish (1.5s + 0.3s delay)
+    // Ensure splash + logo animation completes (1.5s + slack)
     final elapsed = DateTime.now().difference(startTime);
     final minimumSplashDuration = const Duration(milliseconds: 2200);
     if (elapsed < minimumSplashDuration) {
       await Future.delayed(minimumSplashDuration - elapsed);
+    }
+
+    // Keep splash until persisted session hydration finishes so login doesn't flash first.
+    try {
+      await ref.read(authStateProvider.notifier).waitForInitialHydration().timeout(
+            const Duration(seconds: 20),
+          );
+    } on TimeoutException {
+      debugPrint('⚠️ Auth hydration timed out; continuing to app');
     }
 
     if (mounted) setState(() => _ready = true);
@@ -402,16 +414,24 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
   }
 
   RideOffer _rideOfferFromPendingAction(Map<String, dynamic> data) {
+    final pickupDist = (data['pickupDistance'] ?? data['pickup_distance'] ?? '0 km')
+        .toString();
+    final dropDist = (data['dropDistance'] ??
+            data['drop_distance'] ??
+            data['tripDistance'] ??
+            data['trip_distance'] ??
+            data['estimatedDistance'] ??
+            data['distance'] ??
+            pickupDist)
+        .toString();
     return RideOffer(
       id: (data['rideId'] ?? data['id'] ?? '').toString(),
       type: (data['vehicleType'] ?? data['serviceType'] ?? 'bike_rescue')
           .toString(),
       earning: _parseFare(data['fare'] ?? data['estimatedFare']),
-      pickupDistance:
-          (data['distance'] ?? data['pickupDistance'] ?? '0 km').toString(),
+      pickupDistance: pickupDist,
       pickupTime: (data['pickupTime'] ?? 'Now').toString(),
-      dropDistance:
-          (data['dropDistance'] ?? data['distance'] ?? '0 km').toString(),
+      dropDistance: dropDist.isNotEmpty ? dropDist : pickupDist,
       dropTime: (data['dropTime'] ?? '').toString(),
       pickupAddress:
           (data['pickup'] ?? data['pickupAddress'] ?? 'Pickup').toString(),

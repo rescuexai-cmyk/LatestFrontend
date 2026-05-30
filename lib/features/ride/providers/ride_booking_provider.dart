@@ -91,39 +91,47 @@ class RideBookingState {
     LatLng? ecoPickupLocation,
     /// When true, clears drop + route summary (used by Plan Your Ride clear ×).
     bool clearDestination = false,
+    /// When true, clears pickup (+ eco pickup hints) and route summary (pickup clear ×).
+    bool clearPickup = false,
   }) {
+    final clearRoutePreview = clearDestination || clearPickup;
     return RideBookingState(
       rideId: rideId ?? this.rideId,
       rideOtp: rideOtp ?? this.rideOtp,
-      pickupAddress: pickupAddress ?? this.pickupAddress,
+      pickupAddress: clearPickup ? null : pickupAddress ?? this.pickupAddress,
       destinationAddress: clearDestination
           ? null
           : (destinationAddress ?? this.destinationAddress),
-      pickupLocation: pickupLocation ?? this.pickupLocation,
+      pickupLocation: clearPickup ? null : pickupLocation ?? this.pickupLocation,
       destinationLocation: clearDestination
           ? null
           : destinationLocation ?? this.destinationLocation,
       stops: stops ?? this.stops,
       distanceText:
-          clearDestination ? '' : distanceText ?? this.distanceText,
+          clearRoutePreview ? '' : distanceText ?? this.distanceText,
       durationText:
-          clearDestination ? '' : durationText ?? this.durationText,
-      distance: clearDestination ? 0 : distance ?? this.distance,
-      duration: clearDestination ? 0 : duration ?? this.duration,
-      fare: clearDestination ? 0 : fare ?? this.fare,
+          clearRoutePreview ? '' : durationText ?? this.durationText,
+      distance: clearRoutePreview ? 0 : distance ?? this.distance,
+      duration: clearRoutePreview ? 0 : duration ?? this.duration,
+      fare: clearRoutePreview ? 0 : fare ?? this.fare,
       selectedRideType: selectedRideType ?? this.selectedRideType,
       selectedCabTypeId: selectedCabTypeId ?? this.selectedCabTypeId,
       selectedCabTypeName: selectedCabTypeName ?? this.selectedCabTypeName,
       driverCount: driverCount ?? this.driverCount,
       polylinePoints:
-          clearDestination ? [] : polylinePoints ?? this.polylinePoints,
-      // Pricing v2
-      originalFare: originalFare ?? this.originalFare,
-      subsidyAmount: subsidyAmount ?? this.subsidyAmount,
-      isSubsidyApplied: isSubsidyApplied ?? this.isSubsidyApplied,
-      isEcoPickup: isEcoPickup ?? this.isEcoPickup,
-      ecoPickupAddress: ecoPickupAddress ?? this.ecoPickupAddress,
-      ecoPickupLocation: ecoPickupLocation ?? this.ecoPickupLocation,
+          clearRoutePreview ? [] : polylinePoints ?? this.polylinePoints,
+      // Pricing v2 — reset subsidy preview whenever route preview is invalidated
+      originalFare:
+          clearRoutePreview ? 0 : originalFare ?? this.originalFare,
+      subsidyAmount:
+          clearRoutePreview ? 0 : subsidyAmount ?? this.subsidyAmount,
+      isSubsidyApplied:
+          clearRoutePreview ? false : isSubsidyApplied ?? this.isSubsidyApplied,
+      isEcoPickup: clearPickup ? false : isEcoPickup ?? this.isEcoPickup,
+      ecoPickupAddress:
+          clearPickup ? null : ecoPickupAddress ?? this.ecoPickupAddress,
+      ecoPickupLocation:
+          clearPickup ? null : ecoPickupLocation ?? this.ecoPickupLocation,
     );
   }
 }
@@ -149,6 +157,12 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
   /// Clear drop-off and route preview (e.g. user tapped × on destination field).
   void clearDestinationAndRoute() {
     state = state.copyWith(clearDestination: true);
+  }
+
+  /// Clear pickup and route preview (e.g. user tapped × on pickup in Plan Your Ride).
+  /// Destination is kept — user typically re-picks pickup then recalculates route.
+  void clearPickupAndRoutePreview() {
+    state = state.copyWith(clearPickup: true);
   }
 
   void setStops(List<RideStop> stops) {

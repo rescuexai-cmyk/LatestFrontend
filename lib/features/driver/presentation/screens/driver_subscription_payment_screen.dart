@@ -55,13 +55,13 @@ class _DriverSubscriptionPaymentScreenState
         setState(() => _paymentInitiated = true);
       } else {
         if (mounted) {
-          AppMessenger.showErrorBanner(context, 'No UPI app found. Please install a UPI app.');
+          AppMessenger.showDriverErrorBanner(context, 'No UPI app found. Please install a UPI app.');
         }
       }
     } catch (e) {
       debugPrint('Failed to launch UPI: $e');
       if (mounted) {
-        AppMessenger.showErrorBanner(context, 'Failed to open UPI app: $e');
+        AppMessenger.showDriverErrorBanner(context, 'Failed to open UPI app: $e');
       }
     }
   }
@@ -115,7 +115,7 @@ class _DriverSubscriptionPaymentScreenState
         context.pop(true);
       } else if (mounted) {
         final error = ref.read(driverSubscriptionProvider).error;
-        AppMessenger.showErrorBanner(context, error ?? 'Failed to activate subscription');
+        AppMessenger.showDriverErrorBanner(context, error ?? 'Failed to activate subscription');
       }
     } finally {
       if (mounted) {
@@ -572,7 +572,7 @@ class _DriverSubscriptionPaymentScreenState
             Clipboard.setData(
               ClipboardData(text: AppConfig.companyUpiId),
             );
-            AppMessenger.showErrorBanner(context, 'UPI ID copied');
+            AppMessenger.showDriverErrorBanner(context, 'UPI ID copied');
           },
           borderRadius: BorderRadius.circular(16),
           child: Container(
@@ -650,8 +650,8 @@ class _DriverSubscriptionPaymentScreenState
   // How it works card (light blue)
   // ---------------------------------------------------------------------------
   Widget _buildHowItWorksCard() {
-    const items = [
-      'Pay ₹39 platform fee',
+    final items = [
+      'Pay ₹${AppConfig.dailyPlatformFee.toInt()} platform fee',
       'Get 24 hours of unlimited ride access',
       'Accept and complete rides without limits',
       'Pass expires automatically after 24 hours',

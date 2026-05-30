@@ -452,12 +452,12 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
     if (email.isNotEmpty) {
       final emailRegex = RegExp(r'^[\w\-.]+@([\w\-]+\.)+[\w\-]{2,4}$');
       if (!emailRegex.hasMatch(email)) {
-        AppMessenger.showErrorBanner(context, 'Please enter a valid email address');
+        AppMessenger.showDriverErrorBanner(context, 'Please enter a valid email address');
         return;
       }
     }
     if (aadhaar.isNotEmpty && aadhaar.length != 12) {
-      AppMessenger.showErrorBanner(context, 'Aadhaar number must be exactly 12 digits');
+      AppMessenger.showDriverErrorBanner(context, 'Aadhaar number must be exactly 12 digits');
       return;
     }
     setState(() => _isSavingDetails = true);
@@ -494,7 +494,7 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isSavingDetails = false);
-        AppMessenger.showErrorBanner(context, 'Error: ${e.toString().replaceAll('Exception: ', '')}');
+        AppMessenger.showDriverErrorBanner(context, 'Error: ${e.toString().replaceAll('Exception: ', '')}');
       }
     }
   }
@@ -998,15 +998,15 @@ class _EditDetailsSheetState extends ConsumerState<_EditDetailsSheet> {
     final vehicleNumber = _showVehicle ? _vehicleNumberController.text.trim() : '';
     final vehicleModel = _showVehicle ? _vehicleModelController.text.trim() : '';
     if (email.isEmpty && aadhaar.isEmpty && vehicleNumber.isEmpty && vehicleModel.isEmpty) {
-      AppMessenger.showErrorBanner(context, 'Please update at least one field');
+      AppMessenger.showDriverErrorBanner(context, 'Please update at least one field');
       return;
     }
     if (aadhaar.isNotEmpty && !RegExp(r'^\d{12}$').hasMatch(aadhaar)) {
-      AppMessenger.showErrorBanner(context, 'Aadhaar must be exactly 12 digits');
+      AppMessenger.showDriverErrorBanner(context, 'Aadhaar must be exactly 12 digits');
       return;
     }
     if (email.isNotEmpty && !RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email)) {
-      AppMessenger.showErrorBanner(context, 'Please enter a valid email address');
+      AppMessenger.showDriverErrorBanner(context, 'Please enter a valid email address');
       return;
     }
     setState(() => _isSubmitting = true);
@@ -1035,12 +1035,12 @@ class _EditDetailsSheetState extends ConsumerState<_EditDetailsSheet> {
         Navigator.pop(context);
         notifier.fetchOnboardingStatus();
       } else {
-        AppMessenger.showErrorBanner(context, 'Failed to update details.');
+        AppMessenger.showDriverErrorBanner(context, 'Failed to update details.');
       }
     } catch (e) {
       if (!mounted) return;
       setState(() => _isSubmitting = false);
-      AppMessenger.showErrorBanner(context, 'Error: $e');
+      AppMessenger.showDriverErrorBanner(context, 'Error: $e');
     }
   }
   @override

@@ -75,7 +75,7 @@ class AppConfig {
   static const Duration receiveTimeout = Duration(seconds: 30);
 
   // Driver Subscription (Daily Platform Fee)
-  static const double dailyPlatformFee = 39.0;
+  static const double dailyPlatformFee = 49.0;
   
   // Company UPI Details (used for all payments)
   static const String companyUpiId =

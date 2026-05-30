@@ -14,33 +14,59 @@ const double figmaRideSheetTopRadius = 32;
 /// Figma trip-summary row width (Frame 1410081817).
 const double figmaTripPillsTotalWidth = 346;
 
-/// Figma vehicle thumb — fits 81px card inner row (61) with 10px vertical padding.
+/// Figma vehicle thumb — pairs with option card (min 81px tall); aligns with 10px vertical padding.
 const double figmaVehicleThumbWidth = 88;
 const double figmaVehicleThumbHeight = 61;
 const double figmaVehicleThumbRadius = 14.1659;
 
-/// Normalizes Google Directions / backend duration strings to always show `N min`
-/// (avoids `12M`, `12 mins`, etc., and prevents ellipsis in the stats capsule).
+/// Normalizes Google Directions / backend duration strings to always show total `N min`
+/// (so long trips stay correct; avoids matching only the trailing minutes of "1 h 10 min").
 String figmaFormatTripDurationLabel(String raw) {
   final t = raw.trim();
   if (t.isEmpty) return '—';
   final lower = t.toLowerCase();
-  final minLiteral = RegExp(r'(\d+)\s*m(?:in)?s?\b').firstMatch(lower);
-  if (minLiteral != null) return '${minLiteral.group(1)} min';
-  final hourMin = RegExp(r'(\d+)\s*h(?:our)?s?\s*(\d+)\s*m').firstMatch(lower);
+
+  // 1) Compound hour + minute — must come before bare "NN min" or we grab only "10"
+  //    from strings like "1 h 10 min" / "~2 hr 15m".
+  final hourMin =
+      RegExp(r'(\d+)\s*h(?:our)?s?\s*(\d+)\s*m(?:in)?s?\b', caseSensitive: false)
+          .firstMatch(lower);
   if (hourMin != null) {
-    final h = int.tryParse(hourMin.group(1)!);
-    final m = int.tryParse(hourMin.group(2)!);
-    if (h != null && m != null) return '${h * 60 + m} min';
+    final h = int.tryParse(hourMin.group(1)!) ?? 0;
+    final m = int.tryParse(hourMin.group(2)!) ?? 0;
+    return '${h * 60 + m} min';
   }
-  final hoursOnly = RegExp(r'(\d+)\s*h(?:our)?s?\b').firstMatch(lower);
-  if (hoursOnly != null) {
-    final h = int.tryParse(hoursOnly.group(1)!);
-    if (h != null) return '${h * 60} min';
+
+  // 2) Hours only when there's no "... min" clause (skip "5 h 12 min" etc.).
+  final hasMinuteClause =
+      RegExp(r'\d+\s*m(?:in)?s?\b', caseSensitive: false).hasMatch(lower);
+  if (!hasMinuteClause) {
+    final hoursOnly =
+        RegExp(r'(\d+)\s*h(?:our)?s?\b', caseSensitive: false).firstMatch(lower);
+    if (hoursOnly != null) {
+      final h = int.tryParse(hoursOnly.group(1)!);
+      if (h != null) return '${h * 60} min';
+    }
   }
+
+  // 3) Pure minutes: "50 min", "50 m", "~50mins"
+  final minLiteral =
+      RegExp(r'(\d+)\s*m(?:in)?s?\b', caseSensitive: false).firstMatch(lower);
+  if (minLiteral != null) return '${minLiteral.group(1)} min';
+
+  // 4) Last resort single number
   final anyDigit = RegExp(r'(\d+)').firstMatch(t);
   if (anyDigit != null) return '${anyDigit.group(1)} min';
   return t;
+}
+
+/// Total minutes parsed from duration text ([figmaFormatTripDurationLabel]); null if unknown.
+int? figmaParseTripDurationMinutes(String raw) {
+  final label = figmaFormatTripDurationLabel(raw);
+  if (label == '—') return null;
+  final m = RegExp(r'^(\d+)\s*min$', caseSensitive: false).firstMatch(label.trim());
+  if (m != null) return int.tryParse(m.group(1)!);
+  return null;
 }
 
 /// Compact distance for the stats capsule (avoids ellipsis from long backend strings).
@@ -293,7 +319,7 @@ class _TripStatsCapsule extends StatelessWidget {
   }
 }
 
-/// Figma vehicle row (346×81); selected = 2px #CF923D, unselected = borderless.
+/// Figma vehicle row (min-height 346×81); expands when footer copy needs more lines.
 class FigmaVehicleOptionCard extends StatelessWidget {
   const FigmaVehicleOptionCard({
     super.key,
@@ -341,8 +367,8 @@ class FigmaVehicleOptionCard extends StatelessWidget {
           padding: const EdgeInsets.only(bottom: 18),
           child: Center(
             child: Container(
+              constraints: BoxConstraints(minHeight: 81, maxWidth: cardW),
               width: cardW,
-              height: 81,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(10),
                 boxShadow: _cardShadows,
@@ -395,6 +421,8 @@ class FigmaVehicleOptionCard extends StatelessWidget {
                                     Expanded(
                                       child: Text(
                                         title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
                                         style: GoogleFonts.poppins(
                                           fontSize: 16,
                                           fontWeight: FontWeight.w500,
@@ -405,6 +433,8 @@ class FigmaVehicleOptionCard extends StatelessWidget {
                                     ),
                                     Text(
                                       priceText,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                       style: GoogleFonts.inter(
                                         fontSize: 16,
                                         fontWeight: FontWeight.w500,
@@ -420,10 +450,13 @@ class FigmaVehicleOptionCard extends StatelessWidget {
                                 const SizedBox(height: 5),
                                 Text(
                                   paymentNote!,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
                                   style: GoogleFonts.inter(
-                                    fontSize: 14,
+                                    fontSize: cardW < 330 ? 12.5 : 14,
                                     fontWeight: FontWeight.w500,
-                                    height: 17 / 14,
+                                    height:
+                                        cardW < 330 ? 15 / 12.5 : 17 / 14,
                                     letterSpacing: -0.42,
                                     color: const Color(0xFF5B5B5B),
                                   ),
@@ -641,10 +674,14 @@ class FigmaSlideToBookButton extends StatefulWidget {
     super.key,
     required this.onSlideComplete,
     this.enabled = true,
+    this.trackLabel = 'Slide to Book now!',
   });
 
   final VoidCallback onSlideComplete;
   final bool enabled;
+
+  /// Center label on the dark track (fades slightly while dragging).
+  final String trackLabel;
 
   static const Color trackColor = Color(0xFF2E2C2A);
   static const double trackHeight = 60;
@@ -778,7 +815,7 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
                       child: Opacity(
                         opacity: textOpacity,
                         child: Text(
-                          'Slide to Book now!',
+                          widget.trackLabel,
                           textAlign: TextAlign.center,
                           style: GoogleFonts.poppins(
                             fontSize: 16,

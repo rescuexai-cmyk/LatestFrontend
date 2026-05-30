@@ -472,6 +472,34 @@ class BackendOnboardingStatus {
     // Also show email if there are any rejections as a safe fallback
     return rejectedDocuments.isNotEmpty;
   }
+
+  /// Whether there are any uploads or verification activity in flight.
+  bool get _hasAnyDocumentProgress =>
+      uploadedDocuments.isNotEmpty ||
+      pendingDocuments.isNotEmpty ||
+      verifiedDocuments.isNotEmpty ||
+      rejectedDocuments.isNotEmpty ||
+      documentsSubmitted;
+
+  /// Welcome screen document cards do not offer an initial upload for
+  /// [DocumentStatus.notUploaded]; use the stepper [DriverOnboardingScreen] instead.
+  ///
+  /// Also covers new driver rows that API reports as [documentVerification]
+  /// before any file has been uploaded (common right after POST /onboarding/start).
+  bool get shouldRouteToDriverOnboardingStepper {
+    switch (onboardingStatus) {
+      case OnboardingStatus.notStarted:
+      case OnboardingStatus.started:
+        return true;
+      case OnboardingStatus.documentVerification:
+      case OnboardingStatus.documentsUploaded:
+        if (_hasAnyDocumentProgress) return false;
+        return true;
+      case OnboardingStatus.completed:
+      case OnboardingStatus.rejected:
+        return false;
+    }
+  }
 }
 
 /// Driver onboarding state

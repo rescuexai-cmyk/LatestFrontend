@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
@@ -65,10 +66,181 @@ class NotificationActions {
   static const String callRider = 'CALL_RIDER';
 }
 
-/// Notification type identifiers used in payload routing.
 class NotificationTypes {
   static const String driverOnboarding = 'DRIVER_ONBOARDING';
   static const String newRide = 'NEW_RIDE';
+  static const String chatMessage = 'CHAT_MESSAGE';
+}
+
+const String _chatAndroidChannelId = 'raahi_chat';
+
+Map<String, dynamic> normalizeChatNotificationPayload(Map<String, dynamic> data) {
+  final merged = Map<String, dynamic>.from(data);
+  final payload = data['payload'];
+  if (payload is Map) {
+    for (final entry in Map<String, dynamic>.from(payload as Map).entries) {
+      merged.putIfAbsent(entry.key, () => entry.value);
+    }
+  }
+  final nestedMessage = data['message'];
+  if (nestedMessage is Map) {
+    for (final entry in Map<String, dynamic>.from(nestedMessage as Map).entries) {
+      merged.putIfAbsent(entry.key, () => entry.value);
+    }
+  }
+  return merged;
+}
+
+bool isChatMessageNotificationData(Map<String, dynamic> data) {
+  final payload = normalizeChatNotificationPayload(data);
+  final type = (payload['type'] ?? '').toString().toUpperCase();
+  final messageType = (payload['messageType'] ?? '').toString().toUpperCase();
+  final event = (payload['event'] ?? '').toString().toUpperCase();
+
+  if (type == NotificationTypes.chatMessage) return true;
+  if (type == 'RIDE_UPDATE' && messageType == 'RIDE_CHAT') return true;
+  if (type == 'RIDE_MESSAGE' ||
+      type == 'RIDE-MESSAGE' ||
+      type == 'RIDE_CHAT_MESSAGE') {
+    return true;
+  }
+  if (event == 'CHAT_MESSAGE' || event == 'NEW_CHAT_MESSAGE') return true;
+
+  final rideId = (payload['rideId'] ?? payload['ride_id'] ?? '').toString();
+  final text = payload['message'] ??
+      payload['text'] ??
+      payload['content'] ??
+      payload['body'];
+  if (rideId.isNotEmpty && text != null && text.toString().trim().isNotEmpty) {
+    final sender = (payload['sender'] ?? payload['senderId'] ?? payload['sender_id'] ?? '')
+        .toString();
+    if (sender.isNotEmpty) return true;
+  }
+  return false;
+}
+
+String chatNotificationTitle(Map<String, dynamic> data) {
+  final payload = normalizeChatNotificationPayload(data);
+  for (final key in [
+    'senderName',
+    'sender_name',
+    'riderName',
+    'driverName',
+    'fromName',
+  ]) {
+    final name = payload[key]?.toString().trim();
+    if (name != null && name.isNotEmpty) return name;
+  }
+  final sender = (payload['sender'] ?? '').toString().toLowerCase();
+  if (sender == 'driver') return 'Driver';
+  if (sender == 'rider' || sender == 'passenger' || sender == 'user') {
+    return 'Passenger';
+  }
+  return 'New message';
+}
+
+String chatNotificationBody(Map<String, dynamic> data) {
+  final payload = normalizeChatNotificationPayload(data);
+  final text = payload['message'] ??
+      payload['text'] ??
+      payload['content'] ??
+      payload['body'];
+  if (text == null) return 'You have a new message';
+  final s = text.toString().trim();
+  if (s.isEmpty) return 'You have a new message';
+  return s.length > 140 ? '${s.substring(0, 137)}...' : s;
+}
+
+Map<String, dynamic> chatNotificationTapPayload(Map<String, dynamic> data) {
+  final payload = normalizeChatNotificationPayload(data);
+  final rideId = (payload['rideId'] ?? payload['ride_id'] ?? '').toString();
+  return {
+    'type': NotificationTypes.chatMessage,
+    'rideId': rideId,
+    if (payload['senderId'] != null) 'senderId': payload['senderId'],
+    if (payload['sender_id'] != null) 'senderId': payload['sender_id'],
+    if (payload['sender'] != null) 'sender': payload['sender'],
+  };
+}
+
+int chatNotificationId(Map<String, dynamic> data) {
+  final payload = normalizeChatNotificationPayload(data);
+  final rideId = (payload['rideId'] ?? payload['ride_id'] ?? '').toString();
+  final messageId = (payload['id'] ?? payload['messageId'] ?? '').toString();
+  final text = chatNotificationBody(payload);
+  return Object.hash(rideId, messageId, text) & 0x7fffffff;
+}
+
+NotificationDetails chatNotificationDetails() {
+  return const NotificationDetails(
+    android: AndroidNotificationDetails(
+      _chatAndroidChannelId,
+      'Chat Messages',
+      channelDescription: 'Messages from your driver or passenger',
+      importance: Importance.high,
+      priority: Priority.high,
+      playSound: true,
+      enableVibration: true,
+    ),
+    iOS: DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    ),
+  );
+}
+
+Future<void> showChatLocalNotification(
+  FlutterLocalNotificationsPlugin plugin,
+  Map<String, dynamic> data,
+) async {
+  if (!isChatMessageNotificationData(data)) return;
+  final payload = normalizeChatNotificationPayload(data);
+  await plugin.show(
+    chatNotificationId(payload),
+    chatNotificationTitle(payload),
+    chatNotificationBody(payload),
+    chatNotificationDetails(),
+    payload: jsonEncode(chatNotificationTapPayload(payload)),
+  );
+}
+
+Future<void> ensureChatNotificationChannel(
+  FlutterLocalNotificationsPlugin plugin,
+) async {
+  if (!Platform.isAndroid) return;
+  final androidPlugin = plugin.resolvePlatformSpecificImplementation<
+      AndroidFlutterLocalNotificationsPlugin>();
+  await androidPlugin?.createNotificationChannel(
+    const AndroidNotificationChannel(
+      _chatAndroidChannelId,
+      'Chat Messages',
+      description: 'Messages from your driver or passenger',
+      importance: Importance.high,
+      playSound: true,
+      enableVibration: true,
+    ),
+  );
+}
+
+/// Background FCM entry point (separate isolate).
+@pragma('vm:entry-point')
+Future<void> processFirebaseBackgroundMessage(RemoteMessage message) async {
+  await Firebase.initializeApp();
+  final data = Map<String, dynamic>.from(message.data);
+  if (!isChatMessageNotificationData(data)) {
+    debugPrint('📬 Background message ignored (non-chat): ${message.messageId}');
+    return;
+  }
+
+  final plugin = FlutterLocalNotificationsPlugin();
+  const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+  await plugin.initialize(
+    const InitializationSettings(android: androidSettings),
+  );
+  await ensureChatNotificationChannel(plugin);
+  await showChatLocalNotification(plugin, data);
+  debugPrint('📬 Background chat notification shown: ${message.messageId}');
 }
 
 /// Service to handle push notifications via Firebase Cloud Messaging (FCM)
@@ -503,6 +675,17 @@ class PushNotificationService {
       ),
     );
 
+    await androidPlugin.createNotificationChannel(
+      const AndroidNotificationChannel(
+        _chatAndroidChannelId,
+        'Chat Messages',
+        description: 'Messages from your driver or passenger',
+        importance: Importance.high,
+        playSound: true,
+        enableVibration: true,
+      ),
+    );
+
     debugPrint('✅ Android notification channels created');
   }
 
@@ -515,25 +698,235 @@ class PushNotificationService {
   }
 
   String _rideBodyFromData(Map<String, dynamic> data) {
-    final fare = (data['fare'] ?? data['estimatedFare'] ?? '').toString();
-    final distanceStr =
-        (data['distance'] ?? data['pickupDistance'] ?? '').toString();
-    
-    // Calculate ETA from distance
-    String etaStr = '';
-    if (distanceStr.isNotEmpty) {
-      final eta = _calculateEtaFromDistance(distanceStr);
-      etaStr = '$distanceStr • $eta';
+    final distanceLabel = _bestTripDistanceLabel(data);
+    var etaLabel = _bestEtaLabel(data, distanceLabelForCalc: distanceLabel);
+
+    // If ETA is still meaningless but distance is usable, approximate from km.
+    if (!_isMeaningfulEta(etaLabel) &&
+        distanceLabel.isNotEmpty &&
+        !_isZeroPlaceholderDistance(distanceLabel)) {
+      final derived = _calculateEtaFromDistance(distanceLabel);
+      if (_isMeaningfulEta(derived)) etaLabel = derived;
     }
-    
-    final chips = <String>[
-      if (etaStr.isNotEmpty) etaStr,
-      if (fare.isNotEmpty) '₹$fare',
-    ];
+
+    final fareLabel = _formatRupeeFare(
+      data['fare'] ??
+          data['estimatedFare'] ??
+          data['totalFare'] ??
+          data['estimated_fare'],
+    );
+
+    final chips = <String>[];
+    if (distanceLabel.isNotEmpty &&
+        !_isZeroPlaceholderDistance(distanceLabel)) {
+      chips.add(distanceLabel);
+    }
+    if (_isMeaningfulEta(etaLabel)) {
+      chips.add(_stripTrailingAway(etaLabel));
+    }
+    if (fareLabel.isNotEmpty) chips.add(fareLabel);
+
     if (chips.isNotEmpty) return chips.join(' • ');
     return data['body']?.toString() ?? 'New ride request available';
   }
-  
+
+  bool _isMeaningfulEta(String eta) {
+    final t = eta.trim().toLowerCase();
+    if (t.isEmpty) return false;
+    if (t == '0 min' ||
+        t == '0 mins' ||
+        t == '0 min away' ||
+        t.startsWith('0 hr') ||
+        t == '0 hr') return false;
+    if (RegExp(r'^0+\s*(min|mins|minute|minutes)\b').hasMatch(t)) {
+      return false;
+    }
+    return true;
+  }
+
+  static final RegExp _kmNumberRe =
+      RegExp(r'([\d]+\.?[\d]*)\s*km', caseSensitive: false);
+
+  bool _isZeroPlaceholderDistance(String s) {
+    final m = _kmNumberRe.firstMatch(s.toLowerCase());
+    if (m != null) {
+      final km = double.tryParse(m.group(1)!) ?? 0;
+      return km <= 0;
+    }
+    final digits = RegExp(r'([\d]+\.?[\d]*)').firstMatch(s);
+    if (digits != null && !s.toLowerCase().contains('km')) {
+      final n = double.tryParse(digits.group(1)!) ?? 0;
+      return n <= 0;
+    }
+    return s.trim().isEmpty;
+  }
+
+  String _stripTrailingAway(String eta) =>
+      eta.replaceAll(RegExp(r'\s+away\s*$', caseSensitive: false), '').trim();
+
+  /// Prefer trip / drop distance; skip pure pickup "0 km" when better fields exist later.
+  String _bestTripDistanceLabel(Map<String, dynamic> data) {
+    const keys = [
+      'dropDistance',
+      'drop_distance',
+      'tripDistance',
+      'trip_distance',
+      'estimatedDistance',
+      'estimated_distance',
+      'distanceKm',
+      'distance_km',
+      'distance',
+      'pickupDistance',
+      'pickup_distance',
+      'trip_km',
+      'trip_km_estimate',
+      'estimated_distance_km',
+    ];
+    for (final key in keys) {
+      final raw = data[key];
+      if (raw == null) continue;
+      final formatted = _formatDistance(raw);
+      if (formatted.isEmpty || _isZeroPlaceholderDistance(formatted)) continue;
+      return formatted;
+    }
+    return '';
+  }
+
+  /// Interpret backend distance as kilometres or reuse a human-readable string.
+  String _formatDistance(dynamic raw) {
+    if (raw == null) return '';
+    if (raw is num) {
+      var km = raw.toDouble();
+      // Large integers are often metres (e.g. 35600 → 35.6 km).
+      if (km >= 999 && km == km.roundToDouble()) {
+        km /= 1000;
+      }
+      final absKm = km.abs();
+      final label = absKm >= 99 ? absKm.round().toString() : absKm.toStringAsFixed(1);
+      final trimmed =
+          absKm >= 99 ? label : label.replaceFirst(RegExp(r'\.0$'), '');
+      return '$trimmed km';
+    }
+    final s = raw.toString().trim();
+    if (s.isEmpty) return '';
+    final lower = s.toLowerCase();
+    if (lower.contains('km') ||
+        lower.contains('mile') ||
+        lower.endsWith(' m') ||
+        lower.contains(' metre') ||
+        lower.contains('meter')) {
+      return s;
+    }
+    final numeric = RegExp(r'^([\d.]+)$').firstMatch(s);
+    if (numeric != null) {
+      final parsed = double.tryParse(numeric.group(1)!);
+      if (parsed != null) return _formatDistance(parsed);
+    }
+    return s;
+  }
+
+  int? _optionalPositiveInt(dynamic v) {
+    if (v == null) return null;
+    if (v is int && v > 0) return v;
+    if (v is double && v > 0) return v.ceil();
+    return int.tryParse(v.toString()) ?? double.tryParse(v.toString())?.ceil();
+  }
+
+  String _formatDurationMinutes(int mins) {
+    if (mins < 1) return '< 1 min';
+    if (mins >= 60) {
+      final h = mins ~/ 60;
+      final m = mins % 60;
+      return m > 0 ? '$h hr $m min' : '$h hr';
+    }
+    return '$mins min';
+  }
+
+  String _bestEtaLabel(
+    Map<String, dynamic> data, {
+    required String distanceLabelForCalc,
+  }) {
+    for (final key in [
+      'durationMinutes',
+      'duration_minutes',
+      'estimatedDurationMinutes',
+      'estimated_duration_minutes',
+      'tripDurationMinutes',
+      'etaMinutes',
+      'eta_minutes',
+      'durationMin',
+      'duration_min',
+      'estimatedDuration',
+      'tripDuration',
+      'estimated_duration_sec',
+      'estimatedDurationSec',
+      'estimated_duration_secs',
+      'estimated_duration_seconds',
+    ]) {
+      final v = _optionalPositiveInt(data[key]);
+      if (v != null && v > 0) {
+        final secsHints = [
+          'estimated_duration_sec',
+          'estimatedDurationSec',
+          'estimated_duration_secs',
+          'estimated_duration_seconds',
+        ];
+        final minutes = secsHints.contains(key) ? (v + 59) ~/ 60 : v;
+        return _formatDurationMinutes(minutes.clamp(1, 10080));
+      }
+    }
+    final dropEta = [
+      data['dropTime'],
+      data['tripEta'],
+      data['estimatedEta'],
+      data['estimated_eta'],
+      data['trip_time'],
+      data['tripTime'],
+    ];
+    for (final raw in dropEta) {
+      if (raw == null) continue;
+      final s = raw.toString().trim();
+      if (s.isEmpty) continue;
+      if (RegExp(r'hr|hour|minute|away|mins', caseSensitive: false).hasMatch(s)) {
+        return s;
+      }
+    }
+    if (distanceLabelForCalc.isNotEmpty &&
+        !_isZeroPlaceholderDistance(distanceLabelForCalc)) {
+      return _calculateEtaFromDistance(distanceLabelForCalc);
+    }
+    return '';
+  }
+
+  /// One rupee prefix, numeric from strings like "₹₹292" or "INR 292".
+  String _formatRupeeFare(dynamic raw) {
+    if (raw == null) return '';
+    if (raw is num) return '₹${_trimTrailingZeros(raw)}';
+    var s = raw.toString().trim();
+    if (s.isEmpty) return '';
+    s = s.replaceAll('₹', '').replaceAll('Rs.', '').replaceAll('Rs', '').replaceAll('INR', '').trim();
+    final match =
+        RegExp(r'([\d,\s]*\d+)\.?([\d]*)').firstMatch(s.replaceAll(',', ''));
+    if (match == null || match.group(1) == null) return '';
+    final whole = match.group(1)!;
+    final frac = match.group(2);
+    double? value;
+    if (frac != null && frac.isNotEmpty) {
+      value = double.tryParse('$whole.$frac');
+    } else {
+      value = double.tryParse(whole);
+    }
+    if (value == null || value <= 0) return '';
+    return '₹${_trimTrailingZeros(value)}';
+  }
+
+  String _trimTrailingZeros(num value) {
+    final x = value.toDouble();
+    if ((x - x.round()).abs() < 1e-6) return x.round().toString();
+    final s = x.toStringAsFixed(2);
+    return s.replaceFirst(RegExp(r'\.?0+$'), '');
+  }
+
   /// Calculate ETA from distance string (e.g., "1.5 km" -> "5 min")
   String _calculateEtaFromDistance(String distanceStr) {
     final cleanStr = distanceStr.toLowerCase().trim();
@@ -564,6 +957,16 @@ class PushNotificationService {
       return mins > 0 ? '$hours hr $mins min' : '$hours hr';
     }
     return '$etaMinutes min';
+  }
+
+  /// Local heads-up when a chat message arrives (socket/SSE/FCM data-only).
+  Future<void> showChatMessageNotification({
+    required Map<String, dynamic> data,
+  }) async {
+    final notificationsEnabled = await _areNotificationsEnabledInApp();
+    if (!notificationsEnabled) return;
+    if (!isChatMessageNotificationData(data)) return;
+    await showChatLocalNotification(_localNotifications, data);
   }
 
   /// Public helper so realtime ride-offer events can also trigger heads-up alerts.
@@ -638,6 +1041,11 @@ class PushNotificationService {
       return;
     }
 
+    final chatPayload = normalizeChatNotificationPayload(
+      Map<String, dynamic>.from(message.data),
+    );
+    final isChat = isChatMessageNotificationData(chatPayload);
+
     // Show local notification
     final notification = message.notification;
 
@@ -658,6 +1066,8 @@ class PushNotificationService {
             interruptionLevel: InterruptionLevel.timeSensitive,
           ),
         );
+      } else if (isChat) {
+        notificationDetails = chatNotificationDetails();
       } else {
         // Regular notification
         String channelId = 'raahi_rides';
@@ -689,12 +1099,20 @@ class PushNotificationService {
       }
 
       _localNotifications.show(
-        message.hashCode,
-        notification.title ?? (isRideRequest ? 'New Ride Request' : 'Raahi'),
-        notification.body ??
-            (isRideRequest ? _rideBodyFromData(message.data) : ''),
+        isChat ? chatNotificationId(chatPayload) : message.hashCode,
+        isChat
+            ? chatNotificationTitle(chatPayload)
+            : (notification.title ??
+                (isRideRequest ? 'New Ride Request' : 'Raahi')),
+        isChat
+            ? chatNotificationBody(chatPayload)
+            : (isRideRequest
+                ? _rideBodyFromData(message.data)
+                : (notification.body ?? '')),
         notificationDetails,
-        payload: jsonEncode(message.data),
+        payload: jsonEncode(
+          isChat ? chatNotificationTapPayload(chatPayload) : message.data,
+        ),
       );
       return;
     }
@@ -704,6 +1122,10 @@ class PushNotificationService {
     final event = message.data['event'] as String?;
     if (_isRideRequestData(message.data)) {
       await showIncomingRideHeadsUp(data: message.data);
+      return;
+    }
+    if (isChat) {
+      await showChatMessageNotification(data: chatPayload);
       return;
     }
     if (type == NotificationTypes.driverOnboarding &&

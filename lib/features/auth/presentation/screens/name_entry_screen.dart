@@ -48,7 +48,7 @@ class NameInputFormatter extends TextInputFormatter {
 }
 
 /// Screen shown to first-time users after OTP verification.
-/// Collects first and last name before proceeding to terms.
+/// Collects first and last name (terms are accepted on the login screen).
 class NameEntryScreen extends ConsumerStatefulWidget {
   final String phone;
 
@@ -105,18 +105,15 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
         final authNotifier = ref.read(authStateProvider.notifier);
         authNotifier.updateUserName(_fullName);
       }
-
-      if (mounted) {
-        context.push('${AppRoutes.terms}?phone=${widget.phone}');
-      }
     } catch (e) {
       debugPrint('Error saving name: $e');
-      // Still proceed even if backend update fails — name can be set later
-      if (mounted) {
-        context.push('${AppRoutes.terms}?phone=${widget.phone}');
-      }
+      // Proceed anyway — name can be synced later (user already accepted terms at login).
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        ref.read(authStateProvider.notifier).completeOnboarding();
+        setState(() => _isLoading = false);
+        context.go(AppRoutes.home);
+      }
     }
   }
 
@@ -230,18 +227,11 @@ class _NameEntryScreenState extends ConsumerState<NameEntryScreen> {
               Row(
                 children: [
                   // Back button
-                  Container(
-                    width: 56,
-                    height: 56,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1A1A1A),
-                      borderRadius: BorderRadius.circular(28),
-                    ),
-                    child: FigmaSquareBackButton(
-                      onPressed: () {
-                        if (!_isLoading) context.pop();
-                      },
-                    ),
+                  FigmaSquareBackButton(
+                    minTapSize: 56,
+                    onPressed: () {
+                      if (!_isLoading) context.pop();
+                    },
                   ),
 
                   const Spacer(),

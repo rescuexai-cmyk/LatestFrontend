@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import '../../features/auth/presentation/screens/login_screen.dart';
 import '../../features/auth/presentation/screens/signup_screen.dart';
 import '../../features/auth/presentation/screens/otp_verification_screen.dart';
-import '../../features/auth/presentation/screens/terms_screen.dart';
 import '../../features/auth/presentation/screens/name_entry_screen.dart';
 import '../../features/auth/presentation/screens/welcome_onboarding_screen.dart';
 import '../../features/auth/providers/auth_provider.dart';
@@ -32,17 +31,15 @@ import '../../features/settings/presentation/screens/server_config_screen.dart';
 import '../services/server_config_service.dart';
 import 'app_routes.dart';
 
-// Provider that only exposes whether the user is authenticated (to prevent unnecessary rebuilds)
-final isAuthenticatedProvider = Provider<bool>((ref) {
-  final authState = ref.watch(authStateProvider);
-  return authState.user != null;
-});
-
 final appRouterProvider = Provider<GoRouter>((ref) {
-  // Watch auth status AND onboarding flag so redirects re-evaluate when either changes
-  final isAuthenticated = ref.watch(isAuthenticatedProvider);
-  final pendingOnboarding = ref.watch(pendingOnboardingProvider);
-  final pendingPhoneLink = ref.watch(pendingPhoneLinkProvider);
+  // Narrow watches: full authState changes during OTP send (loading, session id,
+  // errors). Recreating GoRouter would dispose LoginScreen and wipe inline OTP state.
+  final user = ref.watch(authStateProvider.select((s) => s.user));
+  final isAuthenticated = user != null;
+  final pendingOnboarding =
+      ref.watch(authStateProvider.select((s) => s.pendingOnboarding));
+  final pendingPhoneLink =
+      ref.watch(authStateProvider.select((s) => s.pendingPhoneLink));
   final hasSeenWelcome = ref.watch(welcomeOnboardingProvider);
   
   // Determine initial location based on server config state
@@ -61,7 +58,6 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return null;
       }
 
-      // Routes that require login (redirect to login if not authenticated)
       final isLoginRoute = currentLocation == AppRoutes.login ||
           currentLocation == AppRoutes.signup ||
           currentLocation.startsWith(AppRoutes.otpVerification);
@@ -74,10 +70,8 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               state.uri.queryParameters['mode'] == 'linkPhone') ||
           isOtpPhoneLinkRoute;
 
-      // Onboarding routes (name entry + terms) — part of new-user flow post-auth
       final isOnboardingRoute =
-          currentLocation.startsWith(AppRoutes.nameEntry) ||
-          currentLocation.startsWith(AppRoutes.terms);
+          currentLocation.startsWith(AppRoutes.nameEntry);
 
       final isAuthRoute = isLoginRoute || isOnboardingRoute;
 
@@ -94,7 +88,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return null;
       }
 
-      // Always allow onboarding screens (name entry, terms) when authenticated
+      // Always allow name entry when authenticated
       if (isOnboardingRoute && isAuthenticated) {
         return null;
       }
@@ -192,14 +186,6 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final phone = state.uri.queryParameters['phone'] ?? '';
           return NameEntryScreen(phone: phone);
-        },
-      ),
-      GoRoute(
-        path: AppRoutes.terms,
-        name: 'terms',
-        builder: (context, state) {
-          final phone = state.uri.queryParameters['phone'] ?? '';
-          return TermsScreen(phone: phone);
         },
       ),
       

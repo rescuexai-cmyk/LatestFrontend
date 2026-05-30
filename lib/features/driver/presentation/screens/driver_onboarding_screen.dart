@@ -229,16 +229,6 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
   final _emailFocusNode = FocusNode();
   bool _isEmailValid = true;
   bool _isSavingEmail = false;
-  static const _languages = [
-    {'code': 'en', 'name': 'English', 'native': 'English'},
-    {'code': 'hi', 'name': 'Hindi', 'native': 'हिंदी'},
-    {'code': 'pa', 'name': 'Punjabi', 'native': 'ਪੰਜਾਬੀ'},
-    {'code': 'ta', 'name': 'Tamil', 'native': 'தமிழ்'},
-    {'code': 'te', 'name': 'Telugu', 'native': 'తెలుగు'},
-    {'code': 'bn', 'name': 'Bengali', 'native': 'বাংলা'},
-    {'code': 'mr', 'name': 'Marathi', 'native': 'मराठी'},
-    {'code': 'gu', 'name': 'Gujarati', 'native': 'ગુજરાતી'},
-  ];
   @override
   void initState() {
     super.initState();
@@ -247,6 +237,17 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final onboardingState = ref.read(driverOnboardingProvider);
+      final fromProvider = onboardingState.selectedLanguage;
+      if (fromProvider != null && fromProvider.isNotEmpty) {
+        final resolved = resolveAppLanguage(fromProvider);
+        setState(() => _selectedLanguage = resolved.code);
+        if (resolved.code != fromProvider) {
+          ref
+              .read(driverOnboardingProvider.notifier)
+              .setLanguage(resolved.code)
+              .catchError((_) => false);
+        }
+      }
       final authUser = ref.read(currentUserProvider);
       String? emailToFill;
       if (onboardingState.email != null &&
@@ -276,12 +277,12 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     
     if (email.isEmpty) {
       setState(() => _isEmailValid = false);
-      AppMessenger.showErrorBanner(context, ref.tr('enter_email_prompt'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('enter_email_prompt'));
       return;
     }
     if (!_validateEmail(email)) {
       setState(() => _isEmailValid = false);
-      AppMessenger.showErrorBanner(context, ref.tr('enter_valid_email'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('enter_valid_email'));
       return;
     }
     setState(() {
@@ -298,13 +299,13 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
         if (success) {
           widget.onContinue();
         } else {
-          AppMessenger.showErrorBanner(context, ref.tr('email_save_failed'));
+          AppMessenger.showDriverErrorBanner(context, ref.tr('email_save_failed'));
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isSavingEmail = false);
-        AppMessenger.showErrorBanner(context, 'Error: ${e.toString().replaceAll('Exception: ', '')}');
+        AppMessenger.showDriverErrorBanner(context, 'Error: ${e.toString().replaceAll('Exception: ', '')}');
       }
     }
   }
@@ -425,12 +426,14 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
                 isExpanded: true,
                 value: _selectedLanguage,
                 hint: const Text('English'),
-                items: _languages.map((lang) {
-                  return DropdownMenuItem<String>(
-                    value: lang['code'],
-                    child: Text('${lang['name']} - ${lang['native']}'),
-                  );
-                }).toList(),
+                items: supportedLanguages
+                    .map(
+                      (lang) => DropdownMenuItem<String>(
+                        value: lang.code,
+                        child: Text('${lang.name} · ${lang.nativeName}'),
+                      ),
+                    )
+                    .toList(),
                 onChanged: (value) {
                   setState(() => _selectedLanguage = value);
                   if (value != null) {
@@ -759,7 +762,7 @@ class _PersonalInfoPageState extends ConsumerState<_PersonalInfoPage> {
       debugPrint('❌ Submit error: $e');
       if (mounted) {
         setState(() => _isSubmitting = false);
-        AppMessenger.showErrorBanner(context, 'Error: ${e.toString()}');
+        AppMessenger.showDriverErrorBanner(context, 'Error: ${e.toString()}');
         widget.onContinue();
       }
     }
@@ -1160,7 +1163,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
       }
     } catch (e) {
       if (mounted) {
-        AppMessenger.showErrorBanner(context, 'Failed to pick image: $e');
+        AppMessenger.showDriverErrorBanner(context, 'Failed to pick image: $e');
       }
     }
   }
@@ -1170,7 +1173,7 @@ class _DocumentsUploadFlowState extends ConsumerState<_DocumentsUploadFlow> {
     final imagePath = _uploadedPaths[docId];
     
     if (imagePath == null) {
-      AppMessenger.showErrorBanner(context, ref.tr('please_select_image'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('please_select_image'));
       return;
     }
     setState(() => _isUploading = true);

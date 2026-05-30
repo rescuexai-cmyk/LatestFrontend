@@ -27,6 +27,8 @@ class ServicesScreen extends ConsumerStatefulWidget {
 
   // ── Raahi palette ──
   static const _beige = Color(0xFFF6EFE4);
+  /// Vertical gap below status bar before “Hi …” / Later row — avoids cramped header.
+  static const _hubHeaderTopSpacing = 26.0;
   static const _accent = Color(0xFFD4956A);
   /// Profile avatar circle (greeting row, left of “Hi,”).
   static const _profileAvatarBg = Color(0xFFCF923D);
@@ -45,33 +47,52 @@ class ServicesScreen extends ConsumerStatefulWidget {
 
   // ── Service definitions (realtime - no static badges) ──
   static final _services = [
-    _Svc('cab_mini', 'Cab Mini', 'Compact cars', Icons.directions_car,
+    _Svc(
+        'cab_mini',
+        'cab_mini',
+        Icons.directions_car,
         const Color(0xFF2196F3),
         imagePath: 'assets/vehicles/cab_mini.png'),
-    _Svc('auto', 'Auto', 'Budget-friendly', Icons.electric_rickshaw,
+    _Svc(
+        'auto',
+        'auto',
+        Icons.electric_rickshaw,
         const Color(0xFF4CAF50),
         imagePath: 'assets/vehicles/auto.png'),
-    _Svc('cab_xl', 'Cab XL', 'Spacious SUVs', Icons.airport_shuttle,
+    _Svc(
+        'cab_xl',
+        'cab_xl',
+        Icons.airport_shuttle,
         const Color(0xFF7B1FA2),
         imagePath: 'assets/vehicles/cab_xl.png'),
-    _Svc('bike_rescue', 'Rescue', 'Quick pickup', Icons.two_wheeler, _accent,
+    _Svc(
+        'bike_rescue',
+        'rescue',
+        Icons.two_wheeler,
+        _accent,
         imagePath: 'assets/vehicles/bike_rescue.png'),
     // Swapped artwork for Premium and Driver Rental to match final design
-    _Svc('cab_premium', 'Premium', 'Luxury rides', Icons.diamond,
+    _Svc(
+        'cab_premium',
+        'premium',
+        Icons.diamond,
         const Color(0xFFFF9800),
         imagePath: 'assets/vehicles/captain.png'),
-    _Svc('personal_driver', 'Driver Rental', 'Hire a driver', Icons.person,
+    _Svc(
+        'personal_driver',
+        'driver_rental',
+        Icons.person,
         const Color(0xFF455A64),
         imagePath: 'assets/vehicles/cab_premium.png'),
   ];
 
   // ── Action cards (footer: Get Rescued, Hire a Driver, Plan a Trip) ──
   static final _actionCards = [
-    _ActionCard('Get Rescued', Icons.two_wheeler, 'bike_rescue',
+    _ActionCard('get_rescued', Icons.two_wheeler, 'bike_rescue',
         imagePath: 'assets/images/rescued.png'),
-    _ActionCard('Hire a Driver', Icons.person, 'personal_driver',
+    _ActionCard('hire_driver', Icons.person, 'personal_driver',
         imagePath: 'assets/images/hire.png'),
-    _ActionCard('Plan a Trip', Icons.route, 'cab_mini',
+    _ActionCard('plan_trip', Icons.route, 'cab_mini',
         imagePath: 'assets/images/plan.png'),
   ];
 
@@ -93,24 +114,30 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   /// Fetch current device location (realtime) and set pickup + nearby places
   Future<void> _fetchRealtimeLocationAndPlaces() async {
     try {
-      final permission = await Geolocator.checkPermission();
+      var permission = await Geolocator.checkPermission();
+      if (!mounted) return;
       if (permission == LocationPermission.denied) {
-        await Geolocator.requestPermission();
+        permission = await Geolocator.requestPermission();
       }
+      if (!mounted) return;
       if (permission == LocationPermission.deniedForever) return;
 
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.medium,
         timeLimit: const Duration(seconds: 5),
       );
+      if (!mounted) return;
+
       final latLng = LatLng(position.latitude, position.longitude);
 
-      String address = 'Current Location';
+      final langCode = ref.read(settingsProvider).languageCode;
+      String address = trWithCode('current_location', langCode);
       try {
         final placemarks = await placemarkFromCoordinates(
           position.latitude,
           position.longitude,
         );
+        if (!mounted) return;
         if (placemarks.isNotEmpty) {
           final p = placemarks.first;
           address = [
@@ -120,41 +147,42 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
           ].where((s) => s != null && s.isNotEmpty).join(', ');
           if (address.isEmpty)
             address = '${p.administrativeArea ?? ''} ${p.country ?? ''}'.trim();
-          if (address.isEmpty) address = 'Current Location';
+          if (address.isEmpty) {
+            address = trWithCode('current_location', langCode);
+          }
         }
       } catch (_) {}
 
-      if (mounted) {
-        ref
-            .read(rideBookingProvider.notifier)
-            .setPickupLocation(address, latLng);
-        await ref.read(nearbyPlacesProvider.notifier).refresh();
-      }
+      if (!mounted) return;
+      ref.read(rideBookingProvider.notifier).setPickupLocation(address, latLng);
+      if (!mounted) return;
+      await ref.read(nearbyPlacesProvider.notifier).refresh();
     } catch (_) {
-      if (mounted) await ref.read(nearbyPlacesProvider.notifier).refresh();
+      if (!mounted) return;
+      await ref.read(nearbyPlacesProvider.notifier).refresh();
     }
   }
 
-  String get _scheduleDisplayText {
-    if (_scheduledTime == null) return 'Later';
+  String _scheduleChipText(BuildContext context) {
+    if (_scheduledTime == null) return ref.tr('schedule_chip_later');
+    final locale = Localizations.localeOf(context);
+    final locId = locale.toString();
     final now = DateTime.now();
     final scheduled = _scheduledTime!;
+    final timeStr = DateFormat.jm(locId).format(scheduled);
 
-    // If today, show time only
     if (scheduled.day == now.day &&
         scheduled.month == now.month &&
         scheduled.year == now.year) {
-      return DateFormat('h:mm a').format(scheduled);
+      return timeStr;
     }
-    // If tomorrow, show "Tomorrow, time"
     final tomorrow = now.add(const Duration(days: 1));
     if (scheduled.day == tomorrow.day &&
         scheduled.month == tomorrow.month &&
         scheduled.year == tomorrow.year) {
-      return 'Tomorrow, ${DateFormat('h:mm a').format(scheduled)}';
+      return ref.tr('tomorrow_comma_time').replaceAll('{time}', timeStr);
     }
-    // Otherwise show date and time
-    return DateFormat('MMM d, h:mm a').format(scheduled);
+    return '${DateFormat.yMMMd(locId).format(scheduled)}, $timeStr';
   }
 
   void _showSchedulePicker() {
@@ -233,11 +261,10 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   }
 
   void _showComingSoonDialog(String serviceType) {
-    final serviceName = ServicesScreen._services
-            .where((s) => s.id == serviceType)
-            .map((s) => s.name)
-            .firstOrNull ??
-        serviceType;
+    final matched =
+        ServicesScreen._services.where((s) => s.id == serviceType);
+    final serviceName =
+        matched.isEmpty ? serviceType : ref.tr(matched.first.titleKey);
 
     showDialog(
       context: context,
@@ -259,7 +286,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
             ),
             const SizedBox(height: 20),
             Text(
-              '$serviceName is coming soon!',
+              ref.tr('service_coming_soon').replaceAll('{service}', serviceName),
               style: const TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w700,
@@ -268,7 +295,9 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              'We\'re working hard to bring $serviceName to your city. Stay tuned for updates!',
+              ref
+                  .tr('service_coming_desc')
+                  .replaceAll('{service}', serviceName),
               style: const TextStyle(
                   fontSize: 14,
                   color: ServicesScreen._textSecondary,
@@ -288,9 +317,9 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                       borderRadius: BorderRadius.circular(24)),
                   elevation: 0,
                 ),
-                child: const Text('Got it',
-                    style:
-                        TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                child: Text(ref.tr('got_it'),
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
               ),
             ),
           ],
@@ -413,7 +442,8 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(currentUserProvider);
-    // Never show email as greeting — use name, or last 4 digits of phone, or 'User'
+    final langCode = ref.watch(settingsProvider).languageCode;
+    // Never show email as greeting — use name, or last 4 digits of phone, or localized User
     final rawName = user?.name;
     final hasRealName = rawName != null && rawName.isNotEmpty && rawName != 'User';
     String displayName;
@@ -421,9 +451,12 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
       displayName = rawName!;
     } else if (user?.phone != null && user!.phone!.isNotEmpty) {
       final digits = user.phone!.replaceAll(RegExp(r'[^\d]'), '');
-      displayName = digits.length >= 4 ? 'User ${digits.substring(digits.length - 4)}' : 'User';
+      displayName = digits.length >= 4
+          ? trWithCode('user_phone_suffix', langCode)
+              .replaceAll('{digits}', digits.substring(digits.length - 4))
+          : trWithCode('user', langCode);
     } else {
-      displayName = 'User';
+      displayName = trWithCode('user', langCode);
     }
     final firstName = displayName.split(' ').first;
     final initial = firstName.isNotEmpty ? firstName[0].toUpperCase() : 'U';
@@ -454,7 +487,8 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const SizedBox(height: 12),
+                        const SizedBox(
+                            height: ServicesScreen._hubHeaderTopSpacing),
 
                     // ── Top bar: profile + "Hi, Name!" + schedule (no back) ──
                     Padding(
@@ -486,7 +520,9 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              'Hi, $firstName!',
+                              ref
+                                  .tr('hi_user')
+                                  .replaceAll('{name}', firstName),
                               style: const TextStyle(
                                 fontFamily: 'Poppins',
                                 fontSize: 22,
@@ -522,7 +558,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                                   ),
                                   const SizedBox(width: 6),
                                   Text(
-                                    _scheduleDisplayText,
+                                    _scheduleChipText(context),
                                     style: const TextStyle(
                                       fontFamily: 'Poppins',
                                       fontSize: 14,
@@ -562,11 +598,15 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                           childAspectRatio: 0.85,
                         ),
                         itemCount: ServicesScreen._services.length,
-                        itemBuilder: (ctx, i) => _ServiceCard(
-                          svc: ServicesScreen._services[i],
-                          onTap: () => _navigateToFindTrip(
-                              serviceType: ServicesScreen._services[i].id),
-                        ),
+                        itemBuilder: (ctx, i) {
+                          final s = ServicesScreen._services[i];
+                          return _ServiceCard(
+                            title: ref.tr(s.titleKey),
+                            svc: s,
+                            onTap: () =>
+                                _navigateToFindTrip(serviceType: s.id),
+                          );
+                        },
                       ),
                     ),
                     const SizedBox(height: 20),
@@ -595,13 +635,35 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                                     color: Color(0xFF1A1A1A),
                                   ),
                                   alignment: Alignment.center,
-                                  child: const Text(
-                                    '30% Cashback',
-                                    style: TextStyle(
-                                      fontFamily: 'Poppins',
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.white,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 16),
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          ref.tr('cashback'),
+                                          style: const TextStyle(
+                                            fontFamily: 'Poppins',
+                                            fontSize: 20,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.white,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          ref.tr('book_now'),
+                                          style: TextStyle(
+                                            fontFamily: 'Poppins',
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                            color: ServicesScreen._accent,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 );
@@ -737,9 +799,9 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                                         onTap: () => ref
                                             .read(nearbyPlacesProvider.notifier)
                                             .refresh(),
-                                        child: const Text(
-                                          'Tap to find places near you',
-                                          style: TextStyle(
+                                        child: Text(
+                                          ref.tr('tap_find_places'),
+                                          style: const TextStyle(
                                             fontSize: 14,
                                             color: Colors.white,
                                             fontWeight: FontWeight.w500,
@@ -934,9 +996,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                         itemCount: ServicesScreen._actionCards.length,
                         itemBuilder: (ctx, i) {
                           final a = ServicesScreen._actionCards[i];
-                          final titleParts = a.title.split(' ');
-                          final firstLine = titleParts.length > 1 ? titleParts.sublist(0, titleParts.length - 1).join(' ') : '';
-                          final lastWord = titleParts.isNotEmpty ? titleParts.last : a.title;
+                          final title = ref.tr(a.titleKey);
                           return Padding(
                             padding: const EdgeInsets.only(right: 15),
                             child: GestureDetector(
@@ -958,7 +1018,6 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                                   borderRadius: BorderRadius.circular(20),
                                   child: Stack(
                                     children: [
-                                      // Full-bleed image background
                                       Positioned.fill(
                                         child: a.imagePath != null
                                             ? Image.asset(
@@ -969,7 +1028,6 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                                                 color: Colors.black,
                                               ),
                                       ),
-                                      // Bottom gradient overlay
                                       Positioned.fill(
                                         child: DecoratedBox(
                                           decoration: BoxDecoration(
@@ -986,39 +1044,22 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                                           ),
                                         ),
                                       ),
-                                      // Title text at bottom center - two lines
                                       Positioned(
-                                        left: 0,
-                                        right: 0,
+                                        left: 8,
+                                        right: 8,
                                         bottom: 14,
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.center,
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            if (firstLine.isNotEmpty)
-                                              Text(
-                                                firstLine,
-                                                style: const TextStyle(
-                                                  fontFamily: 'Poppins',
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.w400,
-                                                  color: Colors.white,
-                                                  height: 1.2,
-                                                ),
-                                                textAlign: TextAlign.center,
-                                              ),
-                                            Text(
-                                              lastWord,
-                                              style: const TextStyle(
-                                                fontFamily: 'Poppins',
-                                                fontSize: 20,
-                                                fontWeight: FontWeight.w700,
-                                                color: Colors.white,
-                                                height: 1.2,
-                                              ),
-                                              textAlign: TextAlign.center,
-                                            ),
-                                          ],
+                                        child: Text(
+                                          title,
+                                          style: const TextStyle(
+                                            fontFamily: 'Poppins',
+                                            fontSize: 17,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.white,
+                                            height: 1.2,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
                                     ],
@@ -1040,7 +1081,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              'Curated with love in India ',
+                              '${ref.tr('curated_india')} ',
                               style: TextStyle(
                                 fontFamily: 'Poppins',
                                 fontSize: 12,
@@ -1078,29 +1119,34 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
 
 // ── Service helper ──
 class _Svc {
-  final String id, name, desc;
+  final String id;
+  /// Key for [AppStrings] / [ref.tr] (e.g. `cab_mini`, `rescue`).
+  final String titleKey;
   final IconData icon;
   final Color color;
   final String badge;
   final String? imagePath;
-  const _Svc(this.id, this.name, this.desc, this.icon, this.color,
+  const _Svc(this.id, this.titleKey, this.icon, this.color,
       {this.badge = '', this.imagePath});
 }
 
 // ── Action card ──
 class _ActionCard {
-  final String title;
+  final String titleKey;
   final IconData icon;
   final String serviceType;
   final String? imagePath;
-  const _ActionCard(this.title, this.icon, this.serviceType, {this.imagePath});
+  const _ActionCard(this.titleKey, this.icon, this.serviceType,
+      {this.imagePath});
 }
 
 // ── Service card (grid item) ──
 class _ServiceCard extends StatelessWidget {
+  final String title;
   final _Svc svc;
   final VoidCallback onTap;
-  const _ServiceCard({super.key, required this.svc, required this.onTap});
+  const _ServiceCard(
+      {super.key, required this.title, required this.svc, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1129,7 +1175,7 @@ class _ServiceCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            svc.name,
+            title,
             style: const TextStyle(
               fontFamily: 'Poppins',
               fontSize: 12,

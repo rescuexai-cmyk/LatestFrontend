@@ -175,11 +175,32 @@ class RealtimeService {
     required void Function(String type, Map<String, dynamic> data) onEvent,
   }) async {
     try {
-      return await webSocketService.connectAndRegister(
+      final ok = await webSocketService.connectAndRegister(
         driverId,
         token: token,
         timeout: const Duration(seconds: 25),
       );
+      if (ok) {
+        // Primary path only opened the socket; ride offers were dropped unless SSE
+        // delivered them. Mirror fallback: listen on Socket.io as well.
+        _driverSocketSub?.call();
+        _driverSocketSub = webSocketService.subscribeToDriverEvents((data) {
+          final type = data['type'] as String? ?? '';
+          if (type == 'new_ride_offer') {
+            final ride = data['ride'];
+            if (ride is Map<String, dynamic>) {
+              onEvent(type, {'ride': ride});
+            } else if (ride is Map) {
+              onEvent(type, {'ride': Map<String, dynamic>.from(ride)});
+            } else {
+              onEvent(type, data);
+            }
+            return;
+          }
+          onEvent(type, data);
+        });
+      }
+      return ok;
     } catch (e) {
       debugPrint('🚗 Realtime: Socket.io connect failed: $e');
       return false;

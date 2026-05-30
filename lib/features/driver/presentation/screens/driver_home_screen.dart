@@ -111,8 +111,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Fresh screen session: never render stale in-memory offers from previous logins.
-    ref.read(driverRidesProvider.notifier).resetForNewSession();
+    // Avoid nuking an in-progress accepted ride when only clearing stale offer queues.
+    ref.read(driverRidesProvider.notifier).resetForNewSession(
+          preserveAcceptedRide: true,
+        );
     _hydrateDriverRecordId();
     _getCurrentLocation();
     _setupWebSocketSubscription();
@@ -121,10 +123,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _fetchVerificationStatus();
     _fetchSubscriptionStatus();
     _restoreSessionState();
-    _syncDriverLanguageToApp();
+    _ensureDriverPrefsMatchAppLanguage();
     _loadMapStyle();
     _fetchDriverQuests();
     _setupPushRideListener();
+
+    // Keep offer vehicle filter aligned with registered driver vehicle (prefs/async).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
+            ref.read(driverOnboardingProvider).selectedVehicleType,
+          );
+    });
   }
 
   /// Load map style based on dark mode setting
@@ -146,23 +156,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     }
   }
 
-  /// Sync driver's saved language (from onboarding) to app locale so whole app shows selected language
-  void _syncDriverLanguageToApp() {
+  /// Keep `driver_language` prefs + backend driver language aligned with **app locale**
+  /// (`settings`). App settings reflect the UX language the user picks in Rider or Driver settings;
+  /// we previously synced the other direction and blocked language changes after dialog pop.
+  void _ensureDriverPrefsMatchAppLanguage() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final onboarding = ref.read(driverOnboardingProvider);
-      final driverLang = onboarding.selectedLanguage;
-      if (driverLang == null || driverLang.isEmpty) return;
+      if (!mounted) return;
       final settings = ref.read(settingsProvider);
-      if (settings.languageCode == driverLang) return;
+      final code = settings.languageCode;
+      final onboarding = ref.read(driverOnboardingProvider);
+
       try {
-        final lang = supportedLanguages.firstWhere((l) => l.code == driverLang);
-        if (mounted) {
-          await ref
-              .read(settingsProvider.notifier)
-              .setLanguage(lang.code, lang.name);
-        }
-      } catch (_) {
-        // Language not in supported list, ignore
+        final lang = resolveAppLanguage(code);
+        if (onboarding.selectedLanguage == lang.code) return;
+
+        await ref.read(driverOnboardingProvider.notifier).setLanguage(lang.code);
+      } catch (e, st) {
+        debugPrint('❌ Failed to sync driver_language to app locale: $e\n$st');
       }
     });
   }
@@ -352,7 +362,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
       // Ensure no stale offers are shown after app relaunch/re-login.
       final ridesNotifier = ref.read(driverRidesProvider.notifier);
-      ridesNotifier.resetForNewSession();
+      ridesNotifier.resetForNewSession(preserveAcceptedRide: true);
       // Fresh connection attempt: drop any previous transport state first.
       realtimeService.disconnectDriver();
 
@@ -394,7 +404,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         await _clearSessionData();
         setState(() => _isConnecting = false);
         if (mounted) {
-          AppMessenger.showErrorBanner(context, ref.tr('restore_session_failed'));
+          AppMessenger.showDriverErrorBanner(context, ref.tr('restore_session_failed'));
         }
         return;
       }
@@ -530,7 +540,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Platform fee dialog (₹39) - LEGACY, kept for session expiry
+  // Platform fee dialog — amount from AppConfig.dailyPlatformFee - LEGACY, kept for session expiry
   // ---------------------------------------------------------------------------
 
   /// Show the platform fee popup. Returns true if the user confirmed payment.
@@ -558,14 +568,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Column(
-                children: const [
-                  Text('₹39',
-                      style: TextStyle(
+                children: [
+                  Text(
+                      '₹${AppConfig.dailyPlatformFee.toInt()}',
+                      style: const TextStyle(
                           fontSize: 36,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF1A1A1A))),
-                  SizedBox(height: 8),
-                  Text(
+                  const SizedBox(height: 8),
+                  const Text(
                     'Pay a one-time platform fee to go online for 24 hours.',
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 14, color: Color(0xFF666666)),
@@ -708,7 +719,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     if (displayPenalty <= 0) {
       if (mounted) {
-        AppMessenger.showErrorBanner(context, 'Could not load penalty details. Please try again or contact support.');
+        AppMessenger.showDriverErrorBanner(context, 'Could not load penalty details. Please try again or contact support.');
       }
       return false;
     }
@@ -743,7 +754,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             if (launched) {
               setSheetState(() => paymentInitiated = true);
             } else if (mounted) {
-              AppMessenger.showErrorBanner(context, 'Unable to open UPI app');
+              AppMessenger.showDriverErrorBanner(context, 'Unable to open UPI app');
             }
           }
 
@@ -755,7 +766,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               Navigator.of(sheetCtx).pop(true);
             } else if (mounted) {
               final error = ref.read(driverPenaltyProvider).error;
-              AppMessenger.showErrorBanner(context, error ?? 'Failed to clear penalty');
+              AppMessenger.showDriverErrorBanner(context, error ?? 'Failed to clear penalty');
             }
           }
 
@@ -771,7 +782,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               Navigator.of(sheetCtx).pop(true);
             } else if (mounted) {
               final error = ref.read(driverPenaltyProvider).error;
-              AppMessenger.showErrorBanner(context, error ?? 'Failed to verify payment');
+              AppMessenger.showDriverErrorBanner(context, error ?? 'Failed to verify payment');
             }
           }
 
@@ -1384,7 +1395,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _offerCleanupTimer = null;
 
     if (mounted) {
-      AppMessenger.showErrorBanner(context, ref.tr('you_are_offline'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('you_are_offline'));
     }
   }
 
@@ -1781,7 +1792,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         debugPrint('🧹 Ignoring stale notification action offer ${hydrated.id}');
         return null;
       }
-      ref.read(driverRidesProvider.notifier).addRideOffer(hydrated);
+      final added =
+          ref.read(driverRidesProvider.notifier).addRideOffer(hydrated);
+      if (!added) {
+        debugPrint(
+            '🛑 Notification action offer not queued: ${hydrated.id}');
+        return null;
+      }
       return hydrated;
     } catch (e) {
       debugPrint('Failed to resolve ride from notification action: $e');
@@ -1806,8 +1823,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   RideOffer _rideOfferFromPushPayload(Map<String, dynamic> data) {
-    final distance =
-        (data['distance'] ?? data['pickupDistance'] ?? '0 km').toString();
+    final pickupDist = (data['pickupDistance'] ?? data['pickup_distance'] ?? '0 km')
+        .toString();
+    final dropDist = (data['dropDistance'] ??
+            data['drop_distance'] ??
+            data['tripDistance'] ??
+            data['trip_distance'] ??
+            data['estimatedDistance'] ??
+            data['distance'] ??
+            pickupDist)
+        .toString();
     final rideIdRaw = data['rideId'] ?? data['id'] ?? data['requestId'];
     final rideId = (rideIdRaw == null || rideIdRaw.toString().isEmpty)
         ? 'push_${DateTime.now().millisecondsSinceEpoch}'
@@ -1817,9 +1842,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       type: (data['vehicleType'] ?? data['serviceType'] ?? 'bike_rescue')
           .toString(),
       earning: _parseFare(data['fare'] ?? data['estimatedFare']),
-      pickupDistance: distance,
+      pickupDistance: pickupDist,
       pickupTime: (data['pickupTime'] ?? 'Now').toString(),
-      dropDistance: distance,
+      dropDistance: dropDist.isNotEmpty ? dropDist : pickupDist,
       dropTime: (data['dropTime'] ?? '').toString(),
       pickupAddress:
           (data['pickup'] ?? data['pickupAddress'] ?? 'Pickup').toString(),
@@ -1843,16 +1868,62 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     return age <= maxAgeSeconds;
   }
 
+  bool _distanceLabelHasPositiveKm(String s) {
+    final m = RegExp(r'([\d.]+)\s*km').firstMatch(s.trim().toLowerCase());
+    if (m != null) {
+      final km = double.tryParse(m.group(1)!);
+      return km != null && km > 0;
+    }
+    return false;
+  }
+
+  /// Parses RideOffer ETA labels like "1 hr 47 min away" → minutes when possible.
+  int? _inferTripMinutesFromEtaLabel(String raw) {
+    final t = raw.toLowerCase();
+    if (t.isEmpty ||
+        t == '< 1 min away' ||
+        RegExp(r'^0\s*m(?:in)?').hasMatch(t)) {
+      return null;
+    }
+    int total = 0;
+    final hr = RegExp(r'(\d+)\s*hr\b').firstMatch(t);
+    if (hr != null) total += int.parse(hr.group(1)!) * 60;
+    final minPlain = RegExp(r'(\d+)\s*m(?:ins?)?\b').firstMatch(t);
+    if (minPlain != null) total += int.parse(minPlain.group(1)!);
+    return total > 0 ? total : null;
+  }
+
+  String _fareDigitsForRideNotificationPayload(double fare) {
+    if ((fare - fare.round()).abs() < 1e-6) return fare.round().toString();
+    return fare.toStringAsFixed(2).replaceFirst(RegExp(r'\.00$'), '');
+  }
+
   Map<String, dynamic> _ridePayloadFromOffer(RideOffer offer) {
-    return {
+    final pickup = offer.pickupDistance.trim();
+    final drop = offer.dropDistance.trim();
+    final distanceForTray = _distanceLabelHasPositiveKm(drop)
+        ? drop
+        : (_distanceLabelHasPositiveKm(pickup) ? pickup : (drop.isNotEmpty ? drop : pickup));
+
+    final payload = <String, dynamic>{
       'type': NotificationTypes.newRide,
       'rideId': offer.id,
       'pickup': offer.pickupAddress,
       'drop': offer.dropAddress,
-      'distance': offer.pickupDistance,
-      'fare': '₹${offer.earning.toStringAsFixed(0)}',
+      'distance': distanceForTray,
+      'pickupDistance': pickup,
+      'dropDistance': drop,
+      'dropTime': offer.dropTime,
+      // Fare without currency symbol — [PushNotificationService] adds a single ₹.
+      'fare': _fareDigitsForRideNotificationPayload(offer.earning),
+      'estimatedFare': offer.earning,
       if (offer.riderName != null) 'riderName': offer.riderName,
     };
+
+    final tripMins = _inferTripMinutesFromEtaLabel(offer.dropTime);
+    if (tripMins != null) payload['estimatedDurationMinutes'] = tripMins;
+
+    return payload;
   }
 
   Future<void> _handleIncomingRidePush(RemoteMessage message) async {
@@ -1866,7 +1937,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             '🧹 Push offer ignored (stale/invalid): id=${offer.id} status=${offer.status}');
         return;
       }
-      ref.read(driverRidesProvider.notifier).addRideOffer(offer);
+      final added = ref.read(driverRidesProvider.notifier).addRideOffer(offer);
+      if (!added) {
+        debugPrint(
+            '🛑 Push ride not queued: ${offer.id} type=${offer.type}');
+        return;
+      }
       await _showIncomingRideOverlay(offer, source: 'push');
     } catch (e) {
       debugPrint('⚠️ Failed to handle incoming ride push: $e');
@@ -1942,25 +2018,19 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     debugPrint('📡 Driver event received: $type');
 
     if (type == 'new_ride_offer') {
-      final rideData = data['ride'] as Map<String, dynamic>?;
-      if (rideData == null) {
+      final rawRide = data['ride'];
+      if (rawRide is! Map) {
         debugPrint('⚠️ new_ride_offer event missing ride data');
         return;
       }
+      final rideData = normalizeRideOfferEventJson(
+        Map<String, dynamic>.from(rawRide as Map),
+      );
 
       debugPrint(
           '🚗 New ride offer received via real-time: ${rideData['rideId'] ?? rideData['id']}');
 
-      // Haptic feedback for new ride
-      Vibration.hasVibrator().then((hasVibrator) {
-        if (hasVibrator == true) {
-          Vibration.vibrate(duration: 500);
-        }
-      });
-
       if (mounted) {
-        // REAL-TIME: Parse and add ride directly from event data
-        // No REST call needed - this is O(1) instead of O(n) network overhead
         try {
           final offer = RideOffer.fromJson(rideData);
           if (!_isIncomingOfferActiveAndFresh(offer)) {
@@ -1969,7 +2039,17 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             return;
           }
           final driverRidesNotifier = ref.read(driverRidesProvider.notifier);
-          driverRidesNotifier.addRideOffer(offer);
+          final added = driverRidesNotifier.addRideOffer(offer);
+          if (!added) {
+            debugPrint(
+                '🛑 Realtime ride not queued: ${offer.id} type=${offer.type} status=${offer.status}');
+            return;
+          }
+          Vibration.hasVibrator().then((hasVibrator) {
+            if (hasVibrator == true) {
+              Vibration.vibrate(duration: 500);
+            }
+          });
           unawaited(_showIncomingRideOverlay(offer, source: 'realtime'));
           debugPrint('✅ Ride offer added from real-time event: ${offer.id}');
         } catch (e) {
@@ -1983,20 +2063,32 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         // Remove from offers (handles both active and pending)
         ref.read(driverRidesProvider.notifier).removeRide(rideId);
         // Show subtle feedback
-        AppMessenger.showErrorBanner(context, ref.tr('ride_taken_by_another'));
+        AppMessenger.showDriverErrorBanner(context, ref.tr('ride_taken_by_another'));
       }
     } else if (type == 'ride_cancelled') {
-      final rideId = data['rideId'] as String? ?? data['ride_id'] as String?;
+      final rideId = rideIdFromRealtimePayload(data);
       debugPrint('❌ Ride cancelled: $rideId');
       if (mounted && rideId != null) {
         final notifier = ref.read(driverRidesProvider.notifier);
         // Remove from offers (handles both active and pending)
         notifier.removeRide(rideId);
-        // If the cancelled ride was our accepted ride, clear it
+        // If the cancelled ride was our accepted ride, clear it and return home
         final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
         if (acceptedRide != null && acceptedRide.id == rideId) {
           notifier.clearAcceptedRide();
-          AppMessenger.showErrorBanner(context, data['reason'] as String? ?? 'Ride was cancelled by rider');
+          final reason = data['reason'] as String? ??
+              data['cancelReason'] as String? ??
+              ref.tr('ride_cancelled_by_rider');
+          if (!mounted) return;
+          final onActiveRideScreen =
+              GoRouter.of(context).routeInformationProvider.value.uri.path ==
+                  AppRoutes.driverActiveRide;
+          if (onActiveRideScreen) {
+            // Active ride screen listens for acceptedRide clearing and exits.
+            return;
+          }
+          AppMessenger.showDriverErrorBanner(context, reason);
+          context.go(AppRoutes.driverHome);
         }
       }
     } else if (type == 'ride_completed') {
@@ -2025,7 +2117,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     // Block going online if backend says driver can't start rides
     if (!_isOnline && !_canStartRides) {
       if (mounted) {
-        AppMessenger.showErrorBanner(context, _verificationBannerMsg ??
+        AppMessenger.showDriverErrorBanner(context, _verificationBannerMsg ??
                 'You are not verified to go online yet.');
       }
       return;
@@ -2050,14 +2142,14 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       if (driverId == 'unknown' || driverId.isEmpty) {
         debugPrint('❌ Cannot go online - invalid driver ID');
         if (mounted) {
-          AppMessenger.showErrorBanner(context, ref.tr('driver_id_error'));
+          AppMessenger.showDriverErrorBanner(context, ref.tr('driver_id_error'));
         }
         return;
       }
 
       // Fresh online session: clear stale in-memory offers before any replay.
       final ridesNotifier = ref.read(driverRidesProvider.notifier);
-      ridesNotifier.resetForNewSession();
+      ridesNotifier.resetForNewSession(preserveAcceptedRide: true);
       // Disconnect any previous transport to avoid duplicate listeners/replayed events.
       realtimeService.disconnectDriver();
 
@@ -2243,7 +2335,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         }
 
         debugPrint('❌ Failed to accept ride: $errorMessage');
-        AppMessenger.showErrorBanner(context, errorMessage);
+        AppMessenger.showDriverErrorBanner(context, errorMessage);
       }
     } finally {
       if (mounted) {
@@ -2254,6 +2346,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<DriverOnboardingState>(driverOnboardingProvider, (_, next) {
+      ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
+            next.selectedVehicleType,
+          );
+    });
+
     final driverRidesState = ref.watch(driverRidesProvider);
     final hasActiveOffer = driverRidesState.hasActiveOffer && _isOnline;
 
@@ -2304,6 +2402,24 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               RideStackOverlay(
                 onAccept: (ride) => _acceptRide(ride),
                 onDecline: (ride) => _declineRideOffer(ride),
+              ),
+            // While an incoming-offer overlay is visible, bottom tray is hidden;
+            // keep resume affordance visible above the overlay if a trip is in progress.
+            if (driverRidesState.acceptedRide != null && hasActiveOffer)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: MediaQuery.sizeOf(context).height * 0.5 +
+                    MediaQuery.paddingOf(context).bottom +
+                    8,
+                child: Material(
+                  elevation: 10,
+                  shadowColor: Colors.black38,
+                  borderRadius: BorderRadius.circular(14),
+                  clipBehavior: Clip.antiAlias,
+                  color: Colors.transparent,
+                  child: _buildActiveRideReturnCard(compact: true),
+                ),
               ),
           ],
         ),
@@ -2989,55 +3105,74 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   /// Prominent card to return to active ride when driver pressed back
-  Widget _buildActiveRideReturnCard() {
+  Widget _buildActiveRideReturnCard({bool compact = false}) {
     final acceptedRide = ref.watch(driverRidesProvider).acceptedRide;
     if (acceptedRide == null) return const SizedBox.shrink();
+    final titleStyle = TextStyle(
+      fontSize: compact ? 15 : 18,
+      fontWeight: FontWeight.w700,
+      color: const Color(0xFF1A1A1A),
+    );
+    final subtitleStyle = TextStyle(
+      fontSize: compact ? 11 : 12,
+      color: const Color(0xFF666666),
+    );
+    final iconBox = compact ? 44.0 : 56.0;
+    final iconSize = compact ? 22.0 : 28.0;
+
     return GestureDetector(
       onTap: _openActiveRideAndRefresh,
       child: Container(
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        padding: const EdgeInsets.all(20),
+        margin: compact
+            ? EdgeInsets.zero
+            : const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        padding: compact
+            ? const EdgeInsets.symmetric(horizontal: 14, vertical: 12)
+            : const EdgeInsets.all(20),
         decoration: BoxDecoration(
           color: const Color(0xFFD4956A).withOpacity(0.15),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFD4956A), width: 2),
+          borderRadius: BorderRadius.circular(compact ? 14 : 16),
+          border: Border.all(
+            color: const Color(0xFFD4956A),
+            width: compact ? 1.5 : 2,
+          ),
         ),
         child: Row(
           children: [
             Container(
-              width: 56,
-              height: 56,
+              width: iconBox,
+              height: iconBox,
               decoration: BoxDecoration(
-                  color: const Color(0xFFD4956A),
-                  borderRadius: BorderRadius.circular(12)),
-              child: const Icon(Icons.directions_car,
-                  color: Colors.white, size: 28),
+                color: const Color(0xFFD4956A),
+                borderRadius: BorderRadius.circular(compact ? 10 : 12),
+              ),
+              child: Icon(
+                Icons.directions_car,
+                color: Colors.white,
+                size: iconSize,
+              ),
             ),
-            const SizedBox(width: 16),
+            SizedBox(width: compact ? 12 : 16),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Ongoing Ride',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFF1A1A1A)),
-                  ),
-                  const SizedBox(height: 4),
+                  Text('Ongoing Ride', style: titleStyle),
+                  SizedBox(height: compact ? 2 : 4),
                   Text(
                     '${acceptedRide.pickupAddress} → ${acceptedRide.dropAddress}',
-                    style:
-                        const TextStyle(fontSize: 12, color: Color(0xFF666666)),
-                    maxLines: 2,
+                    style: subtitleStyle,
+                    maxLines: compact ? 1 : 2,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.arrow_forward_ios,
-                size: 16, color: Color(0xFFD4956A)),
+            Icon(
+              Icons.arrow_forward_ios,
+              size: compact ? 14 : 16,
+              color: const Color(0xFFD4956A),
+            ),
           ],
         ),
       ),
@@ -3206,106 +3341,117 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _buildDriverDrawerUserCard(user),
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _DriverDrawerStatCard(
-                            icon: Icons.directions_car,
-                            label: ref.tr('this_week'),
-                            value: _isLoadingEarnings ? '' : '$_weekTrips',
-                            isLoading: _isLoadingEarnings,
-                          ),
+                    const SizedBox(height: 22),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color:
+                              AppColors.secondaryDark.withValues(alpha: 0.55),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _DriverDrawerStatCard(
-                            icon: Icons.star,
-                            label: ref.tr('rating'),
-                            value: _isLoadingEarnings
-                                ? ''
-                                : (_rating > 0
-                                    ? _rating.toStringAsFixed(1)
-                                    : 'N/A'),
-                            isLoading: _isLoadingEarnings,
+                        boxShadow: [
+                          BoxShadow(
+                            color:
+                                Colors.black.withValues(alpha: 0.045),
+                            blurRadius: 16,
+                            offset: const Offset(0, 4),
                           ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(13),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _DriverDrawerMenuItem(
+                              icon: Icons.swap_horiz_rounded,
+                              title: 'Switch to Rider',
+                              subtitle:
+                                  'Browse and book rides as a passenger',
+                              onTap: () {
+                                Navigator.pop(context);
+                                context.go(AppRoutes.services);
+                              },
+                            ),
+                            const Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Color(0xFFE8E8E8),
+                            ),
+                            _DriverDrawerMenuItem(
+                              icon: Icons.history_rounded,
+                              title: ref.tr('ride_history'),
+                              subtitle: 'Past trips and details',
+                              onTap: () {
+                                Navigator.pop(context);
+                                _showRideHistory();
+                              },
+                            ),
+                            const Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Color(0xFFE8E8E8),
+                            ),
+                            _DriverDrawerMenuItem(
+                              icon:
+                                  Icons.account_balance_wallet_rounded,
+                              title: ref.tr('earnings'),
+                              subtitle: 'Payouts and weekly summary',
+                              onTap: () {
+                                Navigator.pop(context);
+                                _showEarnings();
+                              },
+                            ),
+                            const Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Color(0xFFE8E8E8),
+                            ),
+                            _DriverDrawerMenuItem(
+                              icon: Icons.description_outlined,
+                              title: 'Update Documents',
+                              subtitle:
+                                  'Licence, vehicle, and profile',
+                              onTap: () {
+                                Navigator.pop(context);
+                                context.push(
+                                  '${AppRoutes.driverOnboarding}?isUpdateMode=true&returnToProfile=true',
+                                );
+                              },
+                            ),
+                            const Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Color(0xFFE8E8E8),
+                            ),
+                            _DriverDrawerMenuItem(
+                              icon: Icons.settings_outlined,
+                              title: ref.tr('settings'),
+                              subtitle: 'Preferences and account',
+                              onTap: () {
+                                Navigator.pop(context);
+                                _showSettings();
+                              },
+                            ),
+                            const Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Color(0xFFE8E8E8),
+                            ),
+                            _DriverDrawerMenuItem(
+                              icon: Icons.help_outline_rounded,
+                              title: ref.tr('help_support'),
+                              subtitle: 'Get help while driving',
+                              onTap: () {
+                                Navigator.pop(context);
+                                _showHelpSupport();
+                              },
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _DriverDrawerStatCard(
-                            icon: Icons.calendar_today,
-                            label: 'Member since',
-                            value: _isLoadingEarnings
-                                ? ''
-                                : _drawerFormatMemberSince(user?.createdAt),
-                            isLoading: _isLoadingEarnings,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.home_outlined,
-                      title: ref.tr('home'),
-                      subtitle: 'Driver dashboard',
-                      onTap: () => Navigator.pop(context),
-                    ),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.history,
-                      title: ref.tr('ride_history'),
-                      subtitle: 'Past trips and details',
-                      onTap: () {
-                        Navigator.pop(context);
-                        _showRideHistory();
-                      },
-                    ),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.account_balance_wallet_outlined,
-                      title: ref.tr('earnings'),
-                      subtitle: 'Payouts and weekly summary',
-                      onTap: () {
-                        Navigator.pop(context);
-                        _showEarnings();
-                      },
-                    ),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.description_outlined,
-                      title: 'Update Documents',
-                      subtitle: 'Licence, vehicle, and profile',
-                      onTap: () {
-                        Navigator.pop(context);
-                        context.push(
-                          '${AppRoutes.driverOnboarding}?isUpdateMode=true&returnToProfile=true',
-                        );
-                      },
-                    ),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.settings_outlined,
-                      title: ref.tr('settings'),
-                      subtitle: 'Preferences and account',
-                      onTap: () {
-                        Navigator.pop(context);
-                        _showSettings();
-                      },
-                    ),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.help_outline,
-                      title: ref.tr('help_support'),
-                      subtitle: 'Get help while driving',
-                      onTap: () {
-                        Navigator.pop(context);
-                        _showHelpSupport();
-                      },
-                    ),
-                    const Divider(height: 32),
-                    _DriverDrawerMenuItem(
-                      icon: Icons.swap_horiz,
-                      title: 'Switch to Rider',
-                      subtitle: 'Open rider mode',
-                      onTap: () {
-                        Navigator.pop(context);
-                        context.go(AppRoutes.services);
-                      },
+                      ),
                     ),
                     const SizedBox(height: 16),
                     SizedBox(
@@ -3395,7 +3541,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     })();
 
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: AppColors.inputBackground,
         borderRadius: BorderRadius.circular(16),
@@ -3404,31 +3550,33 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           CircleAvatar(
-            radius: 40,
-            backgroundColor: AppColors.secondary.withValues(alpha: 0.2),
+            radius: 36,
+            backgroundColor: AppColors.secondary.withValues(alpha: 0.22),
             child: ClipOval(
               child: avatarUrl != null
                   ? Image.network(
                       avatarUrl,
-                      width: 80,
-                      height: 80,
+                      width: 72,
+                      height: 72,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => _driverDrawerAvatarFallback(
                         initials,
-                        radius: 40,
+                        radius: 36,
                       ),
                     )
-                  : _driverDrawerAvatarFallback(initials, radius: 40),
+                  : _driverDrawerAvatarFallback(initials, radius: 36),
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   displayName,
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
                       ),
                 ),
@@ -3436,6 +3584,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   const SizedBox(height: 4),
                   Text(
                     displayEmail,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                           color: AppColors.textSecondary,
                         ),
@@ -3453,7 +3603,58 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               ],
             ),
           ),
+          const SizedBox(width: 8),
+          _driverDrawerRatingChip(
+            isLoading: _isLoadingEarnings,
+            ratingText: !_isLoadingEarnings && _rating > 0
+                ? _rating.toStringAsFixed(1)
+                : 'N/A',
+          ),
         ],
+      ),
+    );
+  }
+
+  Widget _driverDrawerRatingChip({
+    required bool isLoading,
+    required String ratingText,
+  }) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF2C2C2C),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.star_rounded, size: 16, color: Color(0xFFFFD54F)),
+            const SizedBox(width: 4),
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 26),
+              child: Align(
+                alignment: Alignment.center,
+                child: isLoading
+                    ? const SizedBox(
+                        height: 16,
+                        width: 34,
+                        child: UberShimmer(
+                          child: UberShimmerBox(width: 34, height: 14),
+                        ),
+                      )
+                    : Text(
+                        ratingText,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3474,25 +3675,6 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         ),
       ),
     );
-  }
-
-  String _drawerFormatMemberSince(DateTime? date) {
-    if (date == null) return 'N/A';
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    return "${months[date.month - 1]} '${date.year.toString().substring(2)}";
   }
 
   String _drawerFormatPhone(String phone) {
@@ -3568,13 +3750,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           }
         } else {
           if (mounted) {
-            AppMessenger.showErrorBanner(
+            AppMessenger.showDriverErrorBanner(
                 context, response['message'] ?? 'Failed to delete account');
           }
         }
       } catch (e) {
         if (mounted) {
-          AppMessenger.showErrorBanner(context, 'Failed to delete account');
+          AppMessenger.showDriverErrorBanner(context, 'Failed to delete account');
         }
       }
     }
@@ -4333,6 +4515,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             required String label,
             required String value,
             required VoidCallback onTap,
+            FontWeight labelFontWeight = FontWeight.w500,
+            FontWeight valueFontWeight = FontWeight.w700,
+            double iconSquare = 44,
+            double iconSize = 22,
           }) {
             return Material(
               color: Colors.white,
@@ -4346,14 +4532,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   child: Row(
                     children: [
                       Container(
-                        width: 44,
-                        height: 44,
+                        width: iconSquare,
+                        height: iconSquare,
                         decoration: BoxDecoration(
                           color: earningsTanIconBg,
                           borderRadius: BorderRadius.circular(11),
                         ),
-                        child:
-                            Icon(icon, color: const Color(0xFF5C4B3F), size: 22),
+                        alignment: Alignment.center,
+                        child: Icon(
+                          icon,
+                          color: const Color(0xFF5C4B3F),
+                          size: iconSize,
+                        ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -4362,19 +4552,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                           children: [
                             Text(
                               label,
-                              style: const TextStyle(
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
                                 fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF1A1A1A),
+                                fontWeight: labelFontWeight,
+                                color: const Color(0xFF1A1A1A),
                               ),
                             ),
                             const SizedBox(height: 4),
                             Text(
                               value,
-                              style: const TextStyle(
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
                                 fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF1A1A1A),
+                                fontWeight: valueFontWeight,
+                                color: const Color(0xFF1A1A1A),
                               ),
                             ),
                           ],
@@ -4403,7 +4597,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   ColoredBox(
                     color: earningsHeaderBg,
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
                       child: Column(
                         children: [
                           Center(
@@ -4605,8 +4799,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                                   right: 4,
                                                   bottom: 28,
                                                   child: Icon(
-                                                    Icons
-                                                        .monetization_on_rounded,
+                                                    Icons.currency_rupee,
                                                     size: 40,
                                                     color: Colors.white
                                                         .withOpacity(0.12),
@@ -4616,8 +4809,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                                   right: 26,
                                                   bottom: 42,
                                                   child: Icon(
-                                                    Icons
-                                                        .monetization_on_rounded,
+                                                    Icons.currency_rupee,
                                                     size: 36,
                                                     color: Colors.white
                                                         .withOpacity(0.22),
@@ -4627,8 +4819,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                                   right: 12,
                                                   bottom: 52,
                                                   child: Icon(
-                                                    Icons
-                                                        .monetization_on_rounded,
+                                                    Icons.currency_rupee,
                                                     size: 32,
                                                     color: Colors.white
                                                         .withOpacity(0.35),
@@ -4787,100 +4978,85 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                 ),
                               ),
                               const SizedBox(height: 12),
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                              Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.stretch,
                                 children: [
-                                  Expanded(
-                                    child: tanChevronTile(
-                                      icon:
-                                          Icons.trending_up_rounded,
-                                      label: ref.tr('total_earnings'),
-                                      value:
-                                          '₹${modalWeekEarnings.toStringAsFixed(0)}',
-                                      onTap: () =>
-                                          _showTransactionHistory(
-                                              overlayContext: sheetContext),
-                                    ),
+                                  tanChevronTile(
+                                    icon: Icons.trending_up_rounded,
+                                    label: ref.tr('total_earnings'),
+                                    value:
+                                        '₹${modalWeekEarnings.toStringAsFixed(0)}',
+                                    onTap: () => _showTransactionHistory(
+                                        overlayContext: sheetContext),
                                   ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: tanChevronTile(
-                                      icon: Icons.directions_car_rounded,
-                                      label: ref.tr('total_trips'),
-                                      value: '$modalWeekTrips',
-                                      onTap: () => _showRideHistory(
-                                          overlayContext: sheetContext,
-                                          modalSetState: setModalState),
-                                    ),
+                                  const SizedBox(height: 10),
+                                  tanChevronTile(
+                                    icon: Icons.directions_car_rounded,
+                                    label: ref.tr('total_trips'),
+                                    value: '$modalWeekTrips',
+                                    onTap: () => _showRideHistory(
+                                        overlayContext: sheetContext,
+                                        modalSetState: setModalState),
                                   ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: tanChevronTile(
-                                      icon: Icons.schedule_rounded,
-                                      label: ref.tr('online_hours'),
-                                      value: modalOnlineHours.isEmpty
-                                          ? ref.tr(
-                                              'online_hours_not_reported')
-                                          : modalOnlineHours,
-                                      onTap: () {
-                                        if (isLoading) return;
-                                        showDialog<void>(
-                                          context: sheetContext,
-                                          builder: (dCtx) => AlertDialog(
-                                            title: Text(
-                                                ref.tr('online_hours')),
-                                            content:
-                                                Text(modalOnlineHours),
-                                            actions: [
-                                              TextButton(
-                                                onPressed: () =>
-                                                    Navigator.pop(dCtx),
-                                                child: Text(ref.tr('ok')),
-                                              ),
-                                            ],
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: tanChevronTile(
-                                      icon: Icons.star_rounded,
-                                      label: ref.tr('rating'),
-                                      value:
-                                          '${modalRating.toStringAsFixed(1)}',
-                                      onTap: () {
-                                        if (isLoading) return;
-                                        showDialog<void>(
-                                          context: sheetContext,
-                                          builder: (dCtx) => AlertDialog(
-                                            title: Text(ref.tr('rating')),
-                                            content: Text(
-                                              _localizedTemplate(
-                                                'rating_star_display',
-                                                {
-                                                  'rating': modalRating
-                                                      .toStringAsFixed(1),
-                                                },
-                                              ),
+                                  const SizedBox(height: 10),
+                                  tanChevronTile(
+                                    icon: Icons.schedule_rounded,
+                                    label: ref.tr('online_hours'),
+                                    value: modalOnlineHours.isEmpty
+                                        ? ref.tr(
+                                            'online_hours_not_reported')
+                                        : modalOnlineHours,
+                                    onTap: () {
+                                      if (isLoading) return;
+                                      showDialog<void>(
+                                        context: sheetContext,
+                                        builder: (dCtx) => AlertDialog(
+                                          title:
+                                              Text(ref.tr('online_hours')),
+                                          content: Text(modalOnlineHours),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.pop(dCtx),
+                                              child: Text(ref.tr('ok')),
                                             ),
-                                            actions: [
-                                              TextButton(
-                                                onPressed: () =>
-                                                    Navigator.pop(dCtx),
-                                                child: Text(ref.tr('ok')),
-                                              ),
-                                            ],
+                                          ],
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  const SizedBox(height: 10),
+                                  tanChevronTile(
+                                    icon: Icons.star_rounded,
+                                    label: ref.tr('rating'),
+                                    value:
+                                        '${modalRating.toStringAsFixed(1)}',
+                                    onTap: () {
+                                      if (isLoading) return;
+                                      showDialog<void>(
+                                        context: sheetContext,
+                                        builder: (dCtx) => AlertDialog(
+                                          title: Text(ref.tr('rating')),
+                                          content: Text(
+                                            _localizedTemplate(
+                                              'rating_star_display',
+                                              {
+                                                'rating': modalRating
+                                                    .toStringAsFixed(1),
+                                              },
+                                            ),
                                           ),
-                                        );
-                                      },
-                                    ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.pop(dCtx),
+                                              child: Text(ref.tr('ok')),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ],
                               ),
@@ -4895,29 +5071,30 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                 ),
                               ),
                               const SizedBox(height: 12),
-                              Row(
+                              Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.stretch,
                                 children: [
-                                  Expanded(
-                                    child: tanChevronTile(
-                                      icon: Icons.shopping_bag_outlined,
-                                      label: ref.tr('total_earnings'),
-                                      value:
-                                          '₹${modalLifetimeEarnings.toStringAsFixed(0)}',
-                                      onTap: () =>
-                                          _showTransactionHistory(
-                                              overlayContext: sheetContext),
-                                    ),
+                                  tanChevronTile(
+                                    icon: Icons.shopping_bag_outlined,
+                                    label: ref.tr('total_earnings'),
+                                    value:
+                                        '₹${modalLifetimeEarnings.toStringAsFixed(0)}',
+                                    iconSquare: 40,
+                                    iconSize: 26,
+                                    onTap: () => _showTransactionHistory(
+                                        overlayContext: sheetContext),
                                   ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: tanChevronTile(
-                                      icon: Icons.directions_car_rounded,
-                                      label: ref.tr('total_trips'),
-                                      value: '$modalLifetimeTrips',
-                                      onTap: () => _showRideHistory(
-                                          overlayContext: sheetContext,
-                                          modalSetState: setModalState),
-                                    ),
+                                  const SizedBox(height: 10),
+                                  tanChevronTile(
+                                    icon: Icons.directions_car_rounded,
+                                    label: ref.tr('total_trips'),
+                                    value: '$modalLifetimeTrips',
+                                    iconSquare: 40,
+                                    iconSize: 26,
+                                    onTap: () => _showRideHistory(
+                                        overlayContext: sheetContext,
+                                        modalSetState: setModalState),
                                   ),
                                 ],
                               ),
@@ -5534,7 +5711,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
           return Container(
             height: MediaQuery.of(context).size.height * 0.7,
-            padding: const EdgeInsets.all(20),
+            padding: EdgeInsets.fromLTRB(
+              20,
+              20,
+              20,
+              20 + MediaQuery.viewPaddingOf(context).bottom,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -5770,7 +5952,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         maxChildSize: 0.8,
         expand: false,
         builder: (context, scrollController) => Padding(
-          padding: const EdgeInsets.all(20),
+          padding: EdgeInsets.fromLTRB(
+            20,
+            20,
+            20,
+            20 + MediaQuery.viewPaddingOf(context).bottom,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -6012,7 +6199,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                                       }
                                     } catch (e) {
                                       if (context.mounted) {
-                                        AppMessenger.showErrorBanner(context, 'Failed: $e');
+                                        AppMessenger.showDriverErrorBanner(context, 'Failed: $e');
                                       }
                                     }
                                   },
@@ -6085,6 +6272,44 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     );
   }
 
+  bool _looksLikeTechnicalPayoutMessage(String text) {
+    final l = text.toLowerCase();
+    return l.contains('dioexception') ||
+        (l.contains('dio') && l.contains('exception')) ||
+        l.contains('bad response') ||
+        l.contains('socketexception') ||
+        l.contains('xmlhttprequest') ||
+        text.length > 220;
+  }
+
+  /// User-facing inline error when saving UPI (no Dio stack traces).
+  String _driverUpiSaveUserMessage({
+    Map<String, dynamic>? apiResult,
+    Object? caught,
+  }) {
+    if (apiResult != null) {
+      for (final key in ['message', 'error', 'msg']) {
+        final v = apiResult[key];
+        if (v != null) {
+          final t = v.toString().trim();
+          if (t.isNotEmpty && !_looksLikeTechnicalPayoutMessage(t)) {
+            return t;
+          }
+        }
+      }
+    }
+    if (caught != null) {
+      final ls = caught.toString().toLowerCase();
+      if (ls.contains('connection') ||
+          ls.contains('socket') ||
+          ls.contains('timed out') ||
+          ls.contains('network is unreachable')) {
+        return ref.tr('network_error_retry');
+      }
+    }
+    return ref.tr('enter_valid_upi');
+  }
+
   // Add UPI Sheet
   void _showAddUpiSheet() {
     final TextEditingController upiController = TextEditingController();
@@ -6096,7 +6321,6 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final trUpiId = ref.tr('upi_id');
     final trUpiHint = ref.tr('upi_hint');
     final trUpiExample = ref.tr('upi_example');
-    final trAddUpi = ref.tr('add_upi');
     final trUpiAdded = ref.tr('upi_added');
 
     showModalBottomSheet(
@@ -6161,7 +6385,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                           final upiId = upiController.text.trim();
                           if (!upiId.contains('@')) {
                             setModalState(
-                                () => errorMessage = 'Invalid UPI ID format');
+                                () =>
+                                    errorMessage = ref.tr('invalid_upi_format'));
                             return;
                           }
 
@@ -6183,14 +6408,19 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                               );
                             } else {
                               setModalState(() {
-                                errorMessage =
-                                    result['message'] ?? 'Failed to add UPI';
+                                errorMessage = _driverUpiSaveUserMessage(
+                                  apiResult: result,
+                                  caught: null,
+                                );
                                 isAdding = false;
                               });
                             }
                           } catch (e) {
                             setModalState(() {
-                              errorMessage = 'Error: ${e.toString()}';
+                              errorMessage = _driverUpiSaveUserMessage(
+                                apiResult: null,
+                                caught: e,
+                              );
                               isAdding = false;
                             });
                           }
@@ -6705,127 +6935,135 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => Consumer(
+      builder: (sheetContext) => Consumer(
         builder: (context, ref, child) {
           final settings = ref.watch(settingsProvider);
           final settingsNotifier = ref.read(settingsProvider.notifier);
           final isDark = Theme.of(context).brightness == Brightness.dark;
+          final bottomSafe = MediaQuery.viewPaddingOf(sheetContext).bottom;
+          final h = MediaQuery.sizeOf(sheetContext).height * 0.7;
 
-          return Container(
-            height: MediaQuery.of(context).size.height * 0.7,
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: isDark
-                          ? const Color(0xFF444444)
-                          : const Color(0xFFE0E0E0),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
+          return Padding(
+            padding: EdgeInsets.only(bottom: bottomSafe),
+            child: SizedBox(
+              height: h,
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      settingsNotifier.tr('settings'),
-                      style: const TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.w600),
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: isDark
+                              ? const Color(0xFF444444)
+                              : const Color(0xFFE0E0E0),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
                     ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Text(
+                          settingsNotifier.tr('settings'),
+                          style: const TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.w600),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          onPressed: () => Navigator.pop(sheetContext),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        physics: const ClampingScrollPhysics(),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Notifications toggle
+                            _buildSettingsToggle(
+                              Icons.notifications_outlined,
+                              settingsNotifier.tr('notifications'),
+                              settingsNotifier.tr('notifications_desc'),
+                              settings.notificationsEnabled,
+                              (value) => settingsNotifier.setNotifications(value),
+                              isDark,
+                            ),
+                            // Privacy - Location sharing toggle
+                            _buildSettingsToggle(
+                              Icons.location_on_outlined,
+                              settingsNotifier.tr('location_sharing'),
+                              settingsNotifier.tr('location_sharing_desc'),
+                              settings.locationSharing,
+                              (value) =>
+                                  settingsNotifier.setLocationSharing(value),
+                              isDark,
+                            ),
+                            // Language selector
+                            _buildSettingsTileWithAction(
+                              Icons.language,
+                              settingsNotifier.tr('language'),
+                              resolveAppLanguage(settings.languageCode)
+                                  .nativeName,
+                              () => _showLanguageSelector(),
+                              isDark,
+                            ),
+                            _buildSettingsTileWithAction(
+                              Icons.description_outlined,
+                              settingsNotifier.tr('update_documents'),
+                              settingsNotifier.tr('update_documents_desc'),
+                              () {
+                                Navigator.pop(sheetContext);
+                                context.push(
+                                  '${AppRoutes.driverOnboarding}?isUpdateMode=true&returnToProfile=true',
+                                );
+                              },
+                              isDark,
+                            ),
+                            // About
+                            _buildSettingsTileWithAction(
+                              Icons.info_outline,
+                              settingsNotifier.tr('about'),
+                              settingsNotifier.tr('about_desc'),
+                              () => _showAboutDialog(),
+                              isDark,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        onPressed: () {
+                          Navigator.pop(sheetContext);
+                          context.go(AppRoutes.login);
+                        },
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red,
+                          side: const BorderSide(color: Colors.red),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: Text(settingsNotifier.tr('logout')),
+                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
-                // Notifications toggle
-                _buildSettingsToggle(
-                  Icons.notifications_outlined,
-                  settingsNotifier.tr('notifications'),
-                  settingsNotifier.tr('notifications_desc'),
-                  settings.notificationsEnabled,
-                  (value) => settingsNotifier.setNotifications(value),
-                  isDark,
-                ),
-                // Privacy - Location sharing toggle
-                _buildSettingsToggle(
-                  Icons.location_on_outlined,
-                  settingsNotifier.tr('location_sharing'),
-                  settingsNotifier.tr('location_sharing_desc'),
-                  settings.locationSharing,
-                  (value) => settingsNotifier.setLocationSharing(value),
-                  isDark,
-                ),
-                // Language selector
-                _buildSettingsTileWithAction(
-                  Icons.language,
-                  settingsNotifier.tr('language'),
-                  settings.languageName,
-                  () => _showLanguageSelector(),
-                  isDark,
-                ),
-                // Appearance toggle
-                _buildSettingsToggle(
-                  Icons.dark_mode_outlined,
-                  settingsNotifier.tr('dark_mode'),
-                  settingsNotifier.tr('dark_mode_desc'),
-                  settings.isDarkMode,
-                  (value) {
-                    settingsNotifier.setDarkMode(value);
-                  },
-                  isDark,
-                ),
-                _buildSettingsTileWithAction(
-                  Icons.description_outlined,
-                  'Update Documents',
-                  'Upload/review license and other documents',
-                  () {
-                    Navigator.pop(context);
-                    context.push(
-                      '${AppRoutes.driverOnboarding}?isUpdateMode=true&returnToProfile=true',
-                    );
-                  },
-                  isDark,
-                ),
-                // About
-                _buildSettingsTileWithAction(
-                  Icons.info_outline,
-                  settingsNotifier.tr('about'),
-                  settingsNotifier.tr('about_desc'),
-                  () => _showAboutDialog(),
-                  isDark,
-                ),
-                const Spacer(),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      context.go(AppRoutes.login);
-                    },
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.red,
-                      side: const BorderSide(color: Colors.red),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Text(settingsNotifier.tr('logout')),
-                  ),
-                ),
-              ],
+              ),
             ),
           );
         },
@@ -6890,10 +7128,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   void _showLanguageSelector() {
+    final hostContext = context;
     showDialog(
       context: context,
       builder: (dialogContext) => Consumer(
-        builder: (context, ref, child) {
+        builder: (_, ref, __) {
           final settings = ref.watch(settingsProvider);
           final settingsNotifier = ref.read(settingsProvider.notifier);
 
@@ -6904,13 +7143,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               child: ListView.builder(
                 shrinkWrap: true,
                 itemCount: supportedLanguages.length,
-                itemBuilder: (context, index) {
+                itemBuilder: (_, index) {
                   final lang = supportedLanguages[index];
                   final isSelected = settings.languageCode == lang.code;
                   return ListTile(
                     title: Text(lang.name),
-                    subtitle: Text(lang.nativeName,
-                        style: const TextStyle(fontSize: 12)),
+                    subtitle: Text(
+                      lang.nativeName,
+                      style: const TextStyle(fontSize: 12),
+                    ),
                     trailing: isSelected
                         ? const Icon(Icons.check, color: Color(0xFFD4956A))
                         : null,
@@ -6920,23 +7161,33 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                         return;
                       }
 
-                      // Close dialog first to avoid rebuild issues
-                      Navigator.of(dialogContext).pop();
-
-                      // Small delay to let dialog animation finish before triggering app rebuild
-                      await Future.delayed(const Duration(milliseconds: 300));
-
-                      if (!context.mounted) return;
-
                       await settingsNotifier.setLanguage(lang.code, lang.name);
-                      ref
+                      await ref
                           .read(driverOnboardingProvider.notifier)
                           .setLanguage(lang.code)
-                          .catchError((_) {});
+                          .catchError((_) => false);
 
-                      if (context.mounted) {
-                        AppMessenger.showErrorBanner(context, '${lang.nativeName} - Language changed');
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop();
                       }
+
+                      if (!hostContext.mounted) return;
+
+                      final messenger =
+                          ScaffoldMessenger.maybeOf(hostContext);
+                      messenger?.hideCurrentSnackBar();
+                      messenger?.showSnackBar(
+                        SnackBar(
+                          behavior: SnackBarBehavior.floating,
+                          duration: const Duration(seconds: 2),
+                          backgroundColor:
+                              Colors.black.withValues(alpha: 0.82),
+                          content: Text(
+                            settingsNotifier.tr('language_saved'),
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      );
                     },
                   );
                 },
@@ -7002,7 +7253,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              AppMessenger.showErrorBanner(context, trOpeningTerms);
+              AppMessenger.showDriverErrorBanner(context, trOpeningTerms);
             },
             child: Text(trTermsPrivacy),
           ),
@@ -7021,98 +7272,95 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final trLetUsKnow = ref.tr('let_us_know');
     final trSendFeedback = ref.tr('send_feedback');
     final trHelpImprove = ref.tr('help_improve');
-    final trHelpline = ref.tr('helpline');
-    final trCallNow = ref.tr('call_now');
-    final trDialing = ref.tr('dialing');
 
-    showModalBottomSheet(
+    showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => Container(
-        height: MediaQuery.of(context).size.height * 0.6,
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE0E0E0),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Text(
-                  trHelpSupport,
-                  style: const TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.w600),
-                ),
-                const Spacer(),
-                IconButton(
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _buildHelpTileWithAction(Icons.headset_mic, trContactSupport,
-                trGetHelp, _showContactSupport),
-            _buildHelpTileWithAction(
-                Icons.article_outlined, trFaqs, trFindAnswers, _showFAQs),
-            _buildHelpTileWithAction(Icons.report_problem_outlined,
-                trReportIssue, trLetUsKnow, _showReportIssue),
-            _buildHelpTileWithAction(Icons.feedback_outlined, trSendFeedback,
-                trHelpImprove, _showFeedback),
-            const Spacer(),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF5F5F5),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
+      builder: (sheetContext) {
+        final h = MediaQuery.sizeOf(sheetContext).height * 0.62;
+        final bottomSafe = MediaQuery.viewPaddingOf(sheetContext).bottom;
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomSafe),
+          child: SizedBox(
+            height: h,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Icon(Icons.phone, color: Color(0xFFD4956A)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(trHelpline,
-                            style:
-                                const TextStyle(fontWeight: FontWeight.w600)),
-                        const Text('1800-123-4567',
-                            style: TextStyle(
-                                color: Color(0xFF888888), fontSize: 12)),
-                      ],
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE0E0E0),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
                   ),
-                  ElevatedButton(
-                    onPressed: () {
-                      AppMessenger.showErrorBanner(context, trDialing);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD4956A),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8)),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          trHelpSupport,
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(sheetContext),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      physics: const ClampingScrollPhysics(),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildHelpTileWithAction(
+                            Icons.headset_mic,
+                            trContactSupport,
+                            trGetHelp,
+                            _showContactSupport,
+                          ),
+                          _buildHelpTileWithAction(
+                            Icons.article_outlined,
+                            trFaqs,
+                            trFindAnswers,
+                            _showFAQs,
+                          ),
+                          _buildHelpTileWithAction(
+                            Icons.report_problem_outlined,
+                            trReportIssue,
+                            trLetUsKnow,
+                            _showReportIssue,
+                          ),
+                          _buildHelpTileWithAction(
+                            Icons.feedback_outlined,
+                            trSendFeedback,
+                            trHelpImprove,
+                            _showFeedback,
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                      ),
                     ),
-                    child: Text(trCallNow,
-                        style: const TextStyle(color: Colors.white)),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -7161,7 +7409,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               subtitle: Text(trChatWithAgent),
               onTap: () {
                 Navigator.pop(context);
-                AppMessenger.showErrorBanner(context, trOpeningChat);
+                AppMessenger.showDriverErrorBanner(context, trOpeningChat);
               },
             ),
             ListTile(
@@ -7170,7 +7418,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               subtitle: const Text('support@raahi.com'),
               onTap: () {
                 Navigator.pop(context);
-                AppMessenger.showErrorBanner(context, trOpeningEmail);
+                AppMessenger.showDriverErrorBanner(context, trOpeningEmail);
               },
             ),
             ListTile(
@@ -7179,7 +7427,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               subtitle: const Text('1800-123-4567'),
               onTap: () {
                 Navigator.pop(context);
-                AppMessenger.showErrorBanner(context, trDialingSupport);
+                AppMessenger.showDriverErrorBanner(context, trDialingSupport);
               },
             ),
           ],
@@ -7334,7 +7582,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                AppMessenger.showErrorBanner(context, trIssueReported);
+                AppMessenger.showDriverErrorBanner(context, trIssueReported);
               },
               style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFD4956A)),
@@ -7402,7 +7650,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                AppMessenger.showErrorBanner(context, trFeedbackThanks);
+                AppMessenger.showDriverErrorBanner(context, trFeedbackThanks);
               },
               style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFD4956A)),
@@ -7448,95 +7696,115 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 }
 
-/// Rider profile–style stat tile for driver drawer.
-class _DriverDrawerStatCard extends StatelessWidget {
-  const _DriverDrawerStatCard({
-    required this.icon,
-    required this.label,
-    required this.value,
-    this.isLoading = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-  final bool isLoading;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.inputBackground,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        children: [
-          Icon(icon, color: AppColors.primary, size: 24),
-          const SizedBox(height: 8),
-          if (isLoading)
-            const UberShimmer(
-              child: UberShimmerBox(width: 44, height: 18),
-            )
-          else
-            Text(
-              value,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-            ),
-          const SizedBox(height: 4),
-          if (isLoading)
-            const UberShimmer(
-              child: UberShimmerBox(width: 56, height: 10),
-            )
-          else
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.textSecondary,
-                  ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
 class _DriverDrawerMenuItem extends StatelessWidget {
   const _DriverDrawerMenuItem({
     required this.icon,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.trailingValue,
+    this.isLoadingTrailing = false,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
+  final String? trailingValue;
+  final bool isLoadingTrailing;
+
+  static const _iconTone = Color(0xFF1A1A1A);
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      leading: Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: AppColors.inputBackground,
-          borderRadius: BorderRadius.circular(10),
+    return Material(
+      color: Colors.white,
+      child: InkWell(
+        onTap: onTap,
+        splashColor: Colors.black12,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8F5F0),
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color:
+                        const Color(0xFFE8E0D4).withValues(alpha: 0.8),
+                    width: 0.5,
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Icon(icon, color: _iconTone, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                        height: 1.2,
+                        color: Color(0xFF1A1A1A),
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        fontSize: 12,
+                        fontWeight: FontWeight.w400,
+                        height: 1.3,
+                        color: Color(0xFF888888),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (isLoadingTrailing)
+                const SizedBox(
+                  width: 28,
+                  height: 24,
+                  child: UberShimmer(
+                    child: UberShimmerBox(width: 28, height: 18),
+                  ),
+                )
+              else if (trailingValue != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 2),
+                  child: Text(
+                    trailingValue!,
+                    style: const TextStyle(
+                      fontFamily: 'Poppins',
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1A1A),
+                    ),
+                  ),
+                ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: const Color(0xFF1A1A1A).withValues(alpha: 0.45),
+                size: 22,
+              ),
+            ],
+          ),
         ),
-        child: Icon(icon, color: AppColors.textPrimary, size: 22),
       ),
-      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w500)),
-      subtitle: Text(
-        subtitle,
-        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-      ),
-      trailing:
-          const Icon(Icons.chevron_right, color: AppColors.textSecondary),
-      onTap: onTap,
     );
   }
 }

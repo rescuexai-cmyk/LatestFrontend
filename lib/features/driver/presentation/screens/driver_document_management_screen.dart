@@ -132,7 +132,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
         _reuploadingDocType = null;
         _pendingUploadDocTypes.add(backendId);
       });
-      AppMessenger.showErrorBanner(context, '$title re-uploaded. Status changed to Pending.');
+      AppMessenger.showDriverErrorBanner(context, '$title re-uploaded. Status changed to Pending.');
       await _refreshStatus();
     } catch (e) {
       if (mounted) {

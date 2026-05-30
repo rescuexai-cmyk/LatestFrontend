@@ -12,6 +12,7 @@ import '../../../../core/services/car_animation_service.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
+import '../../../../core/utils/cab_map_icon.dart';
 
 /// Ride phase enum for determining route display
 enum RidePhase {
@@ -247,7 +248,11 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
         _vehicleIcon = await loadAutoMapIconProcessed(debugLabel: 'auto') ??
             await BitmapDescriptor.asset(imageConfig, assetPath);
       } else {
-        _vehicleIcon = await BitmapDescriptor.asset(imageConfig, assetPath);
+        _vehicleIcon = await loadCabMapIconProcessed(
+              assetPath,
+              debugLabel: normalizedType,
+            ) ??
+            await BitmapDescriptor.asset(imageConfig, assetPath);
       }
       _loadedVehicleType = normalizedType;
       if (mounted) _updateMarkers();

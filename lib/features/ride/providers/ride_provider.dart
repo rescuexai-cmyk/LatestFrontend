@@ -273,8 +273,7 @@ final rideDetailsProvider = FutureProvider.family<Ride, String>((ref, rideId) as
   final response = await apiClient.getRide(rideId);
   // Backend returns: { success, data: { ... ride fields ... } }
   if (response['success'] == true) {
-    final rideData = response['data'] as Map<String, dynamic>;
-    return Ride.fromJson(rideData);
+    return Ride.fromJson(Ride.unwrapRidePayload(response));
   }
   throw Exception('Failed to fetch ride details');
 });

@@ -38,8 +38,9 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
     });
 
     try {
-      final rideData = await apiClient.getRide(widget.rideId);
-      setState(() => _ride = Ride.fromJson(rideData));
+      final raw = await apiClient.getRide(widget.rideId);
+      final payload = Ride.unwrapRidePayload(raw);
+      setState(() => _ride = Ride.fromJson(payload));
     } catch (e) {
       setState(() => _error = 'Failed to load ride details');
       debugPrint('Error loading ride: $e');
@@ -84,197 +85,238 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
     final dateFormat = DateFormat('dd MMM yyyy');
     final timeFormat = DateFormat('hh:mm a');
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Status banner
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: _getStatusColor(ride.status).withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
+    return Column(
+      children: [
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(_getStatusIcon(ride.status), color: _getStatusColor(ride.status)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                // Status banner
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: _getStatusColor(ride.status).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
                     children: [
-                      Text(
-                        _getStatusText(ride.status),
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: _getStatusColor(ride.status),
+                      Icon(_getStatusIcon(ride.status), color: _getStatusColor(ride.status)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _getStatusText(ride.status),
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: _getStatusColor(ride.status),
+                              ),
+                            ),
+                            Text(
+                              '${dateFormat.format(rideCreatedIst)} at ${timeFormat.format(rideCreatedIst)}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
                         ),
-                      ),
-                      Text(
-                        '${dateFormat.format(rideCreatedIst)} at ${timeFormat.format(rideCreatedIst)}',
-                        style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
                   ),
                 ),
+                const SizedBox(height: 24),
+
+                // Route info
+                Text('Route', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                _buildLocationRow(Icons.circle, AppColors.pickupMarker, 'Pickup', ride.pickupLocation.address ?? 'Unknown'),
+                Container(margin: const EdgeInsets.only(left: 11), width: 2, height: 24, color: AppColors.border),
+                _buildLocationRow(Icons.location_on, AppColors.dropoffMarker, 'Dropoff', ride.destinationLocation.address ?? 'Unknown'),
+                const SizedBox(height: 24),
+
+                // Trip details
+                Text('Trip Details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                _buildDetailRow('Vehicle Type', ride.rideType.toUpperCase()),
+                _buildDetailRow('Distance', '${ride.distance.toStringAsFixed(1)} km'),
+                _buildDetailRow('Duration', '${ride.estimatedDuration} min'),
+                _buildDetailRow('Payment', ride.paymentMethod.name.toUpperCase()),
+                const SizedBox(height: 24),
+
+                // Fare breakdown
+                Text('Fare Details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                FareBreakdownWidget(
+                  breakdown: _buildFareBreakdownModel(ride),
+                  vehicleName: ride.rideType.toUpperCase(),
+                  isReceipt: ride.status == RideStatus.completed,
+                ),
+                const SizedBox(height: 24),
+
+                // Driver info (if available)
+                if (ride.driver != null) ...[
+                  Text('Driver', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: AppColors.inputBackground,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: AppColors.secondary.withOpacity(0.2),
+                          child: Text(
+                            ride.driver!.name[0].toUpperCase(),
+                            style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.secondary),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(ride.driver!.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                  if (ride.driver!.isVerified) ...[
+                                    const SizedBox(width: 4),
+                                    const Icon(Icons.verified, size: 16, color: AppColors.primary),
+                                  ],
+                                ],
+                              ),
+                              if (ride.driver!.vehicleInfo != null)
+                                Text(
+                                  '${ride.driver!.vehicleInfo!.color} ${ride.driver!.vehicleInfo!.type} • ${ride.driver!.vehicleInfo!.plateNumber}',
+                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.textSecondary),
+                                ),
+                            ],
+                          ),
+                        ),
+                        Row(
+                          children: [
+                            const Icon(Icons.star, size: 16, color: AppColors.starYellow),
+                            const SizedBox(width: 4),
+                            Text(ride.driver!.rating.toStringAsFixed(1)),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                ],
+
+                // Rating (for completed rides)
+                if (ride.status == RideStatus.completed) ...[
+                  Text('Your Rating', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  if (ride.rating != null)
+                    Row(
+                      children: List.generate(5, (index) => Icon(
+                        index < ride.rating!.round() ? Icons.star : Icons.star_border,
+                        size: 32,
+                        color: AppColors.starYellow,
+                      )),
+                    )
+                  else
+                    ElevatedButton(
+                      onPressed: _showRatingDialog,
+                      child: const Text('Rate this ride'),
+                    ),
+                ],
+                // Lost & Found banner (completed rides within 48h)
+                if (LostAndFoundSheet.isEligible(ride)) ...[
+                  const SizedBox(height: 20),
+                  _buildLostAndFoundBanner(ride),
+                ],
+                const SizedBox(height: 8),
               ],
             ),
           ),
-          const SizedBox(height: 24),
-
-          // Route info
-          Text('Route', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          _buildLocationRow(Icons.circle, AppColors.pickupMarker, 'Pickup', ride.pickupLocation.address ?? 'Unknown'),
-          Container(margin: const EdgeInsets.only(left: 11), width: 2, height: 24, color: AppColors.border),
-          _buildLocationRow(Icons.location_on, AppColors.dropoffMarker, 'Dropoff', ride.destinationLocation.address ?? 'Unknown'),
-          const SizedBox(height: 24),
-
-          // Trip details
-          Text('Trip Details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          _buildDetailRow('Vehicle Type', ride.rideType.toUpperCase()),
-          _buildDetailRow('Distance', '${ride.distance.toStringAsFixed(1)} km'),
-          _buildDetailRow('Duration', '${ride.estimatedDuration} min'),
-          _buildDetailRow('Payment', ride.paymentMethod.name.toUpperCase()),
-          const SizedBox(height: 24),
-
-          // Fare breakdown
-          Text('Fare Details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          FareBreakdownWidget(
-            breakdown: FareBreakdown(
-              baseFare: ride.fareBreakdown?['startingFee']?.toDouble() ?? 30,
-              distanceKm: ride.distance,
-              durationMin: ride.estimatedDuration.toDouble(),
-              ratePerKm: ride.fareBreakdown?['ratePerKm']?.toDouble() ?? 12,
-              ratePerMin: ride.fareBreakdown?['ratePerMin']?.toDouble() ?? 1.5,
-              distanceFare: ride.fareBreakdown?['distanceFare']?.toDouble() ?? (ride.distance * 12),
-              timeFare: ride.fareBreakdown?['timeFare']?.toDouble() ?? (ride.estimatedDuration * 1.5),
-              surgeMultiplier: ride.fareBreakdown?['dynamicMultiplier']?.toDouble() ?? 1.0,
-              surgeAmount: ride.fareBreakdown?['surgeAmount']?.toDouble() ?? 0,
-              tolls: ride.fareBreakdown?['tolls']?.toDouble() ?? 0,
-              airportFee: ride.fareBreakdown?['airportCharge']?.toDouble() ?? 0,
-              waitingCharge: ride.fareBreakdown?['waitingCharge']?.toDouble() ?? 0,
-              parkingFees: ride.fareBreakdown?['parkingFees']?.toDouble() ?? 0,
-              extraStopsCharge: ride.fareBreakdown?['extraStopsCharge']?.toDouble() ?? 0,
-              discount: ride.fareBreakdown?['discount']?.toDouble() ?? 0,
-              subtotal: ride.fareBreakdown?['subtotal']?.toDouble() ?? ride.fare,
-              gstPercent: ride.fareBreakdown?['gstPercent']?.toDouble() ?? 5,
-              gstAmount: ride.fareBreakdown?['gstAmount']?.toDouble() ?? 0,
-              totalFare: ride.fare,
-              promoCode: ride.fareBreakdown?['promoCode'],
-              minimumFareApplied: ride.fareBreakdown?['minimumFareApplied'] ?? false,
-            ),
-            vehicleName: ride.rideType.toUpperCase(),
-            isReceipt: ride.status == RideStatus.completed,
-          ),
-          const SizedBox(height: 24),
-
-          // Driver info (if available)
-          if (ride.driver != null) ...[
-            Text('Driver', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.inputBackground,
-                borderRadius: BorderRadius.circular(12),
-              ),
+        ),
+        Material(
+          color: Colors.white,
+          elevation: 8,
+          child: SafeArea(
+            top: false,
+            minimum: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 12),
               child: Row(
                 children: [
-                  CircleAvatar(
-                    radius: 24,
-                    backgroundColor: AppColors.secondary.withOpacity(0.2),
-                    child: Text(
-                      ride.driver!.name[0].toUpperCase(),
-                      style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.secondary),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _openSupportOptions,
+                      icon: const Icon(Icons.help_outline),
+                      label: const Text('Get Help'),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Text(ride.driver!.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-                            if (ride.driver!.isVerified) ...[
-                              const SizedBox(width: 4),
-                              const Icon(Icons.verified, size: 16, color: AppColors.primary),
-                            ],
-                          ],
-                        ),
-                        if (ride.driver!.vehicleInfo != null)
-                          Text(
-                            '${ride.driver!.vehicleInfo!.color} ${ride.driver!.vehicleInfo!.type} • ${ride.driver!.vehicleInfo!.plateNumber}',
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.textSecondary),
-                          ),
-                      ],
+                    child: OutlinedButton.icon(
+                      onPressed: _downloadReceipt,
+                      icon: const Icon(Icons.receipt_outlined),
+                      label: const Text('Receipt'),
                     ),
-                  ),
-                  Row(
-                    children: [
-                      const Icon(Icons.star, size: 16, color: AppColors.starYellow),
-                      const SizedBox(width: 4),
-                      Text(ride.driver!.rating.toStringAsFixed(1)),
-                    ],
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 24),
-          ],
-
-          // Rating (for completed rides)
-          if (ride.status == RideStatus.completed) ...[
-            Text('Your Rating', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            if (ride.rating != null)
-              Row(
-                children: List.generate(5, (index) => Icon(
-                  index < ride.rating!.round() ? Icons.star : Icons.star_border,
-                  size: 32,
-                  color: AppColors.starYellow,
-                )),
-              )
-            else
-              ElevatedButton(
-                onPressed: _showRatingDialog,
-                child: const Text('Rate this ride'),
-              ),
-          ],
-          // Lost & Found banner (completed rides within 48h)
-          if (LostAndFoundSheet.isEligible(ride)) ...[
-            const SizedBox(height: 20),
-            _buildLostAndFoundBanner(ride),
-          ],
-          const SizedBox(height: 24),
-
-          // Action buttons
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _openSupportOptions,
-                  icon: const Icon(Icons.help_outline),
-                  label: const Text('Get Help'),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _downloadReceipt,
-                  icon: const Icon(Icons.receipt_outlined),
-                  label: const Text('Receipt'),
-                ),
-              ),
-            ],
           ),
-        ],
-      ),
+        ),
+      ],
+    );
+  }
+
+  FareBreakdown _buildFareBreakdownModel(Ride ride) {
+    final fb = ride.fareBreakdown;
+    double dn(String key, double fallback) {
+      final v = fb?[key];
+      if (v == null) return fallback;
+      if (v is num) return v.toDouble();
+      return double.tryParse(v.toString()) ?? fallback;
+    }
+
+    final rateKm = dn('ratePerKm', dn('perKmRate', 12));
+    final rateMin = dn('ratePerMin', dn('perMinRate', 1.5));
+    final baseFare = dn('startingFee', dn('baseFare', 30));
+    final distanceFare = dn('distanceFare', ride.distance * rateKm);
+    final timeFare = dn('timeFare', ride.estimatedDuration * rateMin);
+
+    double surgeMul = dn('dynamicMultiplier', dn('surgeMultiplier', 1.0));
+    if (surgeMul <= 0) surgeMul = 1.0;
+    final surgeAmt = dn('surgeAmount', 0);
+
+    final subtotalComputed = dn('subtotal', baseFare + distanceFare + timeFare);
+    final totalFare =
+        ride.fare > 0 ? ride.fare : dn('totalFare', dn('estimatedFare', subtotalComputed));
+
+    return FareBreakdown(
+      baseFare: baseFare,
+      distanceKm: ride.distance,
+      durationMin: ride.estimatedDuration.toDouble(),
+      ratePerKm: rateKm,
+      ratePerMin: rateMin,
+      distanceFare: distanceFare,
+      timeFare: timeFare,
+      surgeMultiplier: surgeMul,
+      surgeAmount: surgeAmt,
+      tolls: dn('tolls', 0),
+      airportFee: dn('airportCharge', 0),
+      waitingCharge: dn('waitingCharge', 0),
+      parkingFees: dn('parkingFees', 0),
+      extraStopsCharge: dn('extraStopsCharge', 0),
+      discount: dn('discount', 0),
+      subtotal: subtotalComputed,
+      gstPercent: dn('gstPercent', 5),
+      gstAmount: dn('gstAmount', 0),
+      totalFare: totalFare,
+      promoCode: fb?['promoCode'] as String?,
+      minimumFareApplied: fb?['minimumFareApplied'] as bool? ?? false,
     );
   }
 

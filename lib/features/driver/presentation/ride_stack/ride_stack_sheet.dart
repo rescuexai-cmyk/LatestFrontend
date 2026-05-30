@@ -87,6 +87,7 @@ Future<void> showRideStackSheet({
     isDismissible: false,
     enableDrag: false,
     isScrollControlled: true,
+    useSafeArea: true,
     backgroundColor: Colors.transparent,
     barrierColor: Colors.black54,
     builder: (sheetContext) {
@@ -167,35 +168,41 @@ class _RideStackOverlayState extends ConsumerState<RideStackOverlay>
       _updateVisibility(driverRidesState.hasActiveOffer);
     });
 
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+
     return SlideTransition(
       position: _slideAnimation,
-      child: Align(
-        alignment: Alignment.bottomCenter,
-        child: FractionallySizedBox(
-          heightFactor: 0.5,
-          widthFactor: 1.0,
-          child: Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFFF5F5F5),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 20,
-                  offset: const Offset(0, -5),
-                ),
-              ],
-            ),
-            child: Column(
-              children: [
-                _buildHandle(),
-                Expanded(
-                  child: RideStackView(
-                    onAccept: widget.onAccept,
-                    onDecline: widget.onDecline,
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          child: FractionallySizedBox(
+            heightFactor: 0.5,
+            widthFactor: 1.0,
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5F5F5),
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(24)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 20,
+                    offset: const Offset(0, -5),
                   ),
-                ),
-              ],
+                ],
+              ),
+              child: Column(
+                children: [
+                  _buildHandle(),
+                  Expanded(
+                    child: RideStackView(
+                      onAccept: widget.onAccept,
+                      onDecline: widget.onDecline,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

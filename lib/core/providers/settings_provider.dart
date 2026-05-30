@@ -19,15 +19,18 @@ class AppLanguage {
   });
 }
 
+/// App-only locales (English + Hindi). Fallback for unknown persisted codes is English.
 const List<AppLanguage> supportedLanguages = [
   AppLanguage(code: 'en', name: 'English (India)', nativeName: 'English', locale: Locale('en', 'IN')),
   AppLanguage(code: 'hi', name: 'Hindi', nativeName: 'हिंदी', locale: Locale('hi', 'IN')),
-  AppLanguage(code: 'ta', name: 'Tamil', nativeName: 'தமிழ்', locale: Locale('ta', 'IN')),
-  AppLanguage(code: 'te', name: 'Telugu', nativeName: 'తెలుగు', locale: Locale('te', 'IN')),
-  AppLanguage(code: 'kn', name: 'Kannada', nativeName: 'ಕನ್ನಡ', locale: Locale('kn', 'IN')),
-  AppLanguage(code: 'ml', name: 'Malayalam', nativeName: 'മലയാളം', locale: Locale('ml', 'IN')),
-  AppLanguage(code: 'bn', name: 'Bengali', nativeName: 'বাংলা', locale: Locale('bn', 'IN')),
 ];
+
+AppLanguage resolveAppLanguage(String code) {
+  for (final l in supportedLanguages) {
+    if (l.code == code) return l;
+  }
+  return supportedLanguages.first;
+}
 
 // Translation strings for each language
 class AppStrings {
@@ -83,6 +86,7 @@ class AppStrings {
       'language': 'Language',
       'dark_mode': 'Dark Mode',
       'dark_mode_desc': 'Switch to dark theme',
+      'language_saved': 'Language saved',
       'about': 'About',
       'about_desc': 'App info and legal',
       'logout': 'Logout',
@@ -493,9 +497,9 @@ class AppStrings {
       'method_selected': '{method} selected',
       'wallet_selected': 'Raahi Wallet selected',
       'enter_upi_id': 'Enter your {method} ID',
-      'upi_example': 'Example: mobile@paytm, yourname@okicici',
       'enter_upi_prompt': 'Please enter UPI ID',
       'invalid_upi_format': 'Invalid UPI ID format',
+      'enter_valid_upi': 'Enter a valid UPI ID',
       'upi_linked': '{method} linked: {id}',
       'link_upi': 'Link UPI',
       'payments': 'Payments',
@@ -569,6 +573,16 @@ class AppStrings {
       'saved': 'Saved',
       'home_work_more': 'Home, Work, and more',
       'get_help_rides': 'Get help with your rides',
+      'switch_to_driver': 'Switch to Driver',
+      'switch_to_driver_desc':
+          'Start driving & earning with Raahi',
+      'view_ride_history': 'View ride history',
+      'rating_na': 'N/A',
+      'delete_account': 'Delete Account',
+      'delete_account_warning':
+          'Are you sure you want to permanently delete your account? '
+          'All your data including ride history, saved places, and preferences '
+          'will be permanently removed. This action cannot be undone.',
       'add_new_place': 'Add a new place',
       'search_save_locations': 'Search and save your favorite locations',
       'no_saved_places': 'No saved places yet',
@@ -619,6 +633,9 @@ class AppStrings {
       'driver_status_error': 'Could not check driver status',
       'finding_places': 'Finding places near you...',
       'tap_find_places': 'Tap to find places near you',
+      'schedule_chip_later': 'Later',
+      'tomorrow_comma_time': 'Tomorrow, {time}',
+      'user_phone_suffix': 'User {digits}',
       'hi_user': 'Hi, {name}!',
       'cashback': '30% Cashback',
       'book_now': 'Book Now!',
@@ -835,6 +852,7 @@ class AppStrings {
       'language': 'भाषा',
       'dark_mode': 'डार्क मोड',
       'dark_mode_desc': 'डार्क थीम पर स्विच करें',
+      'language_saved': 'भाषा सहेज ली गई',
       'about': 'एप के बारे में',
       'about_desc': 'एप जानकारी और कानूनी',
       'logout': 'लॉग आउट',
@@ -925,6 +943,8 @@ class AppStrings {
       'add_upi_id': 'UPI ID जोड़ें',
       'upi_hint': 'yourname@upi',
       'upi_example': 'उदाहरण: yourname@paytm, yourname@ybl, yourname@oksbi',
+      'invalid_upi_format': 'अमान्य UPI आईडी प्रारूप',
+      'enter_valid_upi': 'कृपया मान्य UPI आईडी दर्ज करें',
       'add_bank_account': 'बैंक खाता जोड़ें',
       'chat_with_agent': 'सहायता एजेंट से चैट करें',
       'dialing_support': 'सहायता को कॉल कर रहे हैं...',
@@ -1195,6 +1215,16 @@ class AppStrings {
       'saved': 'सहेजा गया',
       'home_work_more': 'घर, कार्यालय, और अधिक',
       'get_help_rides': 'अपनी राइड्स में सहायता प्राप्त करें',
+      'switch_to_driver': 'ड्राइवर मोड पर जाएँ',
+      'switch_to_driver_desc':
+          'राही के साथ ड्राइविंग और कमाई शुरू करें',
+      'view_ride_history': 'राइड इतिहास देखें',
+      'rating_na': '—',
+      'delete_account': 'खाता हटाएँ',
+      'delete_account_warning':
+          'क्या आप स्थायी रूप से अपना खाता हटाना चाहते हैं? '
+          'राइड इतिहास, सहेजे स्थान और सभी प्राथमिकताओं सहित आपका सारा डेटा '
+          'हमेशा के लिए हटा दिया जाएगा। यह कार्रवाई पूर्ववत नहीं की जा सकती।',
       'add_new_place': 'नया स्थान जोड़ें',
       'search_save_locations': 'अपने पसंदीदा स्थान खोजें और सहेजें',
       'no_saved_places': 'अभी तक कोई सहेजा गया स्थान नहीं',
@@ -1236,6 +1266,33 @@ class AppStrings {
       'switch_account': 'खाता बदलें?',
       'curated_love': 'दिल्ली, NCR में प्यार से बनाया गया',
       'curated_india': 'भारत में प्यार से बनाया गया',
+      'finding_places': 'आपके आसपास स्थान खोज रहे हैं…',
+      'tap_find_places': 'आसपास स्थान खोजने के लिए टैप करें',
+      'schedule_chip_later': 'बाद में',
+      'tomorrow_comma_time': 'कल, {time}',
+      'user_phone_suffix': 'उपयोगकर्ता {digits}',
+      'hi_user': 'नमस्ते, {name}!',
+      'cashback': '30% कैशबैक',
+      'book_now': 'अभी बुक करें!',
+      
+      // Services (hub)
+      'cab_mini': 'कैब मिनी',
+      'compact_cars': 'कॉम्पैक्ट कारें',
+      'auto': 'ऑटो',
+      'budget_friendly': 'बजेट अनुकूल',
+      'cab_xl': 'कैब XL',
+      'spacious_suvs': 'विशाल SUV',
+      'quick_pickup': 'तुरंत पिकअप',
+      'premium': 'प्रीमियम',
+      'luxury_rides': 'लक्ज़री राइड्स',
+      'driver_rental': 'ड्राइवर किराए पर',
+      'hire_driver': 'ड्राइवर किराए पर लें',
+      'get_rescued': 'रेस्क्यू कराएँ',
+      'plan_trip': 'ट्रिप प्लान करें',
+      'service_coming_soon': '{service} जल्द आ रहा है!',
+      'service_coming_desc':
+          'हम आपके शहर में {service} लाने की पूरी कोशिश कर रहे हैं। अपडेट के लिए जुड़े रहें!',
+      'got_it': 'ठीक है',
       
       // Find Trip
       'find_trip': 'ट्रिप खोजें',
@@ -1873,20 +1930,26 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    final loadedCode = prefs.getString('languageCode') ?? 'en';
-    final loadedName = prefs.getString('languageName') ?? 'English (India)';
-    
+    final rawCode = prefs.getString('languageCode') ?? 'en';
+    final resolved = resolveAppLanguage(rawCode);
+
     debugPrint('🌐 Loading settings from SharedPreferences...');
-    debugPrint('   Language: $loadedCode ($loadedName)');
-    
+    debugPrint('   Language: ${resolved.code} (${resolved.name})');
+
     state = SettingsState(
       isDarkMode: prefs.getBool('isDarkMode') ?? false,
-      languageCode: loadedCode,
-      languageName: loadedName,
+      languageCode: resolved.code,
+      languageName: resolved.name,
       notificationsEnabled: prefs.getBool('notificationsEnabled') ?? true,
       locationSharing: prefs.getBool('locationSharing') ?? true,
     );
-    
+
+    // Keep prefs aligned if we migrated from an unsupported locale code.
+    if (rawCode != resolved.code || prefs.getString('languageName') != resolved.name) {
+      await prefs.setString('languageCode', resolved.code);
+      await prefs.setString('languageName', resolved.name);
+    }
+
     debugPrint('✅ Settings loaded successfully');
   }
 
@@ -1897,16 +1960,16 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
   }
 
   Future<void> setLanguage(String code, String name) async {
-    debugPrint('🌐 SettingsNotifier.setLanguage called: $code ($name)');
+    final resolved = resolveAppLanguage(code);
+    debugPrint('🌐 SettingsNotifier.setLanguage called: ${resolved.code} (${resolved.name})');
     debugPrint('   Previous: ${state.languageCode} (${state.languageName})');
-    
+
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('languageCode', code);
-    await prefs.setString('languageName', name);
-    
-    // Create new state to trigger rebuild
-    state = state.copyWith(languageCode: code, languageName: name);
-    
+    await prefs.setString('languageCode', resolved.code);
+    await prefs.setString('languageName', resolved.name);
+
+    state = state.copyWith(languageCode: resolved.code, languageName: resolved.name);
+
     debugPrint('✅ Language state updated: ${state.languageCode}');
   }
 

@@ -37,7 +37,7 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
   }
   void _sendOtp() async {
     if (_aadhaarController.text.length != 12) {
-      AppMessenger.showErrorBanner(context, ref.tr('valid_aadhaar_error'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('valid_aadhaar_error'));
       return;
     }
     setState(() => _isLoading = true);
@@ -49,12 +49,12 @@ class _AadhaarVerificationScreenState extends ConsumerState<AadhaarVerificationS
       _isLoading = false;
       _isOtpSent = true;
     });
-    AppMessenger.showErrorBanner(context, ref.tr('otp_sent_mobile'));
+    AppMessenger.showDriverErrorBanner(context, ref.tr('otp_sent_mobile'));
   }
   void _verifyOtp() async {
     final otp = _otpControllers.map((c) => c.text).join();
     if (otp.length != 6) {
-      AppMessenger.showErrorBanner(context, ref.tr('enter_6_digit_otp'));
+      AppMessenger.showDriverErrorBanner(context, ref.tr('enter_6_digit_otp'));
       return;
     }
     setState(() => _isLoading = true);
