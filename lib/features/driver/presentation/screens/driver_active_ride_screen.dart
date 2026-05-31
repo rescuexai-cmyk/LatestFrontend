@@ -13,6 +13,7 @@ import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/push_notification_service.dart';
+import '../../../../core/widgets/bottom_insets.dart';
 import '../../../../core/widgets/slide_to_action_button.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../chat/presentation/screens/ride_chat_screen.dart';
@@ -1790,6 +1791,7 @@ class _DriverActiveRideScreenState
     int? extraStopsCount,
     double? discountPercent,
   }) async {
+    _rideCompletionFlowActive = true;
     try {
       debugPrint('🎉 Completing ride $_rideId on backend...');
 
@@ -1813,16 +1815,12 @@ class _DriverActiveRideScreenState
     }
   }
 
-  /// Prefer popping the stacked [DriverHomeScreen] underneath so in-memory ride
-  /// state (accepted ride card) survives; fall back when there is nothing to pop.
+  /// Return driver to home (online/offline hub). Always replace the stack — never
+  /// [pop], which can land on booking/find-trip routes left under the active ride.
   void _returnToDriverHomeLeavingStackWhenPossible() {
     if (!mounted) return;
-    final router = GoRouter.of(context);
-    if (router.canPop()) {
-      context.pop();
-    } else {
-      context.go(AppRoutes.driverHome);
-    }
+    _exitingActiveRide = true;
+    context.go(AppRoutes.driverHome);
   }
 
   Future<void> _refreshDriverFinancialsAfterRide() async {
@@ -1844,13 +1842,17 @@ class _DriverActiveRideScreenState
       context: context,
       isDismissible: false,
       isScrollControlled: true,
-      useSafeArea: true,
+      useSafeArea: false,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => Container(
-        padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-        child: Column(
+      builder: (sheetContext) {
+        final bottomInset = bottomOverlayInset(sheetContext);
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+            child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Icon(
@@ -1901,7 +1903,8 @@ class _DriverActiveRideScreenState
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () {
-                  Navigator.pop(context);
+                  Navigator.pop(sheetContext);
+                  _exitingActiveRide = true;
                   context.go(AppRoutes.driverHome);
                 },
                 style: ElevatedButton.styleFrom(
@@ -1918,8 +1921,10 @@ class _DriverActiveRideScreenState
               ),
             ),
           ],
-        ),
-      ),
+            ),
+          ),
+        );
+      },
     );
   }
 

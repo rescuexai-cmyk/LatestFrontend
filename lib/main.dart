@@ -69,7 +69,7 @@ void main() async {
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
-          scaffoldBackgroundColor: const Color(0xFFF6EFE4),
+          scaffoldBackgroundColor: Colors.black,
           colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFD4956A)),
         ),
         home: const _AppInitializer(),
@@ -283,6 +283,14 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
   @override
   void initState() {
     super.initState();
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.black,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.black,
+        systemNavigationBarIconBrightness: Brightness.light,
+      ),
+    );
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
@@ -581,7 +589,7 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
         switch (rideEvent) {
           case 'NEW_RIDE_REQUEST':
             // Driver: go to driver home to see the ride request
-            router.go('/driver/home');
+            router.go(AppRoutes.driverHome);
             break;
           case 'DRIVER_ASSIGNED':
           case 'DRIVER_ARRIVING':
@@ -591,8 +599,27 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
             router.go('/booking/driver-assigned');
             break;
           case 'RIDE_COMPLETED_PASSENGER':
+            if (isDriver) {
+              router.go(AppRoutes.driverHome);
+              break;
+            }
+            // Rider: rating flow on driver-assigned, then home via screen handler.
+            if (rideId != null && rideId.isNotEmpty) {
+              ref
+                  .read(rideBookingProvider.notifier)
+                  .setRideDetails(rideId: rideId);
+              if (!isSameActiveRideScreen()) {
+                router.go('${AppRoutes.driverAssigned}?rideId=$rideId');
+              }
+            } else {
+              router.go(AppRoutes.home);
+            }
+            break;
           case 'RIDE_COMPLETED_DRIVER':
-            // Route to active ride host so completion sync can show rating flow.
+            if (isDriver) {
+              router.go(AppRoutes.driverHome);
+              break;
+            }
             if (rideId != null && rideId.isNotEmpty) {
               ref
                   .read(rideBookingProvider.notifier)

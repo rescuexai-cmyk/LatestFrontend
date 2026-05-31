@@ -1497,8 +1497,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         driverName: _driverName,
         onSubmit: (rating, feedback) async {
           Navigator.pop(ctx);
-          await _submitRating(rating, feedback);
-          _clearRideStateAndNavigate();
+          try {
+            await _submitRating(rating, feedback);
+          } finally {
+            _clearRideStateAndNavigate();
+          }
         },
         onSkip: () {
           Navigator.pop(ctx);
@@ -1510,11 +1513,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     });
   }
 
-  /// Clear all ride-related state and navigate to the services / vehicle selection screen.
+  /// Clear all ride-related state and navigate to the rider home screen.
   void _clearRideStateAndNavigate() {
     ref.read(activeRideProvider.notifier).clearActiveRide();
     ref.read(rideBookingProvider.notifier).reset();
-    if (mounted) context.go(AppRoutes.home);
+    if (!mounted) return;
+    context.go(AppRoutes.home);
   }
 
   Future<void> _submitRating(double rating, String? feedback) async {
@@ -1766,9 +1770,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) {
-          // Navigate to services screen instead of popping — keeps ride state alive
-          // so the ActiveRideBanner can show on the services screen.
-          context.go(AppRoutes.services);
+          if (_completionHandled) {
+            _clearRideStateAndNavigate();
+          } else {
+            // Mid-ride back: return to services hub (banner keeps trip visible).
+            context.go(AppRoutes.services);
+          }
         }
       },
       child: Scaffold(

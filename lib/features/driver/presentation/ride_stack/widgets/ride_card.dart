@@ -441,7 +441,7 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
           
           // Swipe hint pinned above system nav / overlay edge
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
             child: _SwipeHintBar(
               secondsLeft: _secondsLeft,
               totalSeconds: widget.timeoutSeconds,

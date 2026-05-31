@@ -1933,6 +1933,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 });
               },
               tripPickupSeed: !isStop ? _pickupController.text : '',
+              tripDestinationSeed: !isStop ? _destinationController.text : '',
               onTripAddStopTap: _stops.length < 3
                   ? () {
                       if (isStop) {
@@ -5065,6 +5066,8 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
   /// Initial pickup text copied from parent when the sheet opens. The sheet edits a **local**
   /// [TextEditingController] — never attaches to [FindTripScreen]'s disposable controllers.
   final String tripPickupSeed;
+  /// Initial drop-off text for Plan Your Ride (independent of [initialValue] when opened from pickup pill).
+  final String tripDestinationSeed;
   /// Trip overview only: primary CTA; parent should pop or show SnackBar.
   final VoidCallback? onBookNowTap;
   /// Visual emphasis when pickup + destination are ready (parent-owned state).
@@ -5097,6 +5100,7 @@ class _LocationSearchSheet extends ConsumerStatefulWidget {
     this.biasLocation,
     required this.onLocationSelected,
     this.tripPickupSeed = '',
+    this.tripDestinationSeed = '',
     this.onBookNowTap,
     this.bookNowEnabled = false,
     this.onTripDestinationClear,
@@ -5185,7 +5189,9 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
       _tripPickupField = TextEditingController(text: widget.tripPickupSeed);
     }
     _searchController = TextEditingController();
-    if (_tripOverviewMode || !widget.isPickup) {
+    if (_tripOverviewMode) {
+      _searchController.value = _destTextValue(widget.tripDestinationSeed);
+    } else if (!widget.isPickup) {
       _searchController.value = _destTextValue(widget.initialValue);
     } else {
       _searchController.text = widget.initialValue;
@@ -5200,10 +5206,13 @@ class _LocationSearchSheetState extends ConsumerState<_LocationSearchSheet> {
         widget.tripPickupSeed != oldWidget.tripPickupSeed) {
       _tripPickupField!.text = widget.tripPickupSeed;
     }
-    if (widget.initialValue != oldWidget.initialValue) {
-      if (_tripOverviewMode || !widget.isPickup) {
+    if (_tripOverviewMode &&
+        widget.tripDestinationSeed != oldWidget.tripDestinationSeed) {
+      _searchController.value = _destTextValue(widget.tripDestinationSeed);
+    } else if (widget.initialValue != oldWidget.initialValue) {
+      if (!widget.isPickup) {
         _searchController.value = _destTextValue(widget.initialValue);
-      } else {
+      } else if (!_tripOverviewMode) {
         _searchController.value = TextEditingValue(
           text: widget.initialValue,
           selection:

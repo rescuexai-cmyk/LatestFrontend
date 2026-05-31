@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../../core/widgets/bottom_insets.dart';
 import '../../providers/driver_rides_provider.dart';
 import 'widgets/ride_stack_view.dart';
 
@@ -33,6 +35,8 @@ class _RideStackSheetState extends ConsumerState<RideStackSheet> {
       return const SizedBox.shrink();
     }
 
+    final bottomInset = bottomOverlayInset(context);
+
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, result) {
@@ -40,22 +44,25 @@ class _RideStackSheetState extends ConsumerState<RideStackSheet> {
           widget.onDismiss();
         }
       },
-      child: Container(
-        height: MediaQuery.of(context).size.height * 0.5,
-        decoration: const BoxDecoration(
-          color: Color(0xFFF5F5F5),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          children: [
-            _buildHandle(),
-            Expanded(
-              child: RideStackView(
-                onAccept: widget.onAccept,
-                onDecline: widget.onDecline,
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: Container(
+          height: MediaQuery.of(context).size.height * 0.5,
+          decoration: const BoxDecoration(
+            color: Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            children: [
+              _buildHandle(),
+              Expanded(
+                child: RideStackView(
+                  onAccept: widget.onAccept,
+                  onDecline: widget.onDecline,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -87,7 +94,7 @@ Future<void> showRideStackSheet({
     isDismissible: false,
     enableDrag: false,
     isScrollControlled: true,
-    useSafeArea: true,
+    useSafeArea: false,
     backgroundColor: Colors.transparent,
     barrierColor: Colors.black54,
     builder: (sheetContext) {
@@ -168,7 +175,7 @@ class _RideStackOverlayState extends ConsumerState<RideStackOverlay>
       _updateVisibility(driverRidesState.hasActiveOffer);
     });
 
-    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final bottomInset = bottomOverlayInset(context);
 
     return SlideTransition(
       position: _slideAnimation,

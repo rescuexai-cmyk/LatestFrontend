@@ -502,7 +502,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
-              context.go(AppRoutes.findTrip);
+              context.go(AppRoutes.home);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.primary,
