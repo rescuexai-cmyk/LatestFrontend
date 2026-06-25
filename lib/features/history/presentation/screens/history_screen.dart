@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
+
 import '../../../../core/models/ride.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/theme/app_colors.dart';
@@ -11,6 +13,12 @@ import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../ride/presentation/widgets/lost_and_found_sheet.dart';
+import '../../../rescue/data/rescue_repository.dart';
+import '../../../rescue/models/rescue_models.dart';
+import '../../../rescue/presentation/widgets/rescue_history_card.dart';
+import '../../../rescue/presentation/widgets/rescue_widgets.dart';
+import '../../../rescue/providers/rescue_booking_provider.dart';
+import '../../../rescue/rescue_theme.dart';
 
 class HistoryScreen extends ConsumerStatefulWidget {
   const HistoryScreen({super.key});
@@ -19,12 +27,17 @@ class HistoryScreen extends ConsumerStatefulWidget {
   ConsumerState<HistoryScreen> createState() => _HistoryScreenState();
 }
 
-class _HistoryScreenState extends ConsumerState<HistoryScreen> {
-  List<Ride> _rides = [];
-  bool _isLoading = true;
-  String? _error;
+class _HistoryScreenState extends ConsumerState<HistoryScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
 
-  /// `go()` to this screen leaves no stack entry; pop would exit the app.
+  List<Ride> _rides = [];
+  List<RescueRequestSummary> _rescues = [];
+  bool _isLoadingRides = true;
+  bool _isLoadingRescues = true;
+  String? _ridesError;
+  String? _rescuesError;
+
   void _exitHistory(BuildContext context) {
     if (context.canPop()) {
       context.pop();
@@ -36,32 +49,36 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     _loadRides();
+    _loadRescues();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadRides() async {
     final user = ref.read(currentUserProvider);
     if (user == null) {
       setState(() {
-        _error = 'Please sign in to view ride history';
-        _isLoading = false;
+        _ridesError = 'Please sign in to view ride history';
+        _isLoadingRides = false;
       });
       return;
     }
 
     setState(() {
-      _isLoading = true;
-      _error = null;
+      _isLoadingRides = true;
+      _ridesError = null;
     });
 
     try {
-      debugPrint('📋 Loading rides for user: ${user.id}');
-
-      // Backend: GET /api/rides (authenticated, token-based)
       final response = await apiClient.getUserRides();
       final data = response['data'] as Map<String, dynamic>? ?? {};
       final ridesJson = data['rides'] as List<dynamic>? ?? [];
-      debugPrint('Received ${ridesJson.length} rides');
 
       final rides = <Ride>[];
       for (var r in ridesJson) {
@@ -72,16 +89,149 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
         }
       }
 
-      // Sort by date, newest first
       rides.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
       setState(() => _rides = rides);
     } catch (e) {
-      setState(() => _error = 'Failed to load ride history');
+      setState(() => _ridesError = 'Failed to load ride history');
       debugPrint('Error loading rides: $e');
     } finally {
-      setState(() => _isLoading = false);
+      setState(() => _isLoadingRides = false);
     }
+  }
+
+  Future<void> _loadRescues() async {
+    final user = ref.read(currentUserProvider);
+    if (user == null) {
+      setState(() {
+        _rescuesError = 'Please sign in to view rescue history';
+        _isLoadingRescues = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoadingRescues = true;
+      _rescuesError = null;
+    });
+
+    try {
+      final rescues =
+          await ref.read(rescueRepositoryProvider).getHistory(limit: 50);
+      setState(() => _rescues = rescues);
+    } catch (e) {
+      setState(() => _rescuesError = 'Failed to load rescue history');
+      debugPrint('Error loading rescues: $e');
+    } finally {
+      setState(() => _isLoadingRescues = false);
+    }
+  }
+
+  Future<void> _refreshAll() async {
+    await Future.wait([_loadRides(), _loadRescues()]);
+  }
+
+  void _openRescueItem(RescueRequestSummary rescue) {
+    final notifier = ref.read(rescueBookingProvider.notifier);
+    notifier.reset();
+    notifier.setRescueId(rescue.id);
+    notifier.setVehicleWithYou(rescue.hasVehicle);
+
+    if (rescue.isSearching) {
+      context.push(AppRoutes.rescueTracking);
+      return;
+    }
+    if (rescue.isLive) {
+      context.push(AppRoutes.rescueJourneyPath(rescue.id));
+      return;
+    }
+    _showRescueDetailSheet(rescue);
+  }
+
+  void _showRescueDetailSheet(RescueRequestSummary rescue) {
+    final dateFormat = DateFormat('dd MMM yyyy • hh:mm a');
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: RescueTheme.screenBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: RescueTheme.stroke,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Rescue details', style: RescueTheme.titleMedium),
+              const SizedBox(height: 8),
+              Text(
+                rescueStatusLabel(rescue.status),
+                style: RescueTheme.body.copyWith(color: RescueTheme.accent),
+              ),
+              if (rescue.createdAt != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  dateFormat.format(rescue.createdAt!.toLocal()),
+                  style: RescueTheme.body.copyWith(
+                    fontSize: 13,
+                    color: RescueTheme.textMuted,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Text('Pickup', style: RescueTheme.label),
+              Text(
+                rescue.pickupAddress ?? '—',
+                style: RescueTheme.body.copyWith(color: RescueTheme.textPrimary),
+              ),
+              const SizedBox(height: 12),
+              Text('Drop', style: RescueTheme.label),
+              Text(
+                rescue.dropAddress ?? '—',
+                style: RescueTheme.body.copyWith(color: RescueTheme.textPrimary),
+              ),
+              if (rescue.driver1Name?.isNotEmpty == true) ...[
+                const SizedBox(height: 12),
+                Text('Driver', style: RescueTheme.label),
+                Text(
+                  rescue.driver1Name!,
+                  style: RescueTheme.body.copyWith(color: RescueTheme.textPrimary),
+                ),
+              ],
+              if (rescue.hasVehicle && rescue.driver2Name?.isNotEmpty == true) ...[
+                const SizedBox(height: 12),
+                Text('Vehicle driver', style: RescueTheme.label),
+                Text(
+                  rescue.driver2Name!,
+                  style: RescueTheme.body.copyWith(color: RescueTheme.textPrimary),
+                ),
+              ],
+              const SizedBox(height: 20),
+              if (rescue.isCompleted)
+                FilledButton(
+                  style: RescueTheme.primaryButton,
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    context.push(AppRoutes.rescueComplete);
+                  },
+                  child: const Text('Rate this rescue'),
+                ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -91,9 +241,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) {
-          _exitHistory(context);
-        }
+        if (!didPop) _exitHistory(context);
       },
       child: Scaffold(
         backgroundColor: Colors.white,
@@ -107,120 +255,73 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
           actions: [
             IconButton(
               icon: const Icon(Icons.refresh),
-              onPressed: _loadRides,
+              onPressed: _refreshAll,
+            ),
+          ],
+          bottom: TabBar(
+            controller: _tabController,
+            labelColor: RescueTheme.accent,
+            unselectedLabelColor: AppColors.textSecondary,
+            indicatorColor: RescueTheme.accent,
+            labelStyle: GoogleFonts.poppins(
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+            unselectedLabelStyle: GoogleFonts.poppins(
+              fontWeight: FontWeight.w500,
+              fontSize: 14,
+            ),
+            tabs: const [
+              Tab(text: 'Rides'),
+              Tab(text: 'Rescue'),
+            ],
+          ),
+        ),
+        body: Stack(
+          children: [
+            TabBarView(
+              controller: _tabController,
+              children: [
+                _buildRidesTab(tr),
+                _buildRescueTab(),
+              ],
+            ),
+            const Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: ActiveRideBanner(),
             ),
           ],
         ),
-        body: Stack(
-        children: [
-          _buildBody(),
-          // Active ride banner at bottom
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: ActiveRideBanner(),
-          ),
-        ],
-      ),
       ),
     );
   }
 
-  Widget _buildBody() {
-    final tr = ref.read(settingsProvider.notifier).tr;
+  Widget _buildRidesTab(String Function(String) tr) {
+    if (_isLoadingRides) return _buildShimmerList();
 
-    if (_isLoading) {
-      return UberShimmer(
-        child: ListView.separated(
-          padding: EdgeInsets.fromLTRB(
-            16,
-            16,
-            16,
-            16 + MediaQuery.of(context).viewPadding.bottom,
-          ),
-          itemCount: 6,
-          separatorBuilder: (_, __) => const SizedBox(height: 12),
-          itemBuilder: (_, __) => Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    UberShimmerBox(width: 120, height: 10),
-                    UberShimmerBox(
-                        width: 64,
-                        height: 18,
-                        borderRadius: BorderRadius.all(Radius.circular(4))),
-                  ],
-                ),
-                SizedBox(height: 14),
-                UberShimmerBox(width: double.infinity, height: 10),
-                SizedBox(height: 10),
-                UberShimmerBox(width: double.infinity, height: 10),
-                SizedBox(height: 16),
-                UberShimmerBox(width: 140, height: 10),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
-    if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.error_outline, size: 48, color: AppColors.error),
-            const SizedBox(height: 16),
-            Text(_error!, style: const TextStyle(color: AppColors.error)),
-            const SizedBox(height: 16),
-            ElevatedButton(onPressed: _loadRides, child: const Text('Retry')),
-          ],
-        ),
-      );
+    if (_ridesError != null) {
+      return _buildError(_ridesError!, _loadRides);
     }
 
     if (_rides.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.history, size: 64, color: AppColors.textHint),
-            const SizedBox(height: 16),
-            Text(
-              tr('no_rides_yet'),
-              style: Theme.of(context)
-                  .textTheme
-                  .titleLarge
-                  ?.copyWith(color: AppColors.textSecondary),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Your ride history will appear here',
-              style: Theme.of(context)
-                  .textTheme
-                  .bodyMedium
-                  ?.copyWith(color: AppColors.textHint),
-            ),
-          ],
-        ),
+      return _buildEmpty(
+        icon: Icons.history,
+        title: tr('no_rides_yet'),
+        subtitle: 'Your ride history will appear here',
       );
     }
 
     return RefreshIndicator(
       onRefresh: _loadRides,
       child: ListView.separated(
-        padding: EdgeInsets.fromLTRB(16, 16, 16,
-            16 + MediaQuery.of(context).viewPadding.bottom),
+        padding: EdgeInsets.fromLTRB(
+          16,
+          16,
+          16,
+          16 + MediaQuery.of(context).viewPadding.bottom,
+        ),
         itemCount: _rides.length,
         separatorBuilder: (_, __) => const SizedBox(height: 12),
         itemBuilder: (context, index) => _RideCard(
@@ -229,6 +330,132 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
               context.push(AppRoutes.rideDetailsPath(_rides[index].id)),
           onLostItem: (ride) => LostAndFoundSheet.show(context, ride),
         ),
+      ),
+    );
+  }
+
+  Widget _buildRescueTab() {
+    if (_isLoadingRescues) return _buildShimmerList();
+
+    if (_rescuesError != null) {
+      return _buildError(_rescuesError!, _loadRescues);
+    }
+
+    if (_rescues.isEmpty) {
+      return _buildEmpty(
+        icon: Icons.emergency_share_outlined,
+        title: 'No rescue history yet',
+        subtitle: 'Your rescue requests will appear here',
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadRescues,
+      color: RescueTheme.accent,
+      child: ListView.separated(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          16,
+          16,
+          16 + MediaQuery.of(context).viewPadding.bottom,
+        ),
+        itemCount: _rescues.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemBuilder: (context, index) => RescueHistoryCard(
+          rescue: _rescues[index],
+          onTap: () => _openRescueItem(_rescues[index]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShimmerList() {
+    return UberShimmer(
+      child: ListView.separated(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          16,
+          16,
+          16 + MediaQuery.of(context).viewPadding.bottom,
+        ),
+        itemCount: 6,
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        itemBuilder: (_, __) => Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.border),
+          ),
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  UberShimmerBox(width: 120, height: 10),
+                  UberShimmerBox(
+                    width: 64,
+                    height: 18,
+                    borderRadius: BorderRadius.all(Radius.circular(4)),
+                  ),
+                ],
+              ),
+              SizedBox(height: 14),
+              UberShimmerBox(width: double.infinity, height: 10),
+              SizedBox(height: 10),
+              UberShimmerBox(width: double.infinity, height: 10),
+              SizedBox(height: 16),
+              UberShimmerBox(width: 140, height: 10),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildError(String message, Future<void> Function() onRetry) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.error_outline, size: 48, color: AppColors.error),
+          const SizedBox(height: 16),
+          Text(message, style: const TextStyle(color: AppColors.error)),
+          const SizedBox(height: 16),
+          ElevatedButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmpty({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 64, color: AppColors.textHint),
+          const SizedBox(height: 16),
+          Text(
+            title,
+            style: Theme.of(context)
+                .textTheme
+                .titleLarge
+                ?.copyWith(color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            subtitle,
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(color: AppColors.textHint),
+          ),
+        ],
       ),
     );
   }
@@ -298,7 +525,6 @@ class _RideCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -327,8 +553,6 @@ class _RideCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-
-            // Locations
             Row(
               children: [
                 Column(
@@ -372,8 +596,6 @@ class _RideCard extends StatelessWidget {
               ],
             ),
             const Divider(height: 24),
-
-            // Footer
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -411,8 +633,6 @@ class _RideCard extends StatelessWidget {
                 ),
               ],
             ),
-
-            // Rating (if completed)
             if (ride.status == RideStatus.completed && ride.rating != null) ...[
               const SizedBox(height: 8),
               Row(
@@ -429,8 +649,6 @@ class _RideCard extends StatelessWidget {
                 ],
               ),
             ],
-
-            // Lost & Found quick link (within 48h of completion)
             if (LostAndFoundSheet.isEligible(ride)) ...[
               const SizedBox(height: 10),
               GestureDetector(

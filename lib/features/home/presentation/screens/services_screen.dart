@@ -16,6 +16,7 @@ import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/nearby_places_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import '../../../rescue/providers/rescue_booking_provider.dart';
 import '../../../ride/providers/ride_booking_provider.dart';
 import '../../../ride/providers/ride_provider.dart';
 
@@ -231,8 +232,14 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     'personal_driver', // Driver Rental — not yet launched
   };
 
-  void _navigateToFindTrip({String serviceType = 'bike_rescue'}) {
-    // Show "Coming Soon" for services not yet launched
+  void _navigateToRescueFlow() {
+    ref.read(rescueBookingProvider.notifier).reset();
+    ref.read(rescueBookingProvider.notifier).prefillFromRideBooking();
+    ref.read(rescueBookingProvider.notifier).setVehicleWithYou(true);
+    context.push(AppRoutes.rescueLanding);
+  }
+
+  void _navigateToFindTrip({String serviceType = 'cab_mini'}) {
     if (_comingSoonServices.contains(serviceType)) {
       _showComingSoonDialog(serviceType);
       return;
@@ -1000,8 +1007,13 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                           return Padding(
                             padding: const EdgeInsets.only(right: 15),
                             child: GestureDetector(
-                              onTap: () => _navigateToFindTrip(
-                                  serviceType: a.serviceType),
+                              onTap: () {
+                                if (a.serviceType == 'bike_rescue') {
+                                  _navigateToRescueFlow();
+                                } else {
+                                  _navigateToFindTrip(serviceType: a.serviceType);
+                                }
+                              },
                               child: Container(
                                 width: 140,
                                 decoration: BoxDecoration(

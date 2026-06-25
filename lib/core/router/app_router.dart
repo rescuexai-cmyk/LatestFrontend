@@ -22,11 +22,25 @@ import '../../features/ride/presentation/screens/searching_drivers_screen.dart';
 import '../../features/ride/presentation/screens/driver_assigned_screen.dart';
 import '../../features/driver/presentation/screens/driver_home_screen.dart';
 import '../../features/driver/presentation/screens/driver_active_ride_screen.dart';
+import '../../features/driver/presentation/screens/driver_rescue_job_screen.dart';
 import '../../features/driver/presentation/screens/driver_onboarding_screen.dart';
 import '../../features/driver/presentation/screens/driver_welcome_screen.dart';
 import '../../features/driver/presentation/screens/driver_document_management_screen.dart';
 import '../../features/driver/presentation/screens/driver_subscription_payment_screen.dart';
 import '../../features/driver/presentation/screens/driver_penalty_payment_screen.dart';
+import '../../features/driver/presentation/screens/personal_driver_onboarding_screen.dart';
+import '../../features/driver/presentation/screens/personal_driver_welcome_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_landing_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_reason_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_location_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_vehicle_details_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_destination_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_review_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_tracking_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_handover_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_journey_hub_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_delivery_screen.dart';
+import '../../features/rescue/presentation/screens/rescue_complete_screen.dart';
 import '../../features/settings/presentation/screens/server_config_screen.dart';
 import '../services/server_config_service.dart';
 import 'app_routes.dart';
@@ -286,6 +300,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const DriverWelcomeScreen(),
       ),
       GoRoute(
+        path: AppRoutes.personalDriverOnboarding,
+        name: 'personalDriverOnboarding',
+        builder: (context, state) => const PersonalDriverOnboardingScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.personalDriverWelcome,
+        name: 'personalDriverWelcome',
+        builder: (context, state) => const PersonalDriverWelcomeScreen(),
+      ),
+      GoRoute(
         path: AppRoutes.driverDocuments,
         name: 'driverDocuments',
         builder: (context, state) {
@@ -312,6 +336,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             autoOpenChat: autoOpenChat,
           );
         },
+      ),
+      GoRoute(
+        path: AppRoutes.driverRescueJob,
+        name: 'driverRescueJob',
+        builder: (context, state) => const DriverRescueJobScreen(),
       ),
       GoRoute(
         path: AppRoutes.driverSubscriptionPayment,
@@ -368,6 +397,81 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             initialRideId: rideId,
             autoOpenChat: autoOpenChat,
           );
+        },
+      ),
+
+      // Rescue — full Figma 11-screen flow
+      GoRoute(
+        path: AppRoutes.rescueLanding,
+        name: 'rescueLanding',
+        builder: (context, state) => const RescueLandingScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueReason,
+        name: 'rescueReason',
+        builder: (context, state) => const RescueReasonScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueLocation,
+        name: 'rescueLocation',
+        builder: (context, state) => const RescueLocationScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueVehicleDetails,
+        name: 'rescueVehicleDetails',
+        builder: (context, state) => const RescueVehicleDetailsScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueDestination,
+        name: 'rescueDestination',
+        builder: (context, state) => const RescueDestinationScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueReview,
+        name: 'rescueReview',
+        builder: (context, state) => const RescueReviewScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueTracking,
+        name: 'rescueTracking',
+        builder: (context, state) => const RescueTrackingScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueHandover,
+        name: 'rescueHandover',
+        builder: (context, state) => const RescueHandoverScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueJourneyHub,
+        name: 'rescueJourneyHub',
+        builder: (context, state) {
+          final rescueId = state.uri.queryParameters['rescueId'];
+          return RescueJourneyHubScreen(rescueId: rescueId);
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.rescueDelivery,
+        name: 'rescueDelivery',
+        builder: (context, state) => const RescueDeliveryScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.rescueComplete,
+        name: 'rescueComplete',
+        builder: (context, state) => const RescueCompleteScreen(),
+      ),
+      // Legacy aliases
+      GoRoute(
+        path: AppRoutes.rescueSearching,
+        redirect: (_, __) => AppRoutes.rescueTracking,
+      ),
+      GoRoute(
+        path: AppRoutes.rescueJourney,
+        redirect: (context, state) {
+          final id = state.uri.queryParameters['rescueId'];
+          if (id != null && id.isNotEmpty) {
+            return AppRoutes.rescueJourneyPath(id);
+          }
+          return AppRoutes.rescueJourneyHub;
         },
       ),
       

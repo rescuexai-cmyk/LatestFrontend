@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raahi App — Complete Navigation Map</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    @page { size: A4; margin: 18mm 16mm; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #1a1a1a;
+      line-height: 1.55;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 24px 32px 48px;
+      font-size: 11pt;
+    }
+    h1 {
+      font-size: 22pt;
+      color: #CF923D;
+      border-bottom: 3px solid #CF923D;
+      padding-bottom: 10px;
+      margin-top: 0;
+    }
+    h2 {
+      font-size: 14pt;
+      color: #2E2C2A;
+      margin-top: 28px;
+      page-break-after: avoid;
+      border-left: 4px solid #CF923D;
+      padding-left: 10px;
+    }
+    h3 { font-size: 11pt; margin-top: 18px; page-break-after: avoid; }
+    p, li { margin: 6px 0; }
+    .meta {
+      background: #FFF9F5;
+      border: 1px solid #E8E0D4;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 16px 0 24px;
+      font-size: 10pt;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 20px;
+      font-size: 9.5pt;
+      page-break-inside: avoid;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 7px 9px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #2E2C2A; color: #fff; }
+    tr:nth-child(even) { background: #fafafa; }
+    code, .route {
+      font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+      background: #f4f0eb;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 9pt;
+    }
+    .diagram {
+      background: #fafafa;
+      border: 1px solid #e8e8e8;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 14px 0 20px;
+      overflow-x: auto;
+      page-break-inside: avoid;
+    }
+    .note {
+      background: #fff8e6;
+      border-left: 4px solid #CF923D;
+      padding: 10px 14px;
+      margin: 14px 0;
+      font-size: 10pt;
+    }
+    .flow-line {
+      font-family: monospace;
+      background: #f4f0eb;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 9pt;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+    }
+    ul { padding-left: 20px; }
+    .page-break { page-break-before: always; }
+    footer {
+      margin-top: 40px;
+      padding-top: 12px;
+      border-top: 1px solid #ddd;
+      font-size: 9pt;
+      color: #666;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Raahi App — Complete Navigation Map</h1>
+
+<div class="meta">
+  <strong>Package:</strong> <code>com.rhi.raahi</code><br>
+  <strong>Project:</strong> LatestFrontend (Flutter + GoRouter)<br>
+  <strong>Generated:</strong> June 2026<br>
+  <strong>Purpose:</strong> Full tree of screens, routes, and tap/click actions from app start.
+</div>
+
+<h2>1. App Launch (Start → First Screen)</h2>
+<div class="diagram mermaid">
+flowchart TD
+    A[App Launch] --> B[Splash Screen]
+    B --> C{Backend OK?}
+    C -->|No| D[Connection Error Screen]
+    C -->|Yes| E{Server configured?}
+    E -->|No| F["/settings/server"]
+    E -->|Yes| G{Seen welcome?}
+    G -->|No| H["/welcome-onboarding"]
+    G -->|Yes| I["/login"]
+    H -->|Skip or Start| I
+    F -->|Save| I
+</div>
+
+<h2>2. Master Mindmap</h2>
+<div class="diagram mermaid">
+mindmap
+  root((Raahi App))
+    Entry
+      Splash
+      Server Config
+      Welcome Onboarding
+      Login
+    Auth
+      Inline OTP on Login
+      Google Sign-In
+      Truecaller Android
+      SignUp Screen
+      OTP Verification
+      Name Entry
+    Rider Hub
+      Home role gateway
+      Services main hub
+      Find Trip map booking
+      Payment
+      Searching Drivers
+      Driver Assigned live ride
+    Driver Hub
+      Onboarding 5 steps
+      Welcome verification
+      Documents
+      Driver Home
+      Active Ride
+      Subscription Payment
+    Secondary
+      History
+      Profile
+      Ride Details
+      Server Config
+    Overlays
+      Bottom Sheets
+      Dialogs
+      Side Drawers
+      Active Ride Banner
+    Deep Links
+      Push Notifications
+</div>
+
+<h2 class="page-break">3. Auth Flow</h2>
+<div class="diagram mermaid">
+flowchart TD
+    subgraph LOGIN["/login — Login Screen"]
+        L1[Get OTP] --> L2[Inline OTP same screen]
+        L2 -->|New user| NE
+        L2 -->|Returning| HOME
+        L3[Continue with Google] --> G1{Needs phone?}
+        L4[Truecaller Android] --> G1
+    end
+    G1 -->|Yes| PL["/phone-number?mode=linkPhone"]
+    G1 -->|New user| NE
+    G1 -->|Existing| HOME
+    PL --> OTP
+    SIGNUP["/signup or /phone-number"] --> OTP
+    subgraph OTP["/otp-verification"]
+        O1[Verify OTP] --> O2{Result}
+        O2 -->|New user| NE
+        O2 -->|Existing| HOME
+    end
+    subgraph NE["/otp-verification/name"]
+        N1[Save name] --> HOME
+    end
+    HOME["/ — Home Screen"]
+</div>
+
+<h3>Auth modals (no route change)</h3>
+<ul>
+  <li>Resend OTP → bottom sheet</li>
+  <li>Switch account → bottom sheet → logout → <span class="route">/login</span></li>
+  <li>Truecaller OTP → dialog</li>
+  <li>Terms / Privacy → external browser</li>
+</ul>
+
+<h2>4. Rider Flow (Passenger — Complete Path)</h2>
+<div class="diagram mermaid">
+flowchart TD
+    HOME["/ — Home"] -->|Find a Ride Now| SVC
+    HOME -->|Active Ride Banner| AR
+    HOME -->|Open Drivers App| DRV
+
+    SVC["/services — Services Hub"] -->|Profile avatar| PROF
+    SVC -->|Service tile / search| FT
+    SVC -->|Later / Schedule| FT
+    SVC -->|Active Ride Banner| AR
+
+    FT["/booking/find-trip"] -->|Book Now| PAY
+    FT -->|Drawer: Home| HOME
+    FT -->|Drawer: My Rides| HIST
+    FT -->|Drawer: Settings| PROF
+    FT -->|Back| SVC
+
+    PAY["/booking/payment"] -->|Slide to confirm| SRCH
+    PAY -->|Back| FT
+
+    SRCH["/booking/searching"] -->|Driver found| AR
+    SRCH -->|Cancel| FT
+    SRCH -->|Minimize| SVC
+
+    AR["/booking/driver-assigned"] -->|Chat| CHAT[Bottom Sheet]
+    AR -->|Ride complete| RATE[Rating Sheet]
+    RATE --> HOME
+    AR -->|Cancel| HOME
+
+    PROF["/profile"] --> HIST
+    PROF -->|Logout| LOGIN["/login"]
+    HIST["/history"] --> RD["/ride/:rideId"]
+</div>
+
+<h3>End-to-end rider booking</h3>
+<div class="flow-line">/ → /services → /booking/find-trip → /booking/payment
+  → /booking/searching → /booking/driver-assigned → [rating sheet] → /</div>
+
+<h2 class="page-break">5. Driver Flow (Complete Path)</h2>
+<div class="diagram mermaid">
+flowchart TD
+    HOME["/ — Home"] -->|Open Drivers App| GATE{Onboarding status?}
+    GATE -->|Not started| ONB
+    GATE -->|Docs pending| WEL
+    GATE -->|Verified| DH
+
+    ONB["/driver/onboarding — 5 steps"] -->|Complete| WEL
+    WEL["/driver/welcome"] -->|Verified| DH
+    DOC["/driver/documents"] -->|Re-upload| ONB
+
+    DH["/driver — Driver Home"] -->|Accept ride| AR
+    DH -->|Subscription| SUB["/driver/subscription-payment"]
+    DH -->|Drawer: Switch to Rider| SVC["/services"]
+    DH -->|Logout| LOGIN["/login"]
+
+    AR["/driver/active-ride"] -->|Complete / Cancel| DH
+    SUB -->|Paid| DH
+</div>
+
+<h3>Driver onboarding steps</h3>
+<ol>
+  <li>Language</li>
+  <li>Vehicle</li>
+  <li>Personal info</li>
+  <li>Documents</li>
+  <li>Verification status</li>
+</ol>
+
+<h2>6. All Registered Routes</h2>
+<table>
+  <thead>
+    <tr><th>Route</th><th>Screen</th><th>Opens From</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>/settings/server</code></td><td>Server Config</td><td>First launch; Profile settings</td></tr>
+    <tr><td><code>/welcome-onboarding</code></td><td>Welcome carousel</td><td>First launch</td></tr>
+    <tr><td><code>/login</code></td><td>Login</td><td>After welcome; logout</td></tr>
+    <tr><td><code>/signup</code></td><td>Sign Up</td><td>OTP back-nav</td></tr>
+    <tr><td><code>/phone-number</code></td><td>Phone link</td><td>Google/Truecaller needs phone</td></tr>
+    <tr><td><code>/otp-verification</code></td><td>OTP verify</td><td>SignUp flow</td></tr>
+    <tr><td><code>/otp-verification/name</code></td><td>Name entry</td><td>New user after OTP</td></tr>
+    <tr><td><code>/</code></td><td>Home (role gateway)</td><td>Post-auth; post-rating</td></tr>
+    <tr><td><code>/services</code></td><td>Services hub</td><td>Home “Find a Ride”</td></tr>
+    <tr><td><code>/history</code></td><td>Ride history</td><td>Profile; Find Trip drawer</td></tr>
+    <tr><td><code>/profile</code></td><td>Profile</td><td>Services avatar; drawer</td></tr>
+    <tr><td><code>/ride/:rideId</code></td><td>Ride details</td><td>History row tap</td></tr>
+    <tr><td><code>/booking/find-trip</code></td><td>Find Trip map</td><td>Services tiles / schedule</td></tr>
+    <tr><td><code>/booking/payment</code></td><td>Payment</td><td>Find Trip “Book Now”</td></tr>
+    <tr><td><code>/booking/searching</code></td><td>Searching drivers</td><td>Payment confirm</td></tr>
+    <tr><td><code>/booking/driver-assigned</code></td><td>Rider live ride</td><td>Driver matched; banner</td></tr>
+    <tr><td><code>/driver/onboarding</code></td><td>Driver onboarding</td><td>Home “Drivers App”</td></tr>
+    <tr><td><code>/driver/welcome</code></td><td>Driver welcome</td><td>Onboarding done</td></tr>
+    <tr><td><code>/driver/documents</code></td><td>Document mgmt</td><td>Update mode redirect</td></tr>
+    <tr><td><code>/driver</code></td><td>Driver home</td><td>Verified driver</td></tr>
+    <tr><td><code>/driver/active-ride</code></td><td>Driver live ride</td><td>Accept ride</td></tr>
+    <tr><td><code>/driver/subscription-payment</code></td><td>Subscription pay</td><td>Driver home gate</td></tr>
+  </tbody>
+</table>
+
+<h2>7. Overlays vs Full Screens</h2>
+<div class="diagram mermaid">
+flowchart LR
+    subgraph FULL["Full-screen routes GoRouter"]
+        R1[Login / Services / Find Trip / Payment / Searching / Driver screens]
+    end
+    subgraph SHEET["Bottom sheets"]
+        S1[Switch Account]
+        S2[Schedule picker]
+        S3[Ride Chat]
+        S4[Rating]
+        S5[Payment methods]
+        S6[Driver drawer items]
+        S7[Profile settings]
+    end
+    subgraph DIALOG["Dialogs"]
+        D1[Cancel ride]
+        D2[Logout confirm]
+        D3[Coming soon]
+    end
+    subgraph DRAWER["Side drawers"]
+        DR1[Find Trip end drawer]
+        DR2[Driver home drawer]
+    end
+    subgraph BANNER["Persistent banner"]
+        B1[Active Ride Banner]
+    end
+</div>
+
+<h2 class="page-break">8. Push Notifications → Screen</h2>
+<div class="diagram mermaid">
+flowchart TD
+    PUSH[Push Notification Tap] --> TYPE{Type}
+    TYPE -->|NEW_RIDE_REQUEST| DH["/driver"]
+    TYPE -->|DRIVER_ASSIGNED / ARRIVING / STARTED| RA["/booking/driver-assigned"]
+    TYPE -->|RIDE_COMPLETED rider| RA
+    TYPE -->|RIDE_COMPLETED driver| DH
+    TYPE -->|RIDE_CANCELLED| SVC["/services"]
+    TYPE -->|CHAT rider| RA2["/booking/driver-assigned?openChat=true"]
+    TYPE -->|CHAT driver| DA["/driver/active-ride?openChat=true"]
+    TYPE -->|PAYMENT| HIST["/history"]
+    TYPE -->|DRIVER_ONBOARDING| WEL["/driver/welcome or /driver"]
+    TYPE -->|default| SVC
+</div>
+
+<h2>9. Screen-by-Screen Click Actions</h2>
+
+<h3>Home (<code>/</code>)</h3>
+<ul>
+  <li><strong>Find a Ride Now!</strong> → <code>/services</code></li>
+  <li><strong>Open Drivers' App</strong> → onboarding / welcome / <code>/driver</code> (by status)</li>
+  <li><strong>Active Ride Banner</strong> → <code>/booking/searching</code> or <code>/booking/driver-assigned</code></li>
+  <li><strong>Switch account</strong> → bottom sheet</li>
+</ul>
+
+<h3>Services (<code>/services</code>)</h3>
+<ul>
+  <li><strong>Profile avatar</strong> → <code>/profile</code></li>
+  <li><strong>Later / Schedule</strong> → schedule sheet or <code>/booking/find-trip</code></li>
+  <li><strong>Service tiles / search / places</strong> → <code>/booking/find-trip?autoSearch=true</code></li>
+  <li><strong>Active ride exists</strong> → <code>/booking/driver-assigned</code> or <code>/booking/searching</code></li>
+</ul>
+
+<h3>Find Trip (<code>/booking/find-trip</code>)</h3>
+<ul>
+  <li><strong>Book Now</strong> → <code>/booking/payment</code></li>
+  <li><strong>End drawer</strong> → Home, History, Payment methods sheet, Help sheet, Profile</li>
+</ul>
+
+<h3>Payment (<code>/booking/payment</code>)</h3>
+<ul>
+  <li><strong>Slide to confirm</strong> → <code>/booking/searching</code></li>
+</ul>
+
+<h3>Searching (<code>/booking/searching</code>)</h3>
+<ul>
+  <li><strong>Driver matched</strong> → <code>/booking/driver-assigned</code></li>
+  <li><strong>Cancel</strong> → <code>/booking/find-trip</code></li>
+  <li><strong>Minimize</strong> → <code>/services</code></li>
+</ul>
+
+<h3>Driver Assigned (<code>/booking/driver-assigned</code>)</h3>
+<ul>
+  <li><strong>Chat</strong> → bottom sheet (not a route)</li>
+  <li><strong>Ride complete</strong> → rating sheet → <code>/</code></li>
+  <li><strong>Cancel</strong> → <code>/</code></li>
+</ul>
+
+<h3>Profile (<code>/profile</code>)</h3>
+<ul>
+  <li><strong>Total Rides</strong> → <code>/history</code></li>
+  <li><strong>Switch to driver</strong> → <code>/</code> (driver gateway)</li>
+  <li><strong>Notifications / Help / Saved places</strong> → bottom sheets</li>
+  <li><strong>Server config</strong> → <code>/settings/server</code></li>
+  <li><strong>Logout / Delete account</strong> → <code>/login</code></li>
+</ul>
+
+<h3>Driver Home (<code>/driver</code>)</h3>
+<ul>
+  <li><strong>Accept ride</strong> → <code>/driver/active-ride</code></li>
+  <li><strong>Drawer: Switch to Rider</strong> → <code>/services</code></li>
+  <li><strong>Drawer: History / Earnings / Settings / Help</strong> → bottom sheets</li>
+  <li><strong>Drawer: Update Documents</strong> → <code>/driver/onboarding?isUpdateMode=true</code></li>
+</ul>
+
+<h2>10. Architecture Notes</h2>
+<div class="note">
+  <ol>
+    <li><strong><code>/</code> is not the booking home</strong> — it is the role gateway. Rider booking hub is <code>/services</code>.</li>
+    <li><strong>Live rider ride</strong> = <code>/booking/driver-assigned</code> (not <code>/ride/:id/tracking</code>, which is legacy).</li>
+    <li><strong>Login OTP is inline</strong> on <code>/login</code> — no route change until verify succeeds.</li>
+    <li><strong>Chat</strong> opens as a bottom sheet on active-ride screens, not <code>/ride/:id/chat</code>.</li>
+    <li><strong>Active Ride Banner</strong> appears on Home, Services, Profile, History.</li>
+    <li><strong>Driver vs Rider split:</strong> Rider hub = <code>/services</code>; Driver hub = <code>/driver</code>.</li>
+  </ol>
+</div>
+
+<footer>
+  Raahi App Navigation Map — LatestFrontend — Generated for internal reference
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'default',
+    flowchart: { useMaxWidth: true, htmlLabels: true },
+    mindmap: { useMaxWidth: true }
+  });
+  // Signal for headless PDF: wait for diagrams
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      document.body.setAttribute('data-ready', 'true');
+    }, 5000);
+  });
+</script>
+</body>
+</html>

@@ -11,6 +11,7 @@ import '../../../../core/widgets/active_ride_banner.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../auth/presentation/widgets/switch_account_sheet.dart';
 import '../../../driver/providers/driver_onboarding_provider.dart';
+import '../../../driver/providers/personal_driver_onboarding_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Figma: Select frame 390×848, background #F6EFD8
@@ -48,6 +49,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     setState(() => _isCheckingDriver = true);
 
     try {
+      await ref.read(personalDriverOnboardingProvider.notifier).ensureLoaded();
+      final pd = ref.read(personalDriverOnboardingProvider);
+
+      if (!mounted) return;
+
+      // Rescue driver path — chosen on driver onboarding step 2 (vehicle type).
+      if (pd.driverAppMode == PersonalDriverOnboardingNotifier.modePersonalRescue) {
+        if (pd.canStartRescueJobs) {
+          context.push(AppRoutes.driverHome);
+          return;
+        }
+        if (pd.shouldShowWelcome && !pd.canStartRescueJobs) {
+          context.push(AppRoutes.personalDriverWelcome);
+          return;
+        }
+        if (pd.shouldShowOnboarding || pd.isPersonalDriverActive) {
+          context.push(AppRoutes.personalDriverOnboarding);
+          return;
+        }
+      }
+
       final notifier = ref.read(driverOnboardingProvider.notifier);
       final status = await notifier.fetchOnboardingStatus();
 
@@ -63,6 +85,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       switch (status.onboardingStatus) {
         case OnboardingStatus.completed:
           if (status.canStartRides) {
+            await ref
+                .read(personalDriverOnboardingProvider.notifier)
+                .setDriverAppMode(PersonalDriverOnboardingNotifier.modeRideShare);
             context.push(AppRoutes.driverHome);
           } else {
             _showVerificationBanner(

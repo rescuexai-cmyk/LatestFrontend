@@ -696,266 +696,245 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
     final keyboardInset = mq.viewInsets.bottom;
+    final bottomSafe = mq.viewPadding.bottom;
+    final keyboardOpen = keyboardInset > 0;
     final showApple = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
     final blocked = _isSocialLoading || _isOtpLoading || _isVerifyLoading;
+    final sheetMaxHeight = mq.size.height *
+        (keyboardOpen ? 0.92 : (_otpStepVisible ? 0.72 : 0.68));
 
     return Scaffold(
-      resizeToAvoidBottomInset: true,
+      resizeToAvoidBottomInset: false,
       backgroundColor: Colors.white,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          Positioned.fill(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.asset(
-                  'assets/images/home_traffic_hero.png',
-                  fit: BoxFit.cover,
-                  alignment: Alignment.topCenter,
-                ),
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.black.withValues(alpha: 0.12),
-                        Colors.transparent,
-                        Colors.black.withValues(alpha: 0.35),
-                      ],
+      body: AnimatedPadding(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        padding: EdgeInsets.only(bottom: keyboardInset),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Positioned.fill(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.asset(
+                    'assets/images/home_traffic_hero.png',
+                    fit: BoxFit.cover,
+                    alignment: Alignment.topCenter,
+                  ),
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black.withValues(alpha: 0.12),
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: 0.35),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                SafeArea(
-                  bottom: false,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 24, right: 24, top: 8),
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
-                      child: Padding(
-                        padding: EdgeInsets.only(
-                          bottom: math.max(28, mq.size.height * 0.085),
-                        ),
-                        child: Image.asset(
-                          'assets/images/raahi_logo_tagline.png',
-                          width: 200,
-                          fit: BoxFit.contain,
+                  SafeArea(
+                    bottom: false,
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.only(left: 24, right: 24, top: 8),
+                      child: Align(
+                        alignment: Alignment.bottomCenter,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            bottom: math.max(28, mq.size.height * 0.085),
+                          ),
+                          child: Image.asset(
+                            'assets/images/raahi_logo_tagline.png',
+                            width: 200,
+                            fit: BoxFit.contain,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          DraggableScrollableSheet(
-            initialChildSize: 0.56,
-            minChildSize: 0.38,
-            maxChildSize: 0.80,
-            snap: true,
-            snapSizes: const [0.38, 0.56, 0.80],
-            builder: (context, scrollController) {
-              return Transform.translate(
-                offset: const Offset(0, -24),
-                child: ClipRRect(
-                  borderRadius:
-                      const BorderRadius.vertical(top: Radius.circular(28)),
-                  child: Material(
-                    color: _cardCreamBg,
-                    elevation: 12,
-                    shadowColor: Colors.black26,
-                    child: CustomScrollView(
-                      controller: scrollController,
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: ClipRRect(
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(28)),
+                child: Material(
+                  color: _cardCreamBg,
+                  elevation: 12,
+                  shadowColor: Colors.black26,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxHeight: sheetMaxHeight),
+                    child: SingleChildScrollView(
                       keyboardDismissBehavior:
                           ScrollViewKeyboardDismissBehavior.onDrag,
-                      physics: const ClampingScrollPhysics(),
-                      slivers: [
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.only(top: 6, bottom: 8),
-                            child: Center(
-                              child: Container(
-                                width: 49,
-                                height: 3,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF424242),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
+                      padding: EdgeInsets.fromLTRB(
+                        24,
+                        14,
+                        24,
+                        math.max(bottomSafe, 16),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Center(
+                            child: Container(
+                              width: 49,
+                              height: 3,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF424242),
+                                borderRadius: BorderRadius.circular(4),
                               ),
                             ),
                           ),
-                        ),
-                        SliverSafeArea(
-                          top: false,
-                          bottom: true,
-                          sliver: SliverPadding(
-                            padding: EdgeInsets.fromLTRB(
-                                24, 8, 24, keyboardInset + 16),
-                            sliver: SliverToBoxAdapter(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                      const Text(
-                                        'Welcome to Raahi 👋',
-                                        style: TextStyle(
-                                          fontSize: 24,
-                                          fontWeight: FontWeight.w700,
-                                          color: Color(0xFF1A1A1A),
-                                          height: 1.2,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        'Get started in seconds',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w400,
-                                          color: Colors.grey.shade600,
-                                          height: 1.35,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 24),
-                                      _buildPhoneField(enabled: !blocked),
-                                      if (_otpStepVisible)
-                                        Align(
-                                          alignment: Alignment.centerRight,
-                                          child: TextButton(
-                                            onPressed: blocked
-                                                ? null
-                                                : () => _collapseOtpStep(),
-                                            child: Text(
-                                              'Change number',
-                                              style: TextStyle(
-                                                color: _brandGold,
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      AnimatedSize(
-                                        duration: const Duration(
-                                            milliseconds: 280),
-                                        curve: Curves.easeOutCubic,
-                                        alignment: Alignment.topCenter,
-                                        child: _otpStepVisible
-                                            ? Padding(
-                                                padding: const EdgeInsets.only(
-                                                    top: 16),
-                                                child:
-                                                    _buildInlineOtpSection(
-                                                        interactionBlocked:
-                                                            blocked),
-                                              )
-                                            : const SizedBox.shrink(),
-                                      ),
-                                      if (!_otpStepVisible) ...[
-                                        const SizedBox(height: 12),
-                                        Row(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Icon(Icons.shield_outlined,
-                                                size: 18,
-                                                color: _brandGold),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: Text(
-                                                "We'll send you a 6-digit OTP",
-                                                style: TextStyle(
-                                                  fontSize: 13,
-                                                  color: Colors.grey.shade700,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                      const SizedBox(height: 22),
-                                      _buildTermsRow(),
-                                      const SizedBox(height: 20),
-                                      if (!_otpStepVisible)
-                                        SizedBox(
-                                          width: double.infinity,
-                                          height: 54,
-                                          child: FilledButton(
-                                            style: FilledButton.styleFrom(
-                                              backgroundColor: _brandGold,
-                                              foregroundColor: Colors.white,
-                                              disabledBackgroundColor:
-                                                  Colors.grey.shade300,
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(14),
-                                              ),
-                                              elevation: 0,
-                                            ),
-                                            onPressed: !_canPressGetOtp
-                                                ? null
-                                                : _handleGetOtp,
-                                            child: _isOtpLoading
-                                                ? const SizedBox(
-                                                    width: 22,
-                                                    height: 22,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                      color: Colors.white,
-                                                    ),
-                                                  )
-                                                : const Row(
-                                                    mainAxisAlignment:
-                                                        MainAxisAlignment
-                                                            .center,
-                                                    children: [
-                                                      Text(
-                                                        'Get OTP',
-                                                        style: TextStyle(
-                                                          fontSize: 16,
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                        ),
-                                                      ),
-                                                      SizedBox(width: 8),
-                                                      Icon(
-                                                        Icons
-                                                            .arrow_forward_rounded,
-                                                        size: 20,
-                                                      ),
-                                                    ],
-                                                  ),
-                                          ),
-                                        ),
-                                      const SizedBox(height: 24),
-                                      _buildOrDivider(),
-                                      const SizedBox(height: 20),
-                                      _buildContinueGoogle(
-                                        enabled: !_isSocialLoading &&
-                                            !_isOtpLoading &&
-                                            !_isVerifyLoading,
-                                      ),
-                                      if (showApple) ...[
-                                        const SizedBox(height: 14),
-                                        _buildContinueApple(
-                                          enabled: !_isSocialLoading &&
-                                              !_isOtpLoading &&
-                                              !_isVerifyLoading,
-                                        ),
-                                      ],
-                                    ],
-                                  ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Welcome to Raahi 👋',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF1A1A1A),
+                              height: 1.2,
                             ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 8),
+                          Text(
+                            'Get started in seconds',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w400,
+                              color: Colors.grey.shade600,
+                              height: 1.35,
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          _buildPhoneField(enabled: !blocked),
+                          if (_otpStepVisible)
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton(
+                                onPressed:
+                                    blocked ? null : () => _collapseOtpStep(),
+                                child: Text(
+                                  'Change number',
+                                  style: TextStyle(
+                                    color: _brandGold,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          AnimatedSize(
+                            duration: const Duration(milliseconds: 280),
+                            curve: Curves.easeOutCubic,
+                            alignment: Alignment.topCenter,
+                            child: _otpStepVisible
+                                ? Padding(
+                                    padding: const EdgeInsets.only(top: 16),
+                                    child: _buildInlineOtpSection(
+                                        interactionBlocked: blocked),
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
+                          if (!_otpStepVisible) ...[
+                            const SizedBox(height: 12),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(Icons.shield_outlined,
+                                    size: 18, color: _brandGold),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    "We'll send you a 6-digit OTP",
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: Colors.grey.shade700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                          const SizedBox(height: 22),
+                          _buildTermsRow(),
+                          const SizedBox(height: 20),
+                          if (!_otpStepVisible)
+                            SizedBox(
+                              width: double.infinity,
+                              height: 54,
+                              child: FilledButton(
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: _brandGold,
+                                  foregroundColor: Colors.white,
+                                  disabledBackgroundColor:
+                                      Colors.grey.shade300,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  elevation: 0,
+                                ),
+                                onPressed:
+                                    !_canPressGetOtp ? null : _handleGetOtp,
+                                child: _isOtpLoading
+                                    ? const SizedBox(
+                                        width: 22,
+                                        height: 22,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : const Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          Text(
+                                            'Get OTP',
+                                            style: TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          SizedBox(width: 8),
+                                          Icon(
+                                            Icons.arrow_forward_rounded,
+                                            size: 20,
+                                          ),
+                                        ],
+                                      ),
+                              ),
+                            ),
+                          const SizedBox(height: 24),
+                          _buildOrDivider(),
+                          const SizedBox(height: 20),
+                          _buildContinueGoogle(
+                            enabled: !_isSocialLoading &&
+                                !_isOtpLoading &&
+                                !_isVerifyLoading,
+                          ),
+                          if (showApple) ...[
+                            const SizedBox(height: 14),
+                            _buildContinueApple(
+                              enabled: !_isSocialLoading &&
+                                  !_isOtpLoading &&
+                                  !_isVerifyLoading,
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              );
-            },
-          ),
-        ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

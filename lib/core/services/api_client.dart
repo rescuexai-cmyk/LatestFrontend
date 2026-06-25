@@ -502,8 +502,8 @@ class ApiClient {
 
   /// Create a ride.
   /// Backend: POST /api/rides  body: { pickupLat, pickupLng, dropLat, dropLng,
-  ///   pickupAddress, dropAddress, paymentMethod, waypoints?, scheduledTime?, vehicleType? }
-  /// waypoints: optional list of {lat, lng, address} for multi-stop trips (Ola/Uber/Rapido style)
+  ///   pickupAddress, dropAddress, paymentMethod, stops?, scheduledTime?, vehicleType? }
+  /// stops: optional list of {lat, lng, address} for multi-stop trips
   Future<Map<String, dynamic>> createRide({
     required double pickupLat,
     required double pickupLng,
@@ -512,7 +512,7 @@ class ApiClient {
     required String pickupAddress,
     required String dropAddress,
     required String paymentMethod,
-    List<Map<String, dynamic>>? waypoints,
+    List<Map<String, dynamic>>? stops,
     String? scheduledTime,
     String? vehicleType,
   }) async {
@@ -527,8 +527,8 @@ class ApiClient {
       if (scheduledTime != null) 'scheduledTime': scheduledTime,
       if (vehicleType != null) 'vehicleType': vehicleType,
     };
-    if (waypoints != null && waypoints.isNotEmpty) {
-      data['waypoints'] = waypoints;
+    if (stops != null && stops.isNotEmpty) {
+      data['stops'] = stops;
     }
     final response = await _dio.post('/api/rides', data: data);
     return response.data as Map<String, dynamic>;
@@ -814,14 +814,14 @@ class ApiClient {
   // ─────────────────────────────────────────────
 
   /// Calculate fare estimate.
-  /// Backend: POST /api/pricing/calculate  body: { pickupLat, pickupLng, dropLat, dropLng, waypoints?, distanceKm?, durationMin?, vehicleType?, scheduledTime? }
-  /// waypoints: optional list of {lat, lng} for multi-stop trips (Ola/Uber/Rapido style)
+  /// Backend: POST /api/pricing/calculate  body: { pickupLat, pickupLng, dropLat, dropLng, stops?, distanceKm?, durationMin?, vehicleType?, scheduledTime? }
+  /// stops: optional list of {lat, lng, address} for multi-stop trips
   Future<Map<String, dynamic>> getRidePricing({
     required double pickupLat,
     required double pickupLng,
     required double dropLat,
     required double dropLng,
-    List<Map<String, double>>? waypoints,
+    List<Map<String, dynamic>>? stops,
     double? distanceKm,
     int? durationMin,
     String? vehicleType,
@@ -835,8 +835,8 @@ class ApiClient {
       if (vehicleType != null) 'vehicleType': vehicleType,
       if (scheduledTime != null) 'scheduledTime': scheduledTime,
     };
-    if (waypoints != null && waypoints.isNotEmpty) {
-      data['waypoints'] = waypoints;
+    if (stops != null && stops.isNotEmpty) {
+      data['stops'] = stops;
     }
     if (distanceKm != null) data['distanceKm'] = distanceKm;
     if (durationMin != null) data['durationMin'] = durationMin;
@@ -1431,6 +1431,287 @@ class ApiClient {
     final response = await _dio.post('/api/driver/penalty/clear-with-upi', data: {
       if (penaltyId != null) 'penaltyId': penaltyId,
       if (transactionId != null) 'transactionId': transactionId,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  // ─────────────────────────────────────────────
+  // RESCUE  (Backend: rescue-service via gateway /api/rescue/*)
+  // ─────────────────────────────────────────────
+
+  /// Get user's current active rescue (if any).
+  /// Backend: GET /api/rescue/active
+  Future<Map<String, dynamic>> getActiveRescue() async {
+    final response = await _dio.get('/api/rescue/active');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get rescue fare estimate with breakdown.
+  /// Backend: POST /api/rescue/estimate
+  Future<Map<String, dynamic>> getRescueFareEstimate({
+    required double pickupLat,
+    required double pickupLng,
+    required double dropLat,
+    required double dropLng,
+    required bool hasVehicle,
+    double? vehicleDropLat,
+    double? vehicleDropLng,
+    bool? vehicleDropSameAsDrop,
+  }) async {
+    final response = await _dio.post('/api/rescue/estimate', data: {
+      'pickupLat': pickupLat,
+      'pickupLng': pickupLng,
+      'dropLat': dropLat,
+      'dropLng': dropLng,
+      'hasVehicle': hasVehicle,
+      if (vehicleDropLat != null) 'vehicleDropLat': vehicleDropLat,
+      if (vehicleDropLng != null) 'vehicleDropLng': vehicleDropLng,
+      if (vehicleDropSameAsDrop != null)
+        'vehicleDropSameAsDrop': vehicleDropSameAsDrop,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Create a rescue request with full Figma flow fields.
+  /// Backend: POST /api/rescue
+  Future<Map<String, dynamic>> createRescueRequest({
+    required double pickupLat,
+    required double pickupLng,
+    required String pickupAddress,
+    required double dropLat,
+    required double dropLng,
+    required String dropAddress,
+    required String paymentMethod,
+    required bool hasVehicle,
+    // Screen ① — Service type
+    String? rescueServiceType,
+    // Screen ② — Reason
+    String? reason,
+    String? reasonDetails,
+    // Screen ③ — Vehicle presence
+    bool? isVehicleWithUser,
+    // Screen ④ — Vehicle details
+    String? vehicleType,
+    String? vehicleSubType,
+    String? vehicleRegistrationNumber,
+    String? vehicleRegistrationState,
+    String? vehicleTransmission,
+    List<String>? vehicleIssues,
+    // Screen ⑤ — Vehicle drop
+    bool? vehicleDropSameAsDrop,
+    String? vehicleDropAddress,
+    double? vehicleDropLat,
+    double? vehicleDropLng,
+  }) async {
+    final data = <String, dynamic>{
+      'pickupLat': pickupLat,
+      'pickupLng': pickupLng,
+      'pickupAddress': pickupAddress,
+      'dropLat': dropLat,
+      'dropLng': dropLng,
+      'dropAddress': dropAddress,
+      'paymentMethod': paymentMethod.toUpperCase(),
+      'hasVehicle': hasVehicle,
+      if (rescueServiceType != null) 'rescueServiceType': rescueServiceType,
+      if (reason != null) 'reason': reason,
+      if (reasonDetails != null) 'reasonDetails': reasonDetails,
+      if (isVehicleWithUser != null) 'isVehicleWithUser': isVehicleWithUser,
+      if (vehicleType != null) 'vehicleType': vehicleType,
+      if (vehicleSubType != null) 'vehicleSubType': vehicleSubType,
+      if (vehicleRegistrationNumber != null)
+        'vehicleRegistrationNumber': vehicleRegistrationNumber,
+      if (vehicleRegistrationState != null)
+        'vehicleRegistrationState': vehicleRegistrationState,
+      if (vehicleTransmission != null) 'vehicleTransmission': vehicleTransmission,
+      if (vehicleIssues != null && vehicleIssues.isNotEmpty)
+        'vehicleIssues': vehicleIssues,
+      if (vehicleDropSameAsDrop != null)
+        'vehicleDropSameAsDrop': vehicleDropSameAsDrop,
+      if (vehicleDropAddress != null) 'vehicleDropAddress': vehicleDropAddress,
+      if (vehicleDropLat != null) 'vehicleDropLat': vehicleDropLat,
+      if (vehicleDropLng != null) 'vehicleDropLng': vehicleDropLng,
+    };
+    final response = await _dio.post('/api/rescue', data: data);
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// List user's rescue history.
+  /// Backend: GET /api/rescue?page=&limit=
+  Future<Map<String, dynamic>> getRescueHistory({
+    int page = 1,
+    int limit = 10,
+  }) async {
+    final response = await _dio.get('/api/rescue', queryParameters: {
+      'page': page,
+      'limit': limit,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get rescue request details.
+  /// Backend: GET /api/rescue/:id
+  Future<Map<String, dynamic>> getRescueRequest(String rescueId) async {
+    final response = await _dio.get('/api/rescue/$rescueId');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Cancel a rescue request.
+  /// Backend: POST /api/rescue/:id/cancel
+  Future<Map<String, dynamic>> cancelRescueRequest(
+    String rescueId, {
+    String? reason,
+  }) async {
+    final response = await _dio.post('/api/rescue/$rescueId/cancel', data: {
+      if (reason != null) 'reason': reason,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get dual-ride progress for a rescue.
+  /// Backend: GET /api/rescue/:id/progress
+  Future<Map<String, dynamic>> getRescueProgress(String rescueId) async {
+    final response = await _dio.get('/api/rescue/$rescueId/progress');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get rescue timeline events (Journey Hub).
+  /// Backend: GET /api/rescue/:id/timeline
+  Future<Map<String, dynamic>> getRescueTimeline(String rescueId) async {
+    final response = await _dio.get('/api/rescue/$rescueId/timeline');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Trigger SOS emergency during a rescue.
+  /// Backend: POST /api/rescue/:id/sos
+  Future<Map<String, dynamic>> triggerRescueSOS(
+    String rescueId, {
+    String? notes,
+  }) async {
+    final response = await _dio.post('/api/rescue/$rescueId/sos', data: {
+      if (notes != null && notes.isNotEmpty) 'notes': notes,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Verify vehicle delivery (accept or report issue).
+  /// Backend: POST /api/rescue/:id/vehicle-delivery
+  Future<Map<String, dynamic>> verifyVehicleDelivery(
+    String rescueId, {
+    required String status,
+    List<String>? conditionPhotos,
+    String? notes,
+    String? issue,
+  }) async {
+    final response =
+        await _dio.post('/api/rescue/$rescueId/vehicle-delivery', data: {
+      'status': status,
+      if (conditionPhotos != null && conditionPhotos.isNotEmpty)
+        'conditionPhotos': conditionPhotos,
+      if (notes != null && notes.isNotEmpty) 'notes': notes,
+      if (issue != null && issue.isNotEmpty) 'issue': issue,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Submit multi-party rescue ratings.
+  /// Backend: POST /api/rescue/:id/rate
+  Future<Map<String, dynamic>> submitRescueRating(
+    String rescueId, {
+    required List<Map<String, dynamic>> ratings,
+    bool? problemSolved,
+  }) async {
+    final response = await _dio.post('/api/rescue/$rescueId/rate', data: {
+      'ratings': ratings,
+      if (problemSolved != null) 'problemSolved': problemSolved,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Report an issue with a rescue.
+  /// Backend: POST /api/rescue/:id/report-issue
+  Future<Map<String, dynamic>> reportRescueIssue(
+    String rescueId, {
+    required String issueType,
+    required String description,
+    List<String>? photos,
+  }) async {
+    final response =
+        await _dio.post('/api/rescue/$rescueId/report-issue', data: {
+      'issueType': issueType,
+      'description': description,
+      if (photos != null && photos.isNotEmpty) 'photos': photos,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get presigned upload URL for rescue photos.
+  /// Backend: POST /api/rescue/upload-url
+  Future<Map<String, dynamic>> getRescueUploadUrl({
+    required String fileName,
+    required String contentType,
+    String? rescueId,
+    String? photoType,
+  }) async {
+    final response = await _dio.post('/api/rescue/upload-url', data: {
+      'fileName': fileName,
+      'contentType': contentType,
+      if (rescueId != null) 'rescueId': rescueId,
+      if (photoType != null) 'photoType': photoType,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  // ─── Driver rescue actions (rescue-service) ───────────────────────────────
+
+  /// Driver accepts a rescue request.
+  /// Backend: POST /api/rescue/:id/accept
+  Future<Map<String, dynamic>> acceptRescueRequest(String rescueId) async {
+    try {
+      final response = await _dio.post('/api/rescue/$rescueId/accept');
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        return {
+          'success': false,
+          'message': e.response?.data?['message']?.toString() ??
+              'This rescue has already been accepted',
+          'code': 'ALREADY_ACCEPTED',
+        };
+      }
+      if (e.response?.statusCode == 403) {
+        return {
+          'success': false,
+          'message': e.response?.data?['message']?.toString() ??
+              'You are not authorized to accept rescue requests',
+          'code': 'FORBIDDEN',
+        };
+      }
+      rethrow;
+    }
+  }
+
+  /// Driver 1 picked up partner and is heading to the user.
+  /// Backend: POST /api/rescue/:id/driver-enroute
+  Future<Map<String, dynamic>> rescueDriverEnRoute(String rescueId) async {
+    final response = await _dio.post('/api/rescue/$rescueId/driver-enroute');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Either assigned driver marks arrival at the user's pickup.
+  /// Backend: POST /api/rescue/:id/arrived
+  Future<Map<String, dynamic>> rescueDriverArrived(String rescueId) async {
+    final response = await _dio.post('/api/rescue/$rescueId/arrived');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Verify rescue OTP and start linked user/vehicle rides.
+  /// Backend: POST /api/rescue/:id/verify-otp
+  Future<Map<String, dynamic>> verifyRescueOtp(
+    String rescueId,
+    String otp,
+  ) async {
+    final response = await _dio.post('/api/rescue/$rescueId/verify-otp', data: {
+      'otp': otp,
     });
     return response.data as Map<String, dynamic>;
   }

@@ -30,6 +30,14 @@
           }
         },
         {
+          "client_id": "877632727493-g56pe6lknohoa23n6e5tavalv7b7q5cb.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.rhi.raahi",
+            "certificate_hash": "f788412c1ab7c7c3d0b3d5f148a87492f5155c32"
+          }
+        },
+        {
           "client_id": "877632727493-n3sgaae13t4a9d32kp7re4u7pljj7632.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {

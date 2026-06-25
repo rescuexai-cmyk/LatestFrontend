@@ -741,7 +741,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     try {
       final completeStops =
           booking.stops.where((s) => s.location != null).toList();
-      final waypoints = completeStops.isNotEmpty
+      final stopsForApi = completeStops.isNotEmpty
           ? completeStops
               .map((s) => {
                     'lat': s.location!.latitude,
@@ -758,7 +758,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         pickupAddress: pickupAddr,
         dropAddress: dropAddr,
         paymentMethod: 'CASH',
-        waypoints: waypoints,
+        stops: stopsForApi,
         vehicleType: booking.selectedCabTypeId,
       );
 

@@ -31,6 +31,7 @@ import '../../../../core/utils/bike_map_icon.dart';
 import '../../../../core/utils/cab_map_icon.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import '../../../rescue/providers/rescue_booking_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Top-aligned `BoxFit.cover` like Figma, but clips [topCropPx] of the raster
@@ -233,6 +234,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   int _durationMinFromBackend = 0;
   // Store calculated fares for each cab type (from backend)
   Map<String, double> _cabFares = {};
+  /// Figma rescue card — “Need Extra Driver?” toggle (default ON per design).
+  bool _needExtraDriver = false;
   // Pricing v2 features
   EcoPickup? _ecoPickup;
   RiderSubsidy? _riderSubsidy;
@@ -1414,13 +1417,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     try {
       debugPrint('💰 Fetching pricing v2 from backend...');
       debugPrint('   Distance: ${distance}m, Duration: ${duration}s');
-      // Backend: POST /api/pricing/calculate (with waypoints for multi-stop)
+      // Backend: POST /api/pricing/calculate (with stops for multi-stop)
       final completeStops = _stops.where((s) => s.location != null).toList();
-      final waypointsForPricing = completeStops.isNotEmpty
+      final stopsForPricing = completeStops.isNotEmpty
           ? completeStops
               .map((s) => {
                     'lat': s.location!.latitude,
                     'lng': s.location!.longitude,
+                    'address': s.address,
                   })
               .toList()
           : null;
@@ -1429,7 +1433,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         pickupLng: _pickupLocation!.longitude,
         dropLat: _destinationLocation!.latitude,
         dropLng: _destinationLocation!.longitude,
-        waypoints: waypointsForPricing,
+        stops: stopsForPricing,
         distanceKm: distance / 1000,
         durationMin: (duration / 60).ceil(),
       );
@@ -3599,7 +3603,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     return FigmaVehicleOptionCard(
       title: isRescue ? 'Switch to Rescue' : cab.name,
       imageAsset: _getVehicleImage(cab.id),
-      capacity: cab.capacity,
+      capacity: isRescue && _needExtraDriver ? 2 : cab.capacity,
       eta: cab.eta,
       priceText: _formatFareDisplay(fare, cab),
       isSelected: isSelected,
@@ -3608,6 +3612,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       paymentNote:
           isRescue ? null : 'Pay directly to driver, cash/UPI only',
       fallbackIcon: cab.icon,
+      needExtraDriver: _needExtraDriver,
+      showExtraDriversBadge: isRescue && _needExtraDriver,
+      onNeedExtraDriverChanged: isRescue && isSelected
+          ? (value) => setState(() => _needExtraDriver = value)
+          : null,
       onTap: () {
         setState(() => _selectedCabType = cab.id);
         _updateDriverMarkers();
@@ -3726,6 +3735,35 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
   static const double _intercityThresholdKm = 50;
 
+  /// Starts the dedicated 11-screen Figma rescue flow (locations prefilled from Find Trip).
+  void _startRescueBookingFlow(CabType selectedCab, double fare) {
+    if (!mounted) return;
+    final isEcoPickup = selectedCab.id == 'eco_pickup';
+    ref.read(rideBookingProvider.notifier).setCabType(
+          id: selectedCab.id,
+          name: selectedCab.name,
+          fare: fare,
+          originalFare: _riderSubsidy != null && _riderSubsidy!.isActive
+              ? fare / (1 - _riderSubsidy!.subsidyPct)
+              : fare,
+          subsidyAmount: _savingsAmount,
+          isSubsidyApplied: _riderSubsidy?.isActive ?? false,
+          isEcoPickup: isEcoPickup,
+          ecoPickupAddress:
+              isEcoPickup ? _ecoPickup?.suggestedPickupAddress : null,
+          ecoPickupLocation: isEcoPickup && _ecoPickup != null
+              ? LatLng(
+                  _ecoPickup!.suggestedLat,
+                  _ecoPickup!.suggestedLng,
+                )
+              : null,
+        );
+    ref.read(rescueBookingProvider.notifier).reset();
+    ref.read(rescueBookingProvider.notifier).prefillFromRideBooking();
+    ref.read(rescueBookingProvider.notifier).setVehicleWithYou(_needExtraDriver);
+    context.push(AppRoutes.rescueLanding);
+  }
+
   /// After cab + fare selected: persist cab type then open payment route.
   void _pushRidePaymentWithSelectedCab(CabType selectedCab, double fare) {
     if (!mounted) return;
@@ -3749,7 +3787,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 )
               : null,
         );
-    ref.read(rideBookingProvider.notifier).setDriverCount(1);
+    ref.read(rideBookingProvider.notifier).setDriverCount(
+          _selectedCabType == 'bike_rescue' && _needExtraDriver ? 2 : 1,
+        );
     context.push(AppRoutes.ridePayment);
   }
 
@@ -3793,9 +3833,18 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       _showFindTripSchedulePicker(
         afterClose: () {
           if (!mounted || _scheduledTime == null) return;
-          _pushRidePaymentWithSelectedCab(selectedCab, fare);
+          if (_selectedCabType == 'bike_rescue' && _needExtraDriver) {
+            _startRescueBookingFlow(selectedCab, fare);
+          } else {
+            _pushRidePaymentWithSelectedCab(selectedCab, fare);
+          }
         },
       );
+      return;
+    }
+
+    if (_selectedCabType == 'bike_rescue' && _needExtraDriver) {
+      _startRescueBookingFlow(selectedCab, fare);
       return;
     }
 

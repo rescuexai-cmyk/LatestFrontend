@@ -26,6 +26,7 @@ import '../../../../core/models/pricing_v2.dart';
 import '../../../../core/models/user.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import '../../providers/personal_driver_onboarding_provider.dart';
 import '../../providers/driver_rides_provider.dart';
 import '../../providers/driver_subscription_provider.dart';
 import '../../providers/driver_penalty_provider.dart';
@@ -52,6 +53,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   String?
       _acceptingRideId; // CRITICAL: Track which ride is being accepted to disable button
   bool _canStartRides = true; // Backend-driven; fetched on load
+  bool _isPersonalRescueDriver = false;
   String? _verificationBannerMsg; // Non-null when driver is not yet verified
   double _todayEarnings = 0.0;
   int _todayTrips = 0;
@@ -111,29 +113,68 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Avoid nuking an in-progress accepted ride when only clearing stale offer queues.
-    ref.read(driverRidesProvider.notifier).resetForNewSession(
-          preserveAcceptedRide: true,
-        );
     _hydrateDriverRecordId();
     _getCurrentLocation();
     _setupWebSocketSubscription();
     _fetchEarnings();
     _fetchRideHistory();
-    _fetchVerificationStatus();
-    _fetchSubscriptionStatus();
     _restoreSessionState();
     _ensureDriverPrefsMatchAppLanguage();
     _loadMapStyle();
     _fetchDriverQuests();
     _setupPushRideListener();
 
-    // Keep offer vehicle filter aligned with registered driver vehicle (prefs/async).
+    // Provider updates must run after the first frame (Riverpod rule).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
-            ref.read(driverOnboardingProvider).selectedVehicleType,
+      ref.read(driverRidesProvider.notifier).resetForNewSession(
+            preserveAcceptedRide: true,
           );
+      unawaited(_initDriverProfile());
+    });
+  }
+
+  Future<void> _initDriverProfile() async {
+    await ref.read(personalDriverOnboardingProvider.notifier).ensureLoaded();
+    if (!mounted) return;
+
+    final isPersonal = ref.read(isPersonalRescueDriverModeProvider);
+    setState(() => _isPersonalRescueDriver = isPersonal);
+
+    ref.read(driverRidesProvider.notifier).setPersonalRescueDriverMode(isPersonal);
+    _syncDriverOfferFilter();
+
+    if (isPersonal) {
+      await _fetchPersonalDriverVerificationStatus();
+    } else {
+      await _fetchVerificationStatus();
+      await _fetchSubscriptionStatus();
+    }
+  }
+
+  void _syncDriverOfferFilter() {
+    if (_isPersonalRescueDriver) {
+      ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
+            PersonalDriverOnboardingState.vehicleTypeId,
+          );
+      return;
+    }
+    ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
+          ref.read(driverOnboardingProvider).selectedVehicleType,
+        );
+  }
+
+  Future<void> _fetchPersonalDriverVerificationStatus() async {
+    final pd = ref.read(personalDriverOnboardingProvider);
+    if (!mounted) return;
+    setState(() {
+      _canStartRides = pd.canStartRescueJobs;
+      if (!pd.canStartRescueJobs) {
+        _verificationBannerMsg =
+            'Your personal driver documents are under review. This usually takes 24–48 hours.';
+      } else {
+        _verificationBannerMsg = null;
+      }
     });
   }
 
@@ -234,9 +275,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     debugPrint('📱 App lifecycle state changed: $state');
 
     if (state == AppLifecycleState.resumed) {
-      // Re-check verification and subscription on every resume
-      _fetchVerificationStatus();
-      _fetchSubscriptionStatus();
+      if (_isPersonalRescueDriver) {
+        _fetchPersonalDriverVerificationStatus();
+      } else {
+        _fetchVerificationStatus();
+        _fetchSubscriptionStatus();
+      }
       if (_isOnline) {
         _ensureSocketConnection();
       }
@@ -1837,23 +1881,35 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final rideId = (rideIdRaw == null || rideIdRaw.toString().isEmpty)
         ? 'push_${DateTime.now().millisecondsSinceEpoch}'
         : rideIdRaw.toString();
-    return RideOffer(
-      id: rideId,
-      type: (data['vehicleType'] ?? data['serviceType'] ?? 'bike_rescue')
-          .toString(),
-      earning: _parseFare(data['fare'] ?? data['estimatedFare']),
-      pickupDistance: pickupDist,
-      pickupTime: (data['pickupTime'] ?? 'Now').toString(),
-      dropDistance: dropDist.isNotEmpty ? dropDist : pickupDist,
-      dropTime: (data['dropTime'] ?? '').toString(),
-      pickupAddress:
+    return RideOffer.fromJson({
+      'rideId': rideId,
+      'id': rideId,
+      'vehicleType':
+          (data['vehicleType'] ?? data['serviceType'] ?? 'bike_rescue')
+              .toString(),
+      'estimatedFare': _parseFare(data['fare'] ?? data['estimatedFare']),
+      'pickup_distance': pickupDist,
+      'pickupTime': (data['pickupTime'] ?? 'Now').toString(),
+      'drop_distance': dropDist.isNotEmpty ? dropDist : pickupDist,
+      'dropTime': (data['dropTime'] ?? '').toString(),
+      'pickupAddress':
           (data['pickup'] ?? data['pickupAddress'] ?? 'Pickup').toString(),
-      dropAddress: (data['drop'] ?? data['dropAddress'] ?? 'Drop').toString(),
-      riderName:
+      'dropAddress': (data['drop'] ?? data['dropAddress'] ?? 'Drop').toString(),
+      'passengerName':
           data['riderName']?.toString() ?? data['passengerName']?.toString(),
-      createdAt: DateTime.now(),
-      status: 'searching',
-    );
+      'timestamp': DateTime.now().toIso8601String(),
+      'status': 'searching',
+      'rideType': data['rideType'],
+      'isRescueRequest': data['isRescueRequest'],
+      'rescueMultiDriver': data['rescueMultiDriver'],
+      'driversNeeded': data['driversNeeded'],
+      'rescueRoleNeeded': data['rescueRoleNeeded'] ??
+          data['rescue_role_needed'] ??
+          data['requiredRescueRole'] ??
+          data['driverRoleNeeded'],
+      'hasVehicle': data['hasVehicle'],
+      'vehicleDropAddress': data['vehicleDropAddress'],
+    });
   }
 
   bool _isOfferStatusActive(String status) {
@@ -2126,9 +2182,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     if (!_isOnline) {
       // ---- GOING ONLINE ----
 
-      // 1. Check subscription status from backend
-      final subscriptionAllowed = await _checkSubscriptionBeforeGoingOnline();
-      if (!subscriptionAllowed) return; // User needs to pay or cancelled
+      if (!_isPersonalRescueDriver) {
+        // 1. Check subscription status from backend
+        final subscriptionAllowed = await _checkSubscriptionBeforeGoingOnline();
+        if (!subscriptionAllowed) return; // User needs to pay or cancelled
+      }
 
       // 1.1 Resolve pending penalty via dynamic payment sheet.
       final penaltyResolved = await _resolvePenaltyBeforeGoingOnline();
@@ -2297,6 +2355,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     await _fetchDriverQuests();
   }
 
+  Future<void> _openRescueJobAndRefresh() async {
+    await context.push(AppRoutes.driverRescueJob);
+    if (!mounted) return;
+    await _fetchDriverQuests();
+  }
+
+  bool _isPreOtpRescueJob(RideOffer ride) {
+    final status = ride.rescueStatus?.toUpperCase();
+    if (status == null || status.isEmpty) return true;
+    return status == 'PENDING' ||
+        status == 'DRIVER1_ACCEPTED' ||
+        status == 'BOTH_ACCEPTED' ||
+        status == 'DRIVERS_EN_ROUTE' ||
+        status == 'DRIVERS_ARRIVED';
+  }
+
   Future<void> _acceptRide(RideOffer offer) async {
     // CRITICAL: Prevent double-tap
     if (_acceptingRideId != null) {
@@ -2305,18 +2379,24 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     }
 
     setState(() => _acceptingRideId = offer.id);
-    debugPrint('🚗 Accepting ride: ${offer.id}');
+    debugPrint(
+      '🚗 Accepting ${offer.isRescue ? 'rescue' : 'ride'}: ${offer.id}',
+    );
 
     try {
       final success = await ref
           .read(driverRidesProvider.notifier)
-          .acceptRide(offer.id, driverId: _driverId);
+          .acceptOffer(offer, driverId: _driverId);
 
       if (success && mounted) {
-        // Provider already clears all offers on successful accept
-        // Navigate to active ride screen
-        debugPrint('✅ Ride accepted successfully, navigating to active ride');
-        await _openActiveRideAndRefresh();
+        final accepted = ref.read(driverRidesProvider).acceptedRide;
+        if (accepted?.isRescue == true) {
+          debugPrint('✅ Rescue accepted, navigating to rescue job screen');
+          await _openRescueJobAndRefresh();
+        } else {
+          debugPrint('✅ Ride accepted successfully, navigating to active ride');
+          await _openActiveRideAndRefresh();
+        }
       } else if (mounted) {
         // Get specific error from provider state
         final error = ref.read(driverRidesProvider).error;
@@ -2347,9 +2427,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   @override
   Widget build(BuildContext context) {
     ref.listen<DriverOnboardingState>(driverOnboardingProvider, (_, next) {
-      ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
-            next.selectedVehicleType,
-          );
+      if (_isPersonalRescueDriver) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _isPersonalRescueDriver) return;
+        ref.read(driverRidesProvider.notifier).setRegisteredDriverVehicleType(
+              next.selectedVehicleType,
+            );
+      });
+    });
+
+    ref.listen<PersonalDriverOnboardingState>(personalDriverOnboardingProvider,
+        (_, next) {
+      if (!_isPersonalRescueDriver) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_isPersonalRescueDriver) return;
+        _fetchPersonalDriverVerificationStatus();
+      });
     });
 
     final driverRidesState = ref.watch(driverRidesProvider);
@@ -2444,6 +2537,32 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   fontSize: 13,
                   color: Color(0xFFE65100),
                   fontWeight: FontWeight.w500),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPersonalRescueModeBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF3E0),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFCF923D)),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.emergency, color: Color(0xFFCF923D), size: 16),
+          SizedBox(width: 4),
+          Text(
+            'Rescue Driver',
+            style: TextStyle(
+              color: Color(0xFFCF923D),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
@@ -2639,9 +2758,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
           const Spacer(),
 
-          // Subscription status badge
-          _buildSubscriptionStatusBadge(),
-          const SizedBox(width: 8),
+          if (_isPersonalRescueDriver)
+            _buildPersonalRescueModeBadge()
+          else ...[
+            // Subscription status badge
+            _buildSubscriptionStatusBadge(),
+            const SizedBox(width: 8),
+          ],
 
           // Earnings badge
           GestureDetector(
@@ -2800,7 +2923,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              _isOnline ? 'Stop Riding' : 'Start Ride',
+              _isOnline
+                  ? (_isPersonalRescueDriver ? 'Stop Rescue' : 'Stop Riding')
+                  : (_isPersonalRescueDriver ? 'Start Rescue' : 'Start Ride'),
               style: TextStyle(
                 color: Colors.white,
                 fontSize: fontSize,
@@ -2926,7 +3051,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           ),
           const SizedBox(height: 8),
           SizedBox(
-            height: 80,
+            height: 88,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: _activeQuests.length,
@@ -2946,7 +3071,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     return Container(
       width: 160,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: isNearComplete
@@ -2990,11 +3115,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           Text(
             '${quest.completedRides}/${quest.targetRides} rides',
             style: TextStyle(
               fontSize: 10,
+              height: 1.2,
               color: Colors.grey.shade600,
             ),
           ),
@@ -3108,6 +3234,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   Widget _buildActiveRideReturnCard({bool compact = false}) {
     final acceptedRide = ref.watch(driverRidesProvider).acceptedRide;
     if (acceptedRide == null) return const SizedBox.shrink();
+    final isRescueJob =
+        acceptedRide.isRescue && _isPreOtpRescueJob(acceptedRide);
     final titleStyle = TextStyle(
       fontSize: compact ? 15 : 18,
       fontWeight: FontWeight.w700,
@@ -3121,7 +3249,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final iconSize = compact ? 22.0 : 28.0;
 
     return GestureDetector(
-      onTap: _openActiveRideAndRefresh,
+      onTap: isRescueJob ? _openRescueJobAndRefresh : _openActiveRideAndRefresh,
       child: Container(
         margin: compact
             ? EdgeInsets.zero
@@ -3147,7 +3275,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                 borderRadius: BorderRadius.circular(compact ? 10 : 12),
               ),
               child: Icon(
-                Icons.directions_car,
+                isRescueJob ? Icons.emergency : Icons.directions_car,
                 color: Colors.white,
                 size: iconSize,
               ),
@@ -3157,7 +3285,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Ongoing Ride', style: titleStyle),
+                  Text(
+                    isRescueJob ? 'Ongoing Rescue' : 'Ongoing Ride',
+                    style: titleStyle,
+                  ),
                   SizedBox(height: compact ? 2 : 4),
                   Text(
                     '${acceptedRide.pickupAddress} → ${acceptedRide.dropAddress}',

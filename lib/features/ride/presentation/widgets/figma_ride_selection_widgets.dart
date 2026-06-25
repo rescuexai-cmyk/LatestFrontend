@@ -319,7 +319,420 @@ class _TripStatsCapsule extends StatelessWidget {
   }
 }
 
-/// Figma vehicle row (min-height 346×81); expands when footer copy needs more lines.
+/// Figma Frame 1410081846 — rescue “Need Extra Driver?” pill toggle.
+class FigmaRescueExtraDriverToggle extends StatelessWidget {
+  const FigmaRescueExtraDriverToggle({
+    super.key,
+    required this.value,
+    this.onChanged,
+  });
+
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  bool get _enabled => onChanged != null;
+
+  static const Color trackOnColor = figmaRideAccent;
+  static const Color trackOffColor = Color(0xFFB1B1B1);
+  static const Color thumbColor = Color(0xFFF4F0EB);
+
+  static const double hitW = 59;
+  static const double hitH = 27;
+  static const double trackW = 44.1;
+  static const double trackH = 21;
+  static const double trackLeft = 7.45;
+  static const double trackTop = 3;
+  static const double thumbW = 18.93;
+  static const double thumbH = 18.9;
+  static const double thumbTop = 4.05;
+  static const double thumbLeftOn = 31.07;
+  static const double thumbLeftOff = 9.07;
+  static const double thumbBorderW = 0.0790795;
+  static const double rMarkW = 9.79;
+  static const double rMarkH = 10.64;
+  static const double rMarkLeft = 5.47;
+  static const double rMarkTop = 4.82;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = _enabled;
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
+      child: Semantics(
+        toggled: value,
+        button: enabled,
+        enabled: enabled,
+        label: 'Need extra driver',
+        child: GestureDetector(
+          onTap: enabled ? () => onChanged!(!value) : null,
+          behavior: HitTestBehavior.opaque,
+          child: SizedBox(
+          width: hitW,
+          height: hitH,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: trackLeft,
+                top: trackTop,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeInOut,
+                  width: trackW,
+                  height: trackH,
+                  decoration: BoxDecoration(
+                    color: value ? trackOnColor : trackOffColor,
+                    borderRadius: BorderRadius.circular(78.75),
+                  ),
+                ),
+              ),
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeInOut,
+                left: value ? thumbLeftOn : thumbLeftOff,
+                top: thumbTop,
+                width: thumbW,
+                height: thumbH,
+                child: const _FigmaRescueToggleThumb(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+    );
+  }
+}
+
+/// Figma “God Yellow” thumb + gold Raahi r mark (Frame God Yellow / R).
+class _FigmaRescueToggleThumb extends StatelessWidget {
+  const _FigmaRescueToggleThumb();
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: FigmaRescueExtraDriverToggle.thumbW,
+      height: FigmaRescueExtraDriverToggle.thumbH,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            width: FigmaRescueExtraDriverToggle.thumbW,
+            height: FigmaRescueExtraDriverToggle.thumbH,
+            decoration: BoxDecoration(
+              color: FigmaRescueExtraDriverToggle.thumbColor,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: Colors.white,
+                width: FigmaRescueExtraDriverToggle.thumbBorderW,
+              ),
+            ),
+          ),
+          Positioned(
+            left: FigmaRescueExtraDriverToggle.rMarkLeft,
+            top: FigmaRescueExtraDriverToggle.rMarkTop,
+            width: FigmaRescueExtraDriverToggle.rMarkW,
+            height: FigmaRescueExtraDriverToggle.rMarkH,
+            child: Image.asset(
+              'assets/icons/rescue_toggle_r.png',
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+              errorBuilder: (_, __, ___) => CustomPaint(
+                size: const Size(
+                  FigmaRescueExtraDriverToggle.rMarkW,
+                  FigmaRescueExtraDriverToggle.rMarkH,
+                ),
+                painter: _RaahiToggleRMarkPainter(
+                  color: FigmaRescueExtraDriverToggle.trackOnColor,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Vector fallback for the toggle r mark when the raster asset is unavailable.
+class _RaahiToggleRMarkPainter extends CustomPainter {
+  const _RaahiToggleRMarkPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+
+    final stemW = size.width * 0.31;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(0, size.height * 0.02, stemW, size.height * 0.98),
+        Radius.circular(stemW * 0.22),
+      ),
+      paint,
+    );
+
+    final bowl = Path()
+      ..moveTo(stemW * 0.85, size.height * 0.04)
+      ..cubicTo(
+        size.width * 1.02,
+        size.height * 0.02,
+        size.width * 0.98,
+        size.height * 0.52,
+        size.width * 0.72,
+        size.height * 0.62,
+      )
+      ..cubicTo(
+        size.width * 0.48,
+        size.height * 0.72,
+        stemW * 0.95,
+        size.height * 0.58,
+        stemW * 0.9,
+        size.height * 0.42,
+      )
+      ..cubicTo(
+        stemW * 0.82,
+        size.height * 0.18,
+        stemW * 0.7,
+        size.height * 0.08,
+        stemW * 0.85,
+        size.height * 0.04,
+      )
+      ..close();
+    canvas.drawPath(bowl, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RaahiToggleRMarkPainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
+/// Figma Frame 1410081208 — orange “i” info button (21×21).
+class FigmaRescueInfoButton extends StatelessWidget {
+  const FigmaRescueInfoButton({super.key, required this.onTap});
+
+  final VoidCallback onTap;
+
+  static const Color buttonColor = Color(0xFFEC932D);
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Extra driver information',
+      child: Material(
+        color: buttonColor,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: const SizedBox(
+            width: 21,
+            height: 21,
+            child: Center(
+              child: Text(
+                'i',
+                style: TextStyle(
+                  fontFamily: 'Poppins',
+                  fontSize: 13.9,
+                  height: 1,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Figma Frame 1410081209 — rescue extra-driver explainer banner.
+class FigmaRescueExtraDriverInfoPanel extends StatelessWidget {
+  const FigmaRescueExtraDriverInfoPanel({super.key, required this.onClose});
+
+  final VoidCallback onClose;
+
+  static const Color panelBg = Color(0xFFF1F1F1);
+  static const Color infoColor = Color(0xFFEC932D);
+  static const String message =
+      'A bike rider will arrive and drop you to your destination while our '
+      'highly skilled and professional Drivers rescue your vehicle for you and '
+      'drop it to the desired location.';
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: panelBg,
+      elevation: 0,
+      shadowColor: const Color(0x12000000),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+      child: Container(
+        decoration: BoxDecoration(
+          color: panelBg,
+          borderRadius: BorderRadius.circular(13),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x12000000),
+              offset: Offset(0, 2),
+              blurRadius: 3,
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 21,
+              height: 21,
+              decoration: const BoxDecoration(
+                color: infoColor,
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: const Text(
+                'i',
+                style: TextStyle(
+                  fontFamily: 'Poppins',
+                  fontSize: 13.9,
+                  height: 1,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  message,
+                  style: GoogleFonts.poppins(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w400,
+                    height: 20 / 16,
+                    color: const Color(0xFF424242),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Semantics(
+              button: true,
+              label: 'Close',
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: onClose,
+                  customBorder: const CircleBorder(),
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: const Color(0x52464646),
+                        width: 0.667,
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: Transform.rotate(
+                      angle: -math.pi / 4,
+                      child: Text(
+                        '+',
+                        style: GoogleFonts.poppins(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w300,
+                          height: 1,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Rescue card footer — label aligned with title column, info + toggle on right.
+class _RescueExtraDriverFooter extends StatefulWidget {
+  const _RescueExtraDriverFooter({
+    required this.needExtraDriver,
+    this.onNeedExtraDriverChanged,
+  });
+
+  final bool needExtraDriver;
+  final ValueChanged<bool>? onNeedExtraDriverChanged;
+
+  @override
+  State<_RescueExtraDriverFooter> createState() =>
+      _RescueExtraDriverFooterState();
+}
+
+class _RescueExtraDriverFooterState extends State<_RescueExtraDriverFooter> {
+  bool _infoVisible = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_infoVisible) ...[
+          FigmaRescueExtraDriverInfoPanel(
+            onClose: () => setState(() => _infoVisible = false),
+          ),
+          const SizedBox(height: 8),
+        ],
+        SizedBox(
+          height: 27,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const SizedBox(width: figmaVehicleThumbWidth + 10),
+              Expanded(
+                child: Text(
+                  'Need Extra Driver?',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.poppins(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    height: 21 / 14,
+                    color: Colors.black,
+                  ),
+                ),
+              ),
+              if (!_infoVisible && widget.onNeedExtraDriverChanged != null) ...[
+                FigmaRescueInfoButton(
+                  onTap: () => setState(() => _infoVisible = true),
+                ),
+                const SizedBox(width: 8),
+              ],
+              FigmaRescueExtraDriverToggle(
+                value: widget.needExtraDriver,
+                onChanged: widget.onNeedExtraDriverChanged,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Figma vehicle row (min-height 346×81); rescue expands for extra-driver toggle.
 class FigmaVehicleOptionCard extends StatelessWidget {
   const FigmaVehicleOptionCard({
     super.key,
@@ -334,6 +747,9 @@ class FigmaVehicleOptionCard extends StatelessWidget {
     this.rescueEyebrow,
     this.paymentNote,
     this.fallbackIcon,
+    this.needExtraDriver = false,
+    this.onNeedExtraDriverChanged,
+    this.showExtraDriversBadge = false,
   });
 
   final String title;
@@ -347,6 +763,9 @@ class FigmaVehicleOptionCard extends StatelessWidget {
   final String? rescueEyebrow;
   final String? paymentNote;
   final IconData? fallbackIcon;
+  final bool needExtraDriver;
+  final ValueChanged<bool>? onNeedExtraDriverChanged;
+  final bool showExtraDriversBadge;
 
   static const _cardShadows = [
     BoxShadow(
@@ -367,7 +786,10 @@ class FigmaVehicleOptionCard extends StatelessWidget {
           padding: const EdgeInsets.only(bottom: 18),
           child: Center(
             child: Container(
-              constraints: BoxConstraints(minHeight: 81, maxWidth: cardW),
+              constraints: BoxConstraints(
+                minHeight: isRescue ? 114 : 81,
+                maxWidth: cardW,
+              ),
               width: cardW,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(10),
@@ -382,91 +804,108 @@ class FigmaVehicleOptionCard extends StatelessWidget {
                       ? const BorderSide(color: figmaRideAccent, width: 2)
                       : BorderSide.none,
                 ),
-                child: InkWell(
-                  onTap: onTap,
-                  borderRadius: BorderRadius.circular(10),
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        _VehicleThumb(
-                          imageAsset: imageAsset,
-                          isRescue: isRescue,
-                          fallbackIcon: fallbackIcon,
-                        ),
-                        const SizedBox(width: 10),
-                        SizedBox(
-                          width: math.max(
-                            0.0,
-                            cardW -
-                                20 -
-                                figmaVehicleThumbWidth -
-                                10,
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (isRescue) ...[
-                                _RescueTitleBlock(
-                                  eyebrow: rescueEyebrow ?? '',
-                                  title: title,
-                                  priceText: priceText,
-                                ),
-                              ] else
-                                Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        title,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: GoogleFonts.poppins(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w500,
-                                          height: 24 / 16,
-                                          color: Colors.black,
-                                        ),
-                                      ),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InkWell(
+                        onTap: onTap,
+                        borderRadius: BorderRadius.circular(8),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            _VehicleThumb(
+                              imageAsset: imageAsset,
+                              isRescue: isRescue,
+                              fallbackIcon: fallbackIcon,
+                              showExtraDriversBadge:
+                                  isRescue && showExtraDriversBadge,
+                            ),
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              width: math.max(
+                                0.0,
+                                cardW -
+                                    20 -
+                                    figmaVehicleThumbWidth -
+                                    10,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (isRescue) ...[
+                                    _RescueTitleBlock(
+                                      eyebrow: rescueEyebrow ?? '',
+                                      title: title,
+                                      priceText: priceText,
                                     ),
+                                  ] else
+                                    Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: GoogleFonts.poppins(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.w500,
+                                              height: 24 / 16,
+                                              color: Colors.black,
+                                            ),
+                                          ),
+                                        ),
+                                        Text(
+                                          priceText,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: GoogleFonts.inter(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w500,
+                                            height: 19 / 16,
+                                            color: Colors.black,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  const SizedBox(height: 1),
+                                  _MetaRow(capacity: capacity, eta: eta),
+                                  if (paymentNote != null && !isRescue) ...[
+                                    const SizedBox(height: 5),
                                     Text(
-                                      priceText,
-                                      maxLines: 1,
+                                      paymentNote!,
+                                      maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
                                       style: GoogleFonts.inter(
-                                        fontSize: 16,
+                                        fontSize: cardW < 330 ? 12.5 : 14,
                                         fontWeight: FontWeight.w500,
-                                        height: 19 / 16,
-                                        color: Colors.black,
+                                        height: cardW < 330
+                                            ? 15 / 12.5
+                                            : 17 / 14,
+                                        letterSpacing: -0.42,
+                                        color: const Color(0xFF5B5B5B),
                                       ),
                                     ),
                                   ],
-                                ),
-                              const SizedBox(height: 1),
-                              _MetaRow(capacity: capacity, eta: eta),
-                              if (paymentNote != null && !isRescue) ...[
-                                const SizedBox(height: 5),
-                                Text(
-                                  paymentNote!,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: GoogleFonts.inter(
-                                    fontSize: cardW < 330 ? 12.5 : 14,
-                                    fontWeight: FontWeight.w500,
-                                    height:
-                                        cardW < 330 ? 15 / 12.5 : 17 / 14,
-                                    letterSpacing: -0.42,
-                                    color: const Color(0xFF5B5B5B),
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (isRescue) ...[
+                        const SizedBox(height: 5),
+                        _RescueExtraDriverFooter(
+                          needExtraDriver: needExtraDriver,
+                          onNeedExtraDriverChanged: onNeedExtraDriverChanged,
                         ),
                       ],
-                    ),
+                    ],
                   ),
                 ),
               ),
@@ -545,11 +984,13 @@ class _VehicleThumb extends StatelessWidget {
     required this.imageAsset,
     required this.isRescue,
     this.fallbackIcon,
+    this.showExtraDriversBadge = false,
   });
 
   final String imageAsset;
   final bool isRescue;
   final IconData? fallbackIcon;
+  final bool showExtraDriversBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -562,7 +1003,7 @@ class _VehicleThumb extends StatelessWidget {
       width: thumbW,
       height: thumbH,
       child: Stack(
-        clipBehavior: Clip.hardEdge,
+        clipBehavior: Clip.none,
         alignment: Alignment.center,
         children: [
           ClipRRect(
@@ -583,20 +1024,23 @@ class _VehicleThumb extends StatelessWidget {
               ),
             ),
           ),
-          if (isRescue)
+          if (isRescue && showExtraDriversBadge)
             Positioned(
-              left: 10,
+              left: 6,
               top: rescueBadgeTop,
               child: Container(
-                constraints: const BoxConstraints(minWidth: 68, minHeight: 13),
-                padding: const EdgeInsets.symmetric(horizontal: 8.3, vertical: 1.6),
+                constraints: BoxConstraints(maxWidth: thumbW - 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 1.6),
                 decoration: BoxDecoration(
                   color: const Color(0xFFB72F2F),
                   borderRadius: BorderRadius.circular(17.47),
                 ),
                 alignment: Alignment.center,
                 child: Text(
-                  'Extra Drivers 👍🏻',
+                  'Extra Drivers 👍',
+                  maxLines: 1,
+                  softWrap: false,
                   style: GoogleFonts.poppins(
                     fontSize: 8,
                     fontWeight: FontWeight.w500,
@@ -652,18 +1096,60 @@ class _MetaRow extends StatelessWidget {
   }
 }
 
-/// Single Material glyph — reads as one “>>”, not two squashed chevrons.
-class _FigmaSlideThumbChevrons extends StatelessWidget {
-  const _FigmaSlideThumbChevrons({required this.color});
+/// Thumb icon morphs from “>>” to check between 80%–100% slide progress.
+class _FigmaSlideThumbIcon extends StatelessWidget {
+  const _FigmaSlideThumbIcon({
+    required this.progress,
+    required this.color,
+  });
 
+  final double progress;
   final Color color;
+
+  static const double morphStart = 0.8;
+
+  double get _morphT {
+    if (progress <= morphStart) return 0;
+    final raw = (progress - morphStart) / (1 - morphStart);
+    return Curves.easeInOut.transform(raw.clamp(0.0, 1.0));
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Icon(
-      Icons.keyboard_double_arrow_right_rounded,
-      size: FigmaSlideToBookButton.thumbSize * 0.56,
-      color: color,
+    final t = _morphT;
+    final chevronSize = FigmaSlideToBookButton.thumbSize * 0.56;
+    final checkSize = FigmaSlideToBookButton.thumbSize * 0.5;
+
+    return SizedBox(
+      width: chevronSize,
+      height: chevronSize,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Opacity(
+            opacity: 1 - t,
+            child: Transform.scale(
+              scale: 1 - t * 0.4,
+              child: Icon(
+                Icons.keyboard_double_arrow_right_rounded,
+                size: chevronSize,
+                color: color,
+              ),
+            ),
+          ),
+          Opacity(
+            opacity: t,
+            child: Transform.scale(
+              scale: 0.6 + t * 0.4,
+              child: Icon(
+                Icons.check_rounded,
+                size: checkSize,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -697,10 +1183,12 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
   double _dragPosition = 0;
   bool _isCompleted = false;
   bool _thresholdHapticSent = false;
+  bool _iconMorphHapticSent = false;
   late AnimationController _animationController;
   late Animation<double> _resetAnimation;
 
   static const double _threshold = 0.85;
+  static const double _iconMorphStart = _FigmaSlideThumbIcon.morphStart;
 
   double _maxDrag(double innerW) => innerW - FigmaSlideToBookButton.thumbSize;
 
@@ -722,6 +1210,7 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
   void _onPanStart(DragStartDetails details) {
     if (!widget.enabled || _isCompleted) return;
     _thresholdHapticSent = false;
+    _iconMorphHapticSent = false;
   }
 
   void _onPanUpdate(DragUpdateDetails details, double maxDrag) {
@@ -729,7 +1218,12 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
     setState(() {
       _dragPosition = (_dragPosition + details.delta.dx).clamp(0.0, maxDrag);
     });
-    if (!_thresholdHapticSent && _dragPosition / maxDrag >= _threshold) {
+    final progress = _dragPosition / maxDrag;
+    if (!_iconMorphHapticSent && progress >= _iconMorphStart) {
+      _iconMorphHapticSent = true;
+      HapticFeedback.selectionClick();
+    }
+    if (!_thresholdHapticSent && progress >= _threshold) {
       _thresholdHapticSent = true;
       HapticFeedback.mediumImpact();
     }
@@ -738,6 +1232,7 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
   void _onPanEnd(DragEndDetails details, double maxDrag) {
     if (!widget.enabled || _isCompleted) return;
     _thresholdHapticSent = false;
+    _iconMorphHapticSent = false;
     if (maxDrag > 0 && _dragPosition / maxDrag >= _threshold) {
       _completeSlide(maxDrag);
     } else {
@@ -851,7 +1346,8 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
                               ],
                             ),
                             child: Center(
-                              child: _FigmaSlideThumbChevrons(
+                              child: _FigmaSlideThumbIcon(
+                                progress: progress,
                                 color: FigmaSlideToBookButton.trackColor,
                               ),
                             ),

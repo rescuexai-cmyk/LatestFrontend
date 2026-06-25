@@ -279,16 +279,43 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header with vehicle type
+          // Header with vehicle type / rescue badge
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-            child: Text(
-              _getVehicleTypeDisplay(widget.ride.type),
-              style: TextStyle(
-                color: _textGrey,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
+            child: Row(
+              children: [
+                if (widget.ride.isRescue) ...[
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFCF923D).withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      'Rescue',
+                      style: TextStyle(
+                        color: Color(0xFFCF923D),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: Text(
+                    widget.ride.isRescue
+                        ? _rescueOfferTitle(widget.ride)
+                        : _getVehicleTypeDisplay(widget.ride.type),
+                    style: const TextStyle(
+                      color: _textGrey,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           
@@ -450,6 +477,13 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
         ],
       ),
     );
+  }
+
+  String _rescueOfferTitle(RideOffer ride) {
+    if (ride.hasVehicle || ride.rescueMultiDriver) {
+      return 'Dual-driver rescue · ${ride.driversNeeded} needed';
+    }
+    return 'Bike rescue · single driver';
   }
 
   String _getVehicleTypeDisplay(String type) {

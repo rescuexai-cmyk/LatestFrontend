@@ -1698,7 +1698,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       final completeStops = rideBookingState.stops
           .where((s) => s.location != null)
           .toList();
-      final waypoints = completeStops.isNotEmpty
+      final stopsForApi = completeStops.isNotEmpty
           ? completeStops
               .map((s) => {
                     'lat': s.location!.latitude,
@@ -1716,7 +1716,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         dropAddress:
             rideBookingState.destinationAddress ?? 'Unknown destination',
         paymentMethod: _selectedPaymentMethod.toUpperCase(),
-        waypoints: waypoints,
+        stops: stopsForApi,
         vehicleType: rideBookingState.selectedCabTypeId,
       );
       debugPrint('API Response: $responseData');

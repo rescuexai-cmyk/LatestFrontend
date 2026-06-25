@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../core/services/api_client.dart';
+import 'personal_driver_onboarding_provider.dart';
 
 const Duration _offerFreshnessWindow = Duration(seconds: 90);
 const Set<String> _allowedIncomingStatuses = {'searching', 'pending'};
@@ -16,6 +17,13 @@ String? canonicalVehicleServiceType(String? raw) {
   if (raw == null) return null;
   var t = raw.toLowerCase().trim().replaceAll(RegExp(r'[\s\-]+'), '_');
   if (t.isEmpty) return null;
+
+  // Personal rescue driver (passenger leg — no vehicle)
+  if (t == 'personal_driver' ||
+      t.contains('personal_driver') ||
+      t.contains('personal_rescue')) {
+    return 'personal_driver';
+  }
 
   // Two-wheel / rescue (driver onboarding uses `motorbike`, riders use `bike_rescue`)
   if (t.contains('bike_rescue') ||
@@ -130,7 +138,49 @@ bool rideOfferMatchesDriverVehicle(
   return false;
 }
 
-const _knownVehicleFamilies = {'two_wheeler', 'auto', 'four_wheel_cab'};
+/// Personal rescue drivers only receive passenger-leg rescue offers (driver1).
+@visibleForTesting
+bool rescueOfferMatchesPersonalDriver(RideOffer offer) {
+  if (!offer.isRescueRequest) return false;
+  final role = offer.rescueRoleNeeded?.toLowerCase();
+  if (role == 'driver2') return false;
+  return true;
+}
+
+/// Ride-share drivers: rescue offers for vehicle/bike leg (driver2) or unassigned dual rescue.
+@visibleForTesting
+bool rescueOfferMatchesRideShareDriver(
+  RideOffer offer,
+  String? driverRegisteredType,
+) {
+  if (!offer.isRescueRequest) return true;
+  final role = offer.rescueRoleNeeded?.toLowerCase();
+  if (role == 'driver1') return false;
+  if (role == 'driver2') return true;
+  if (offer.hasVehicle) {
+    final canon = canonicalVehicleServiceType(driverRegisteredType);
+    return canon == 'bike_rescue' || canon == 'auto';
+  }
+  return true;
+}
+
+/// Whether an incoming offer should be shown to this driver profile.
+@visibleForTesting
+bool offerMatchesDriverProfile(
+  RideOffer offer, {
+  required bool isPersonalRescueDriver,
+  String? registeredVehicleType,
+}) {
+  if (isPersonalRescueDriver) {
+    return rescueOfferMatchesPersonalDriver(offer);
+  }
+  if (offer.isRescueRequest) {
+    return rescueOfferMatchesRideShareDriver(offer, registeredVehicleType);
+  }
+  return rideOfferMatchesDriverVehicle(offer.type, registeredVehicleType);
+}
+
+const _knownVehicleFamilies = {'two_wheeler', 'auto', 'four_wheel_cab', 'personal_driver'};
 
 String? _vehicleServiceFamily(String canon) {
   switch (canon) {
@@ -138,6 +188,8 @@ String? _vehicleServiceFamily(String canon) {
       return 'two_wheeler';
     case 'auto':
       return 'auto';
+    case 'personal_driver':
+      return 'personal_driver';
     case 'commercial_car':
     case 'cab_mini':
     case 'cab_xl':
@@ -265,6 +317,24 @@ class RideOffer {
   final DateTime createdAt;
   final String status;
 
+  /// Rescue-specific metadata (populated from realtime broadcast or accept API).
+  final bool isRescueRequest;
+  final bool rescueMultiDriver;
+  final int driversNeeded;
+  final bool hasVehicle;
+  final String? vehicleDropAddress;
+  /// Backend [RescueStatus] e.g. PENDING, DRIVER1_ACCEPTED, BOTH_ACCEPTED.
+  final String? rescueStatus;
+  /// Set after accept: `driver1` or `driver2`.
+  final String? rescueDriverRole;
+  /// Before accept: which rescue slot this broadcast targets (`driver1` / `driver2`).
+  final String? rescueRoleNeeded;
+  final String? partnerDriverId;
+  final String? partnerDriverName;
+  final String? partnerDriverPhone;
+  final String? userRideId;
+  final String? vehicleRideId;
+
   RideOffer({
     required this.id,
     required this.type,
@@ -285,9 +355,121 @@ class RideOffer {
     this.isGolden = false,
     required this.createdAt,
     this.status = 'pending',
+    this.isRescueRequest = false,
+    this.rescueMultiDriver = false,
+    this.driversNeeded = 1,
+    this.hasVehicle = false,
+    this.vehicleDropAddress,
+    this.rescueStatus,
+    this.rescueDriverRole,
+    this.rescueRoleNeeded,
+    this.partnerDriverId,
+    this.partnerDriverName,
+    this.partnerDriverPhone,
+    this.userRideId,
+    this.vehicleRideId,
   });
 
   bool get isCashPayment => paymentMethod.toLowerCase() == 'cash';
+
+  bool get isRescue => isRescueRequest;
+
+  bool get isWaitingForPartnerDriver =>
+      isRescue &&
+      hasVehicle &&
+      (rescueStatus?.toUpperCase() == 'DRIVER1_ACCEPTED');
+
+  bool get isRescueReadyAtPickup {
+    final s = rescueStatus?.toUpperCase();
+    return s == 'BOTH_ACCEPTED' ||
+        s == 'DRIVERS_EN_ROUTE' ||
+        s == 'DRIVERS_ARRIVED';
+  }
+
+  /// Ride id for [DriverActiveRideScreen] after OTP verification.
+  String? get linkedActiveRideId {
+    if (!isRescue) return id;
+    if (rescueDriverRole == 'driver2') {
+      return vehicleRideId ?? id;
+    }
+    return userRideId ?? id;
+  }
+
+  RideOffer copyWith({
+    String? id,
+    String? type,
+    double? earning,
+    String? pickupDistance,
+    String? pickupTime,
+    String? dropDistance,
+    String? dropTime,
+    String? pickupAddress,
+    String? dropAddress,
+    LatLng? pickupLocation,
+    LatLng? destinationLocation,
+    String? riderName,
+    String? riderPhone,
+    String? riderId,
+    String? otp,
+    String? paymentMethod,
+    bool? isGolden,
+    DateTime? createdAt,
+    String? status,
+    bool? isRescueRequest,
+    bool? rescueMultiDriver,
+    int? driversNeeded,
+    bool? hasVehicle,
+    String? vehicleDropAddress,
+    String? rescueStatus,
+    String? rescueDriverRole,
+    String? rescueRoleNeeded,
+    String? partnerDriverId,
+    String? partnerDriverName,
+    String? partnerDriverPhone,
+    String? userRideId,
+    String? vehicleRideId,
+  }) {
+    return RideOffer(
+      id: id ?? this.id,
+      type: type ?? this.type,
+      earning: earning ?? this.earning,
+      pickupDistance: pickupDistance ?? this.pickupDistance,
+      pickupTime: pickupTime ?? this.pickupTime,
+      dropDistance: dropDistance ?? this.dropDistance,
+      dropTime: dropTime ?? this.dropTime,
+      pickupAddress: pickupAddress ?? this.pickupAddress,
+      dropAddress: dropAddress ?? this.dropAddress,
+      pickupLocation: pickupLocation ?? this.pickupLocation,
+      destinationLocation: destinationLocation ?? this.destinationLocation,
+      riderName: riderName ?? this.riderName,
+      riderPhone: riderPhone ?? this.riderPhone,
+      riderId: riderId ?? this.riderId,
+      otp: otp ?? this.otp,
+      paymentMethod: paymentMethod ?? this.paymentMethod,
+      isGolden: isGolden ?? this.isGolden,
+      createdAt: createdAt ?? this.createdAt,
+      status: status ?? this.status,
+      isRescueRequest: isRescueRequest ?? this.isRescueRequest,
+      rescueMultiDriver: rescueMultiDriver ?? this.rescueMultiDriver,
+      driversNeeded: driversNeeded ?? this.driversNeeded,
+      hasVehicle: hasVehicle ?? this.hasVehicle,
+      vehicleDropAddress: vehicleDropAddress ?? this.vehicleDropAddress,
+      rescueStatus: rescueStatus ?? this.rescueStatus,
+      rescueDriverRole: rescueDriverRole ?? this.rescueDriverRole,
+      rescueRoleNeeded: rescueRoleNeeded ?? this.rescueRoleNeeded,
+      partnerDriverId: partnerDriverId ?? this.partnerDriverId,
+      partnerDriverName: partnerDriverName ?? this.partnerDriverName,
+      partnerDriverPhone: partnerDriverPhone ?? this.partnerDriverPhone,
+      userRideId: userRideId ?? this.userRideId,
+      vehicleRideId: vehicleRideId ?? this.vehicleRideId,
+    );
+  }
+
+  static bool _parseBool(dynamic value) {
+    if (value is bool) return value;
+    if (value == 1 || value == '1' || value == 'true') return true;
+    return false;
+  }
 
   /// Parse ride offer from backend response.
   ///
@@ -412,6 +594,33 @@ class RideOffer {
             'pending')
         .toString()
         .toLowerCase();
+
+    final rideType = (json['rideType'] ?? json['ride_type'] ?? '')
+        .toString()
+        .toUpperCase();
+    final isRescueRequest = _parseBool(json['isRescueRequest']) ||
+        _parseBool(json['is_rescue_request']) ||
+        rideType == 'RESCUE';
+    final rescueMultiDriver = _parseBool(json['rescueMultiDriver']) ||
+        _parseBool(json['rescue_multi_driver']);
+    final hasVehicle = _parseBool(json['hasVehicle']) ||
+        _parseBool(json['has_vehicle']) ||
+        rescueMultiDriver;
+    final driversNeeded = (json['driversNeeded'] ?? json['drivers_needed']) is num
+        ? (json['driversNeeded'] ?? json['drivers_needed']).toInt()
+        : (hasVehicle ? 2 : 1);
+    final vehicleDropAddress =
+        json['vehicleDropAddress'] ?? json['vehicle_drop_address'];
+    final rescueStatusRaw = json['rescueStatus'] ?? json['rescue_status'];
+    final rescueStatus = rescueStatusRaw?.toString();
+    final rescueRoleNeededRaw = json['rescueRoleNeeded'] ??
+        json['rescue_role_needed'] ??
+        json['requiredRescueRole'] ??
+        json['required_rescue_role'] ??
+        json['driverRoleNeeded'] ??
+        json['driver_role_needed'];
+    final rescueRoleNeeded = rescueRoleNeededRaw?.toString();
+
     final riderPhone = (json['rider_phone'] ??
             json['riderPhone'] ??
             json['passenger_phone'] ??
@@ -446,8 +655,80 @@ class RideOffer {
       isGolden: json['is_golden'] ?? false,
       createdAt: createdAt,
       status: status,
+      isRescueRequest: isRescueRequest,
+      rescueMultiDriver: rescueMultiDriver,
+      driversNeeded: driversNeeded,
+      hasVehicle: hasVehicle,
+      vehicleDropAddress: vehicleDropAddress?.toString(),
+      rescueStatus: rescueStatus,
+      rescueRoleNeeded: rescueRoleNeeded,
+      userRideId: json['userRideId'] ?? json['user_ride_id']?.toString(),
+      vehicleRideId:
+          json['vehicleRideId'] ?? json['vehicle_ride_id']?.toString(),
     );
   }
+}
+
+/// Applies rescue accept / refresh API payload onto a local [RideOffer].
+RideOffer mergeRescuePayloadIntoOffer(
+  RideOffer offer,
+  Map<String, dynamic> rescue, {
+  required String driverId,
+}) {
+  final status = (rescue['status'] ?? '').toString().toUpperCase();
+  final driver1Id = rescue['driver1Id'] ?? rescue['driver1_id'];
+  final driver2Id = rescue['driver2Id'] ?? rescue['driver2_id'];
+  final driver1 = rescue['driver1'] is Map
+      ? Map<String, dynamic>.from(rescue['driver1'] as Map)
+      : null;
+  final driver2 = rescue['driver2'] is Map
+      ? Map<String, dynamic>.from(rescue['driver2'] as Map)
+      : null;
+
+  String? role;
+  if (driver1Id?.toString() == driverId) {
+    role = 'driver1';
+  } else if (driver2Id?.toString() == driverId) {
+    role = 'driver2';
+  }
+
+  String? partnerName;
+  String? partnerPhone;
+  String? partnerId;
+  if (role == 'driver1' && driver2 != null) {
+    partnerId = driver2['id']?.toString();
+    partnerName = _driverDisplayName(driver2);
+    partnerPhone = driver2['phone']?.toString();
+  } else if (role == 'driver2' && driver1 != null) {
+    partnerId = driver1['id']?.toString();
+    partnerName = _driverDisplayName(driver1);
+    partnerPhone = driver1['phone']?.toString();
+  }
+
+  return offer.copyWith(
+    isRescueRequest: true,
+    rescueStatus: status.isNotEmpty ? status : offer.rescueStatus,
+    rescueDriverRole: role ?? offer.rescueDriverRole,
+    hasVehicle: rescue['hasVehicle'] == true || offer.hasVehicle,
+    rescueMultiDriver:
+        rescue['hasVehicle'] == true || offer.rescueMultiDriver,
+    driversNeeded: (rescue['hasVehicle'] == true) ? 2 : 1,
+    vehicleDropAddress: rescue['vehicleDropAddress']?.toString() ??
+        offer.vehicleDropAddress,
+    partnerDriverId: partnerId ?? offer.partnerDriverId,
+    partnerDriverName: partnerName ?? offer.partnerDriverName,
+    partnerDriverPhone: partnerPhone ?? offer.partnerDriverPhone,
+    userRideId: rescue['userRideId']?.toString() ?? offer.userRideId,
+    vehicleRideId: rescue['vehicleRideId']?.toString() ?? offer.vehicleRideId,
+    otp: rescue['rescueOtp']?.toString() ?? offer.otp,
+  );
+}
+
+String _driverDisplayName(Map<String, dynamic> driver) {
+  final first = driver['firstName']?.toString().trim() ?? '';
+  final last = driver['lastName']?.toString().trim() ?? '';
+  final combined = '$first $last'.trim();
+  return combined.isNotEmpty ? combined : 'Partner driver';
 }
 
 /// State for driver rides - Single Offer Card Architecture
@@ -531,8 +812,9 @@ class DriverRidesState {
 class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
   final ApiClient _apiClient;
 
-  /// From [driverOnboardingProvider]. When null/empty we do not filter (legacy behavior).
+  /// From [driverOnboardingProvider] or personal driver flow.
   String? _registeredDriverVehicleType;
+  bool _isPersonalRescueDriver = false;
 
   DriverRidesNotifier(this._apiClient) : super(DriverRidesState());
 
@@ -542,6 +824,15 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
     if (next == _registeredDriverVehicleType) return;
     _registeredDriverVehicleType = next;
     debugPrint('🚕 Driver rides filter vehicle: $_registeredDriverVehicleType');
+  }
+
+  void setPersonalRescueDriverMode(bool enabled) {
+    if (_isPersonalRescueDriver == enabled) return;
+    _isPersonalRescueDriver = enabled;
+    if (enabled) {
+      _registeredDriverVehicleType = PersonalDriverOnboardingState.vehicleTypeId;
+    }
+    debugPrint('🚕 Personal rescue driver mode: $_isPersonalRescueDriver');
   }
 
   bool _isOfferStatusValid(RideOffer offer) {
@@ -619,6 +910,17 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
     if (!_isOfferValid(offer)) {
       debugPrint(
           '🧹 Ignoring stale/invalid offer ${offer.id} (status=${offer.status}, age=${DateTime.now().difference(offer.createdAt).inSeconds}s)');
+      return false;
+    }
+
+    // Skip offers that don't match this driver's profile (vehicle class / rescue role).
+    if (!offerMatchesDriverProfile(
+      offer,
+      isPersonalRescueDriver: _isPersonalRescueDriver,
+      registeredVehicleType: _registeredDriverVehicleType,
+    )) {
+      debugPrint(
+          '🛑 Offer ${offer.id} filtered (type=${offer.type}, rescue=${offer.isRescueRequest}, role=${offer.rescueRoleNeeded}, personal=$_isPersonalRescueDriver)');
       return false;
     }
 
@@ -770,6 +1072,135 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
         dismissedOfferIds: newDismissedIds,
       );
     }
+  }
+
+  /// Accept an incoming offer — routes to rescue or standard ride API.
+  Future<bool> acceptOffer(RideOffer offer, {required String driverId}) async {
+    if (offer.isRescue) {
+      return acceptRescueOffer(offer, driverId: driverId);
+    }
+    return acceptRide(offer.id, driverId: driverId);
+  }
+
+  /// Accept a rescue request as an assigned driver (driver1 and/or driver2).
+  Future<bool> acceptRescueOffer(
+    RideOffer offer, {
+    required String driverId,
+  }) async {
+    state = state.copyWith(isLoading: true, error: null);
+
+    try {
+      final response = await _apiClient.acceptRescueRequest(offer.id);
+
+      if (response['success'] == true) {
+        final rescueRaw = response['data'];
+        final rescue = rescueRaw is Map
+            ? Map<String, dynamic>.from(rescueRaw as Map)
+            : <String, dynamic>{};
+
+        var acceptedRide = mergeRescuePayloadIntoOffer(
+          offer,
+          rescue,
+          driverId: driverId,
+        );
+
+        debugPrint(
+          '✅ Rescue ${offer.id} accepted as ${acceptedRide.rescueDriverRole} '
+          '(status=${acceptedRide.rescueStatus})',
+        );
+
+        state = DriverRidesState(
+          activeOffer: null,
+          pendingOffers: Queue<RideOffer>(),
+          dismissedOfferIds: state.dismissedOfferIds,
+          seenOfferIds: state.seenOfferIds,
+          isLoading: false,
+          error: null,
+          acceptedRide: acceptedRide,
+        );
+
+        if (acceptedRide.pickupLocation != null) {
+          try {
+            await _apiClient.updateDriverLocation(
+              driverId,
+              acceptedRide.pickupLocation!.latitude,
+              acceptedRide.pickupLocation!.longitude,
+            );
+          } catch (e) {
+            debugPrint('⚠️ Failed to update driver location after rescue accept: $e');
+          }
+        }
+
+        return true;
+      }
+
+      final code = response['code'] as String?;
+      String errorMessage;
+
+      if (code == 'ALREADY_ACCEPTED') {
+        errorMessage = response['message']?.toString() ??
+            'This rescue has already been fully assigned';
+        removeRide(offer.id);
+      } else if (code == 'FORBIDDEN') {
+        errorMessage = response['message']?.toString() ??
+            'You are not authorized to accept rescue requests';
+      } else {
+        errorMessage =
+            response['message']?.toString() ?? 'Failed to accept rescue';
+      }
+
+      state = state.copyWith(isLoading: false, error: errorMessage);
+      return false;
+    } catch (e) {
+      debugPrint('❌ Error accepting rescue: $e');
+      state = state.copyWith(
+        isLoading: false,
+        error: 'Failed to accept rescue: $e',
+      );
+      return false;
+    }
+  }
+
+  /// Refresh active rescue job from GET /api/rescue/:id (polling while waiting).
+  Future<bool> refreshAcceptedRescue({required String driverId}) async {
+    final current = state.acceptedRide;
+    if (current == null || !current.isRescue) return false;
+
+    try {
+      final response = await _apiClient.getRescueRequest(current.id);
+      if (response['success'] != true) return false;
+      final rescueRaw = response['data'];
+      if (rescueRaw is! Map) return false;
+
+      final updated = mergeRescuePayloadIntoOffer(
+        current,
+        Map<String, dynamic>.from(rescueRaw as Map),
+        driverId: driverId,
+      );
+      state = state.copyWith(acceptedRide: updated);
+      return true;
+    } catch (e) {
+      debugPrint('⚠️ Rescue refresh failed: $e');
+      return false;
+    }
+  }
+
+  /// Update accepted rescue after a driver action (en route, arrived, OTP).
+  void updateAcceptedRescue(RideOffer updated) {
+    if (state.acceptedRide?.id != updated.id) return;
+    state = state.copyWith(acceptedRide: updated);
+  }
+
+  /// Transition from rescue pre-OTP job to linked active ride after OTP verify.
+  void promoteRescueToLinkedRide(RideOffer rescueOffer) {
+    final linkedId = rescueOffer.linkedActiveRideId;
+    if (linkedId == null || linkedId.isEmpty) return;
+
+    final promoted = rescueOffer.copyWith(
+      id: linkedId,
+      status: 'ride_started',
+    );
+    state = state.copyWith(acceptedRide: promoted);
   }
 
   /// Accept a ride as a driver

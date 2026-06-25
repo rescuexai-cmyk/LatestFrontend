@@ -8,6 +8,7 @@ import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import '../../providers/personal_driver_onboarding_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
@@ -513,12 +514,36 @@ class _VehicleTypeSelectionPageState extends ConsumerState<_VehicleTypeSelection
       'icon': Icons.two_wheeler,
       'color': Color(0xFFFF9800),
     },
+    {
+      'id': PersonalDriverOnboardingState.vehicleTypeId,
+      'name': 'Rescue Driver',
+      'description':
+          'Drive a car during vehicle rescue — carry the rider while a bike partner moves their vehicle. Aadhaar & driving license only.',
+      'icon': Icons.emergency,
+      'color': Color(0xFFCF923D),
+    },
   ];
   @override
   void dispose() {
     _referralController.dispose();
     super.dispose();
   }
+
+  Future<void> _onContinue() async {
+    if (_selectedVehicleType == null) return;
+
+    if (_selectedVehicleType == PersonalDriverOnboardingState.vehicleTypeId) {
+      await ref
+          .read(personalDriverOnboardingProvider.notifier)
+          .setDriverAppMode(PersonalDriverOnboardingNotifier.modePersonalRescue);
+      if (!mounted) return;
+      context.push(AppRoutes.personalDriverOnboarding);
+      return;
+    }
+
+    widget.onContinue();
+  }
+
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
@@ -606,7 +631,11 @@ class _VehicleTypeSelectionPageState extends ConsumerState<_VehicleTypeSelection
             return GestureDetector(
               onTap: () {
                 setState(() => _selectedVehicleType = vehicle['id'] as String);
-                ref.read(driverOnboardingProvider.notifier).setVehicleType(vehicle['id'] as String);
+                if (vehicle['id'] != PersonalDriverOnboardingState.vehicleTypeId) {
+                  ref
+                      .read(driverOnboardingProvider.notifier)
+                      .setVehicleType(vehicle['id'] as String);
+                }
               },
               child: Container(
                 margin: const EdgeInsets.only(bottom: 12),
@@ -672,7 +701,7 @@ class _VehicleTypeSelectionPageState extends ConsumerState<_VehicleTypeSelection
             width: double.infinity,
             height: 56,
             child: ElevatedButton(
-              onPressed: _selectedVehicleType != null ? widget.onContinue : null,
+              onPressed: _selectedVehicleType != null ? _onContinue : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF1A1A1A),
                 foregroundColor: Colors.white,

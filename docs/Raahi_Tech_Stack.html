@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Raahi — Tech Stack</title>
+  <style>
+    @page { margin: 2cm; size: A4; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #1a1a1a;
+      line-height: 1.5;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+    h1 {
+      font-size: 28px;
+      margin: 0 0 8px;
+      color: #1a1a1a;
+    }
+    .subtitle {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 32px;
+    }
+    h2 {
+      font-size: 18px;
+      margin: 28px 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 2px solid #cf923d;
+      color: #1a1a1a;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 16px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid #e0e0e0;
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f6efe4;
+      font-weight: 600;
+      width: 35%;
+    }
+    td strong { color: #1a1a1a; }
+    .flow {
+      background: #f9f8f6;
+      border: 1px solid #e8e0d4;
+      border-radius: 8px;
+      padding: 16px 18px;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .flow strong { color: #cf923d; }
+    .footer {
+      margin-top: 40px;
+      font-size: 12px;
+      color: #888;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>Raahi — Tech Stack</h1>
+  <p class="subtitle">Frontend to backend overview for the team · June 2026</p>
+
+  <h2>Mobile App (Frontend Repo)</h2>
+  <table>
+    <tr><th>Layer</th><th>Technology</th></tr>
+    <tr><td>App framework</td><td><strong>Flutter</strong> (Dart 3+)</td></tr>
+    <tr><td>Android native</td><td><strong>Kotlin</strong> + Java 17 (Gradle)</td></tr>
+    <tr><td>iOS native</td><td><strong>Swift</strong> (Flutter iOS runner)</td></tr>
+    <tr><td>State management</td><td><strong>Riverpod</strong></td></tr>
+    <tr><td>Navigation</td><td><strong>go_router</strong></td></tr>
+    <tr><td>UI</td><td>Material Design + Google Fonts</td></tr>
+  </table>
+
+  <h2>Frontend Integrations</h2>
+  <table>
+    <tr><th>Service</th><th>Technology</th></tr>
+    <tr><td>REST APIs</td><td><strong>Dio</strong> → api.raahionrescue.com</td></tr>
+    <tr><td>Live updates</td><td><strong>Socket.io</strong> + <strong>SSE</strong> (ride offers, status)</td></tr>
+    <tr><td>Maps &amp; location</td><td><strong>Google Maps</strong>, Geolocator, Geocoding</td></tr>
+    <tr><td>Authentication</td><td><strong>Firebase Auth</strong> (phone OTP), Google Sign-In, Truecaller</td></tr>
+    <tr><td>Push notifications</td><td><strong>Firebase Cloud Messaging (FCM)</strong></td></tr>
+    <tr><td>Payments</td><td><strong>Razorpay</strong> + UPI</td></tr>
+    <tr><td>Local storage</td><td>SharedPreferences + Flutter Secure Storage</td></tr>
+    <tr><td>Documents / media</td><td>image_picker, file_picker</td></tr>
+  </table>
+
+  <h2>Backend (Deployed — Separate Repo)</h2>
+  <table>
+    <tr><th>Layer</th><th>Technology</th></tr>
+    <tr><td>Language</td><td><strong>Node.js + TypeScript</strong></td></tr>
+    <tr><td>Architecture</td><td><strong>Microservices</strong> behind API Gateway</td></tr>
+    <tr><td>Services</td><td>Auth · User · Driver · Ride · Pricing · Notification · Realtime · Admin</td></tr>
+    <tr><td>Realtime</td><td><strong>Socket.io</strong> + <strong>SSE</strong> (EventBus, H3 geo matching)</td></tr>
+    <tr><td>Database</td><td><strong>PostgreSQL</strong></td></tr>
+    <tr><td>Infrastructure</td><td><strong>Nginx</strong> reverse proxy · cloud deployment</td></tr>
+    <tr><td>Auth bridge</td><td>Firebase phone token → backend JWT</td></tr>
+  </table>
+
+  <h2>Microservices (Ports)</h2>
+  <table>
+    <tr><th>Service</th><th>Port</th></tr>
+    <tr><td>API Gateway</td><td>3000</td></tr>
+    <tr><td>Auth Service</td><td>5001</td></tr>
+    <tr><td>User Service</td><td>5002</td></tr>
+    <tr><td>Driver Service</td><td>5003</td></tr>
+    <tr><td>Ride Service</td><td>5004</td></tr>
+    <tr><td>Pricing Service</td><td>5005</td></tr>
+    <tr><td>Notification Service</td><td>5006</td></tr>
+    <tr><td>Realtime / WebSocket Service</td><td>5007</td></tr>
+    <tr><td>Admin Service</td><td>5008</td></tr>
+  </table>
+
+  <h2>End-to-End Flow</h2>
+  <div class="flow">
+    <strong>Flutter app</strong> → REST (Dio) + Realtime (Socket.io / SSE) →
+    <strong>Node.js / TypeScript microservices</strong> → <strong>PostgreSQL</strong>,
+    with <strong>Firebase</strong> for OTP &amp; push, and <strong>Google Maps / Razorpay</strong> on the client.
+  </div>
+
+  <p class="footer">Raahi Cab Services · Internal team reference</p>
+</body>
+</html>

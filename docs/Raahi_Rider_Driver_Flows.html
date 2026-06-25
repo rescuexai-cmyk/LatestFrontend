@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Raahi — Rider & Driver Flow Diagrams</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    @page { size: A3 landscape; margin: 10mm; }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #1a1a1a;
+      margin: 0;
+      padding: 16px 18px 32px;
+      background: #fff;
+    }
+    h1 {
+      color: #CF923D;
+      font-size: 20pt;
+      margin: 0 0 6px;
+      border-bottom: 3px solid #CF923D;
+      padding-bottom: 8px;
+    }
+    .meta {
+      font-size: 9.5pt;
+      color: #555;
+      margin-bottom: 16px;
+    }
+    h2 {
+      font-size: 14pt;
+      color: #2E2C2A;
+      margin: 0 0 10px;
+    }
+    .page {
+      page-break-after: always;
+      width: 100%;
+      max-width: 100%;
+    }
+    .page:last-of-type { page-break-after: auto; }
+    .diagram-wrap {
+      width: 100%;
+      max-width: 100%;
+      overflow: visible;
+      background: #fafafa;
+      border: 1px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .diagram-scale {
+      width: 100%;
+      max-width: 100%;
+      display: block;
+    }
+    .diagram-scale svg {
+      width: 100% !important;
+      height: auto !important;
+      max-width: 100% !important;
+    }
+    .legend {
+      font-size: 8.5pt;
+      color: #666;
+      margin-top: 10px;
+      line-height: 1.45;
+    }
+    footer {
+      margin-top: 16px;
+      text-align: center;
+      font-size: 8.5pt;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+<div class="page">
+  <h1>Raahi App — Complete Navigation Flows</h1>
+  <div class="meta">
+    Package: <strong>com.rhi.raahi</strong> · Flutter + GoRouter · Generated June 2026<br>
+    One complete diagram per role: every screen, route, and major tap action from app start.
+  </div>
+  <footer>Page 1 of 3 · Raahi · LatestFrontend</footer>
+</div>
+
+<div class="page">
+  <h2>1. Rider Flow — Complete Diagram</h2>
+  <div class="diagram-wrap">
+    <div class="diagram-scale" id="rider-scale">
+      <pre class="mermaid">
+flowchart TD
+    START([App Launch]) --> SPLASH[Splash]
+    SPLASH --> HEALTH{Backend OK?}
+    HEALTH -->|No| ERR[Connection Error]
+    HEALTH -->|Yes| INIT{First setup?}
+    INIT -->|No server| SRV["/settings/server"]
+    INIT -->|No welcome| WEL["/welcome-onboarding"]
+    INIT -->|Ready| LOGIN["/login"]
+
+    LOGIN --> L_OTP[Get OTP inline]
+    LOGIN --> L_GOO[Google Sign-In]
+    LOGIN --> L_TC[Truecaller]
+    L_OTP -->|New user| NAME["/name entry"]
+    L_OTP -->|Returning| HOME
+    L_GOO --> PHONE{Needs phone?}
+    L_TC --> PHONE
+    PHONE -->|Yes| PLINK["/phone-number link"]
+    PHONE -->|New| NAME
+    PHONE -->|Existing| HOME
+    NAME --> HOME
+
+    HOME["/ Home gateway"]
+    HOME -->|Find a Ride| SVC
+    HOME -->|Banner searching| SRCH
+    HOME -->|Banner in-ride| LIVE
+    HOME -->|Switch Account| SHEET1[[Switch sheet]]
+    SHEET1 -->|Logout| LOGIN
+
+    SVC["/services hub"]
+    SVC -->|Profile| PROF
+    SVC -->|Service/search| FT
+    SVC -->|Schedule Later| FT
+    SVC -->|Active ride| LIVE
+    SVC -->|Pending search| SRCH
+
+    FT["/booking/find-trip"]
+    FT -->|Book Now| PAY
+    FT -->|Rescue toggle/i| FT
+    FT -->|Drawer Home| HOME
+    FT -->|Drawer Rides| HIST
+    FT -->|Drawer Pay/Help| FT
+    FT -->|Drawer Profile| PROF
+    FT -->|Back| SVC
+
+    PAY["/booking/payment"]
+    PAY -->|Slide confirm| SRCH
+    PAY -->|Back| FT
+
+    SRCH["/booking/searching"]
+    SRCH -->|Driver found| LIVE
+    SRCH -->|Cancel| FT
+    SRCH -->|Minimize| SVC
+
+    LIVE["/booking/driver-assigned"]
+    LIVE -->|Chat| CHAT[[Chat sheet]]
+    LIVE -->|Complete| RATE[[Rating sheet]]
+    RATE --> HOME
+    LIVE -->|Cancel| HOME
+    LIVE -->|Back| SVC
+
+    PROF["/profile"]
+    PROF --> HIST
+    PROF -->|Saved/Settings| PROF
+    PROF -->|Switch Driver| HOME
+    PROF -->|Logout| LOGIN
+
+    HIST["/history"]
+    HIST --> RD["/ride/:id details"]
+
+    PUSH([Push tap]) --> LIVE
+    PUSH --> SVC
+    PUSH --> HIST
+
+    classDef route fill:#FFF9F5,stroke:#CF923D,stroke-width:2px
+    classDef sheet fill:#E8F4FD,stroke:#4A90D9,stroke-width:1px
+    classDef gate fill:#F4F0EB,stroke:#2E2C2A,stroke-width:1px
+    class HOME,SVC,FT,PAY,SRCH,LIVE,PROF,HIST,RD,LOGIN,NAME route
+    class SHEET1,CHAT,RATE sheet
+    class HEALTH,INIT,PHONE gate
+      </pre>
+    </div>
+  </div>
+  <p class="legend">
+    <strong>Golden path:</strong> / → /services → /booking/find-trip → /booking/payment → /booking/searching → /booking/driver-assigned → [rating] → /
+  </p>
+  <footer>Page 2 of 3 · Rider flow</footer>
+</div>
+
+<div class="page">
+  <h2>2. Driver Flow — Complete Diagram</h2>
+  <div class="diagram-wrap">
+    <div class="diagram-scale" id="driver-scale">
+      <pre class="mermaid">
+flowchart TD
+    START([App Launch]) --> SPLASH[Splash]
+    SPLASH --> LOGIN["/login or /"]
+    LOGIN --> HOME["/ Home gateway"]
+    HOME -->|Open Drivers App| GATE{Onboarding?}
+
+    GATE -->|Not started| ONB
+    GATE -->|Docs pending| WEL
+    GATE -->|Verified| DH
+
+    ONB["/driver/onboarding"]
+    ONB --> S1[Language]
+    S1 --> S2[Vehicle]
+    S2 --> S3[Personal info]
+    S3 --> S4[Documents]
+    S4 --> S5[Verification]
+    S5 --> WEL
+    ONB -->|Update mode| DOC
+
+    WEL["/driver/welcome"]
+    WEL -->|Upload docs| PICK[[Picker sheet]]
+    WEL -->|Verified| DH
+
+    DOC["/driver/documents"]
+    DOC -->|Re-upload| ONB
+    DOC --> DH
+
+    DH["/driver home"]
+    DH -->|Accept ride| AR
+    DH -->|Subscription| SUB["/subscription-pay"]
+    SUB --> DH
+    DH -->|Switch Rider| RIDER["/services"]
+    DH -->|Drawer History| RH[[History sheet]]
+    DH -->|Drawer Earnings| ER[[Earnings sheet]]
+    DH -->|Drawer Docs| ONB
+    DH -->|Drawer Settings| SET[[Settings sheet]]
+    DH -->|Logout| LOGIN
+
+    AR["/driver/active-ride"]
+    AR -->|Chat| CHAT[[Chat sheet]]
+    AR -->|Complete| SUM[[Summary modal]]
+    SUM --> DH
+    AR -->|Cancel| DH
+
+    PUSH([Push tap]) --> DH
+    PUSH --> AR
+    PUSH --> WEL
+
+    PROF["/profile"] --> HOME
+
+    classDef route fill:#FFF9F5,stroke:#CF923D,stroke-width:2px
+    classDef sheet fill:#E8F4FD,stroke:#4A90D9,stroke-width:1px
+    classDef gate fill:#F4F0EB,stroke:#2E2C2A,stroke-width:1px
+    class ONB,WEL,DOC,DH,AR,SUB,LOGIN,HOME,RIDER route
+    class PICK,RH,ER,SET,CHAT,SUM sheet
+    class GATE gate
+      </pre>
+    </div>
+  </div>
+  <p class="legend">
+    <strong>Golden path:</strong> / → [onboarding?] → /driver/welcome? → /driver → /driver/active-ride → /driver
+  </p>
+  <footer>Page 3 of 3 · Driver flow · Raahi · LatestFrontend</footer>
+</div>
+
+<script>
+  // A3 landscape printable width ≈ 1500px at 96dpi minus margins
+  const MAX_DIAGRAM_PX = 1380;
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'default',
+    flowchart: {
+      useMaxWidth: true,
+      htmlLabels: true,
+      curve: 'basis',
+      padding: 10,
+      nodeSpacing: 22,
+      rankSpacing: 32
+    },
+    themeVariables: {
+      fontSize: '10px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif'
+    }
+  });
+
+  function fitDiagram(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const svg = container.querySelector('svg');
+    if (!svg) return;
+    svg.setAttribute('width', '100%');
+    svg.removeAttribute('height');
+    svg.style.maxWidth = '100%';
+    svg.style.height = 'auto';
+  }
+
+  window.addEventListener('load', async () => {
+    await mermaid.run({ querySelector: '.mermaid' });
+    fitDiagram('rider-scale');
+    fitDiagram('driver-scale');
+    document.body.setAttribute('data-ready', 'true');
+  });
+</script>
+</body>
+</html>
