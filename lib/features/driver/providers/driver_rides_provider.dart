@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../core/services/api_client.dart';
+import '../../../core/models/ride_stop.dart';
 import 'personal_driver_onboarding_provider.dart';
 
 const Duration _offerFreshnessWindow = Duration(seconds: 90);
@@ -103,6 +104,22 @@ String? rideIdFromRealtimePayload(Map<String, dynamic> data) {
   if (id == null) return null;
   final normalized = id.toString().trim();
   return normalized.isEmpty ? null : normalized;
+}
+
+/// True when [rideId] refers to the same trip as [offer] (handles rescue leg ids).
+bool rideOfferMatchesId(RideOffer? offer, String? rideId) {
+  if (offer == null || rideId == null || rideId.isEmpty) return false;
+  final normalized = rideId.trim();
+  final candidates = <String>{
+    offer.id,
+    if (offer.userRideId != null && offer.userRideId!.isNotEmpty)
+      offer.userRideId!,
+    if (offer.vehicleRideId != null && offer.vehicleRideId!.isNotEmpty)
+      offer.vehicleRideId!,
+    if (offer.linkedActiveRideId != null && offer.linkedActiveRideId!.isNotEmpty)
+      offer.linkedActiveRideId!,
+  };
+  return candidates.contains(normalized);
 }
 
 /// Frontend guard: only enqueue offers that match the driver's registered vehicle class.
@@ -306,6 +323,7 @@ class RideOffer {
   final String dropTime;
   final String pickupAddress;
   final String dropAddress;
+  final List<RideStop> stops;
   final LatLng? pickupLocation;
   final LatLng? destinationLocation;
   final String? riderName;
@@ -345,6 +363,7 @@ class RideOffer {
     required this.dropTime,
     required this.pickupAddress,
     required this.dropAddress,
+    this.stops = const [],
     this.pickupLocation,
     this.destinationLocation,
     this.riderName,
@@ -373,6 +392,10 @@ class RideOffer {
   bool get isCashPayment => paymentMethod.toLowerCase() == 'cash';
 
   bool get isRescue => isRescueRequest;
+
+  bool get hasIntermediateStops => stops.isNotEmpty;
+
+  int get stopCount => stops.length;
 
   bool get isWaitingForPartnerDriver =>
       isRescue &&
@@ -405,6 +428,7 @@ class RideOffer {
     String? dropTime,
     String? pickupAddress,
     String? dropAddress,
+    List<RideStop>? stops,
     LatLng? pickupLocation,
     LatLng? destinationLocation,
     String? riderName,
@@ -439,6 +463,7 @@ class RideOffer {
       dropTime: dropTime ?? this.dropTime,
       pickupAddress: pickupAddress ?? this.pickupAddress,
       dropAddress: dropAddress ?? this.dropAddress,
+      stops: stops ?? this.stops,
       pickupLocation: pickupLocation ?? this.pickupLocation,
       destinationLocation: destinationLocation ?? this.destinationLocation,
       riderName: riderName ?? this.riderName,
@@ -485,23 +510,8 @@ class RideOffer {
         json['destination_location'] ??
         json['drop_location'];
 
-    // Parse pickup location
-    LatLng? pickupLatLng;
-    if (pickupLoc is Map) {
-      pickupLatLng = LatLng(
-        (pickupLoc['lat'] ?? pickupLoc['latitude'] ?? 0).toDouble(),
-        (pickupLoc['lng'] ?? pickupLoc['longitude'] ?? 0).toDouble(),
-      );
-    }
-
-    // Parse drop location
-    LatLng? dropLatLng;
-    if (dropLoc is Map) {
-      dropLatLng = LatLng(
-        (dropLoc['lat'] ?? dropLoc['latitude'] ?? 0).toDouble(),
-        (dropLoc['lng'] ?? dropLoc['longitude'] ?? 0).toDouble(),
-      );
-    }
+    final pickupLatLng = parsePickupLatLngFromJson(json);
+    final dropLatLng = parseDropLatLngFromJson(json);
 
     // Parse addresses - handle both nested (socket) and flat (REST) formats
     String pickupAddr = 'Unknown';
@@ -629,6 +639,10 @@ class RideOffer {
             passenger?['phone'])
         ?.toString();
 
+    final stops = parseRideStopsFromJson(
+      json['stops'] ?? json['intermediateStops'] ?? json['waypoints'],
+    );
+
     return RideOffer(
       id: (json['rideId'] ?? json['id'] ?? '').toString(),
       type: json['vehicleType'] ??
@@ -642,6 +656,7 @@ class RideOffer {
       dropTime: dropTimeStr,
       pickupAddress: pickupAddr,
       dropAddress: dropAddr,
+      stops: stops,
       pickupLocation: pickupLatLng,
       destinationLocation: dropLatLng,
       riderName: riderName,
@@ -1023,6 +1038,9 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
     // Add to dismissed to prevent re-adding
     final newDismissedIds = Set<String>.from(state.dismissedOfferIds)
       ..add(rideId);
+
+    final clearAccepted =
+        rideOfferMatchesId(state.acceptedRide, rideId);
     
     if (state.activeOffer?.id == rideId) {
       // Active offer was removed - promote next from queue
@@ -1038,6 +1056,7 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
         pendingOffers: newQueue,
         dismissedOfferIds: newDismissedIds,
         clearActiveOffer: nextOffer == null,
+        clearAcceptedRide: clearAccepted,
       );
     } else {
       // Remove from pending queue
@@ -1047,6 +1066,7 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
       state = state.copyWith(
         pendingOffers: newQueue,
         dismissedOfferIds: newDismissedIds,
+        clearAcceptedRide: clearAccepted,
       );
     }
   }
@@ -1203,6 +1223,12 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
     state = state.copyWith(acceptedRide: promoted);
   }
 
+  /// Merge backend ride payload onto the accepted offer (e.g. after GET /api/rides/:id).
+  void patchAcceptedRide(RideOffer updated) {
+    if (state.acceptedRide?.id != updated.id) return;
+    state = state.copyWith(acceptedRide: updated);
+  }
+
   /// Accept a ride as a driver
   /// 
   /// Flow:
@@ -1217,15 +1243,50 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
       final response = await _apiClient.acceptRide(rideId);
 
       if (response['success'] == true) {
-        // Get the accepted ride (should be the active offer)
-        final acceptedRide = state.activeOffer?.id == rideId 
-            ? state.activeOffer 
-            : state.pendingOffers.firstWhere(
-                (o) => o.id == rideId,
-                orElse: () => state.activeOffer!,
-              );
+        RideOffer? acceptedRide;
+        if (state.activeOffer?.id == rideId) {
+          acceptedRide = state.activeOffer;
+        } else {
+          for (final o in state.pendingOffers) {
+            if (o.id == rideId) {
+              acceptedRide = o;
+              break;
+            }
+          }
+        }
+
+        final responseData = response['data'];
+        if (responseData is Map) {
+          final merged = Map<String, dynamic>.from(responseData);
+          final prior = acceptedRide;
+          if (prior != null) {
+            merged.putIfAbsent('rideId', () => prior.id);
+            merged.putIfAbsent('id', () => prior.id);
+            merged.putIfAbsent('pickupAddress', () => prior.pickupAddress);
+            merged.putIfAbsent('dropAddress', () => prior.dropAddress);
+            if (prior.stops.isNotEmpty && !merged.containsKey('stops')) {
+              merged['stops'] = prior.stops.map((s) => s.toApiJson()).toList();
+            }
+          }
+          try {
+            acceptedRide = RideOffer.fromJson(merged);
+          } catch (e) {
+            debugPrint('⚠️ Could not merge accept response into offer: $e');
+          }
+        }
+
+        if (acceptedRide == null) {
+          state = state.copyWith(
+            isLoading: false,
+            error: 'Ride accepted but offer details were lost',
+          );
+          return false;
+        }
 
         debugPrint('✅ Ride $rideId accepted');
+        if (acceptedRide.stops.isNotEmpty) {
+          debugPrint('   Multi-stop trip: ${acceptedRide.stopCount} stop(s)');
+        }
 
         // Clear all offers on accept
         state = DriverRidesState(
@@ -1239,11 +1300,11 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
         );
 
         // Update driver location to pickup
-        if (acceptedRide?.pickupLocation != null) {
+        if (acceptedRide.pickupLocation != null) {
           try {
             await _apiClient.updateDriverLocation(
               driverId,
-              acceptedRide!.pickupLocation!.latitude,
+              acceptedRide.pickupLocation!.latitude,
               acceptedRide.pickupLocation!.longitude,
             );
             debugPrint('📍 Driver location updated to pickup');

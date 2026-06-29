@@ -2,6 +2,7 @@ import 'package:equatable/equatable.dart';
 import 'location.dart';
 import 'driver.dart';
 import 'vehicle.dart';
+import 'ride_stop.dart';
 
 enum RideStatus {
   requested,
@@ -21,6 +22,7 @@ class Ride extends Equatable {
   final String? driverId;
   final AddressLocation pickupLocation;
   final AddressLocation destinationLocation;
+  final List<RideStop> stops;
   final RideStatus status;
   final double fare;
   final double distance;
@@ -117,6 +119,7 @@ class Ride extends Equatable {
     this.driverId,
     required this.pickupLocation,
     required this.destinationLocation,
+    this.stops = const [],
     required this.status,
     required this.fare,
     required this.distance,
@@ -273,6 +276,9 @@ class Ride extends Equatable {
       driverId: (json['driverId'] ?? json['driver_id'])?.toString(),
       pickupLocation: pickupLoc,
       destinationLocation: destLoc,
+      stops: parseRideStopsFromJson(
+        json['stops'] ?? json['intermediateStops'] ?? json['waypoints'],
+      ),
       status: _parseStatus(json['status']?.toString() ?? 'PENDING'),
       fare: fare,
       distance: _parseDistanceKm(json),
@@ -458,6 +464,7 @@ class Ride extends Equatable {
     String? driverId,
     AddressLocation? pickupLocation,
     AddressLocation? destinationLocation,
+    List<RideStop>? stops,
     RideStatus? status,
     double? fare,
     double? distance,
@@ -480,6 +487,7 @@ class Ride extends Equatable {
       driverId: driverId ?? this.driverId,
       pickupLocation: pickupLocation ?? this.pickupLocation,
       destinationLocation: destinationLocation ?? this.destinationLocation,
+      stops: stops ?? this.stops,
       status: status ?? this.status,
       fare: fare ?? this.fare,
       distance: distance ?? this.distance,

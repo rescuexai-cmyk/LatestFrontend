@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/models/driver.dart';
 import '../../../../core/models/location.dart';
 import '../../../../core/models/ride.dart';
+import '../../../driver/presentation/widgets/driver_trip_route_summary.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
@@ -197,7 +198,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     if (!mounted) return;
     try {
       final rideData = await apiClient.getRide(widget.rideId);
-      final ride = Ride.fromJson(_extractRidePayload(rideData));
+      var ride = Ride.fromJson(_extractRidePayload(rideData));
+      ride = _mergeBookingStopsIntoRide(ride);
       if (!mounted) return;
       setState(() {
         _ride = ride;
@@ -216,7 +218,8 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
   Future<void> _loadRideDetails() async {
     try {
       final rideData = await apiClient.getRide(widget.rideId);
-      final ride = Ride.fromJson(_extractRidePayload(rideData));
+      var ride = Ride.fromJson(_extractRidePayload(rideData));
+      ride = _mergeBookingStopsIntoRide(ride);
 
       // Preserve the original rider UX:
       // pre-pickup phases must stay on DriverAssignedScreen.
@@ -265,6 +268,25 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
         _statusMessage = 'Error loading ride details';
       });
     }
+  }
+
+  Ride _mergeBookingStopsIntoRide(Ride ride) {
+    if (ride.stops.isNotEmpty) return ride;
+    final bookingStops = ref.read(rideBookingProvider).stops;
+    if (bookingStops.isEmpty) return ride;
+    return ride.copyWith(stops: bookingStops);
+  }
+
+  List<LocationCoordinate> _stopCoordinates(Ride ride) {
+    return ride.stops
+        .where((s) => s.location != null)
+        .map(
+          (s) => LocationCoordinate(
+            lat: s.location!.latitude,
+            lng: s.location!.longitude,
+          ),
+        )
+        .toList(growable: false);
   }
 
   bool _isPrePickupPhase(RideStatus status) {
@@ -794,6 +816,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
               pickupLocation: _ride!.pickupLocation.toLocationCoordinate(),
               dropoffLocation:
                   _ride!.destinationLocation.toLocationCoordinate(),
+              intermediateStops: _stopCoordinates(_ride!),
               rideInProgress: true,
               ridePhase: _getRidePhase(),
               driverLocation: _driverLocation,
@@ -1042,56 +1065,68 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
           ),
         ],
 
-        // Destination info
+        // Trip route (pickup → stops → drop)
         if (_ride != null) ...[
-          Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: AppColors.dropoffMarker.withAlpha(25),
-                  borderRadius: BorderRadius.circular(12),
+          if (_ride!.stops.isNotEmpty)
+            DriverTripRouteSummary(
+              pickupAddress:
+                  _ride!.pickupLocation.address ?? 'Pickup location',
+              dropAddress: _ride!.destinationLocation.address ??
+                  'Drop-off location',
+              stops: _ride!.stops,
+              compact: true,
+              highlightDrop: !isDriverArriving,
+            )
+          else
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: AppColors.dropoffMarker.withAlpha(25),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.location_on,
+                      color: AppColors.dropoffMarker, size: 20),
                 ),
-                child: const Icon(Icons.location_on,
-                    color: AppColors.dropoffMarker, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      isDriverArriving ? 'Then heading to' : 'Heading to',
-                      style: const TextStyle(
-                          fontSize: 12, color: AppColors.textSecondary),
-                    ),
-                    Text(
-                      _ride!.destinationLocation.address ?? 'Drop-off Location',
-                      style: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isDriverArriving ? 'Then heading to' : 'Heading to',
+                        style: const TextStyle(
+                            fontSize: 12, color: AppColors.textSecondary),
+                      ),
+                      Text(
+                        _ride!.destinationLocation.address ??
+                            'Drop-off Location',
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              // ETA
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppColors.inputBackground,
-                  borderRadius: BorderRadius.circular(8),
+                // ETA
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: AppColors.inputBackground,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${_ride!.estimatedDuration} min',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
                 ),
-                child: Text(
-                  '${_ride!.estimatedDuration} min',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 13),
-                ),
-              ),
-            ],
-          ),
+              ],
+            ),
         ],
 
         // Driver info

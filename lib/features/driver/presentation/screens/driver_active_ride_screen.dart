@@ -13,12 +13,16 @@ import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/push_notification_service.dart';
+import '../../../../core/services/sse_service.dart';
 import '../../../../core/widgets/bottom_insets.dart';
 import '../../../../core/widgets/slide_to_action_button.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../chat/presentation/screens/ride_chat_screen.dart';
 import '../../../chat/providers/chat_provider.dart';
+import '../../../../core/models/ride_stop.dart';
+import '../../../../core/models/ride.dart';
 import '../../providers/driver_rides_provider.dart';
+import '../widgets/driver_trip_route_summary.dart';
 import '../../../../core/providers/settings_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import '../../../../core/utils/cab_map_icon.dart';
@@ -57,6 +61,7 @@ class _DriverActiveRideScreenState
   late String _riderPhone;
   late String _pickupAddress;
   late String _dropAddress;
+  List<RideStop> _intermediateStops = [];
   // OTP is now verified via backend API - driver enters OTP, backend validates
   late double _earning;
   late String _paymentMethod; // 'cash' or 'prepaid'
@@ -100,6 +105,7 @@ class _DriverActiveRideScreenState
   VoidCallback? _unsubscribeChat;
   VoidCallback? _unsubscribeHistory;
   VoidCallback? _unsubscribeRideCancelled;
+  SSESubscription? _rideCancelSseSubscription;
 
   // Uber/Rapido-style: vehicle icon + camera follow when ride in progress
   StreamSubscription<Position>? _positionStream;
@@ -129,8 +135,10 @@ class _DriverActiveRideScreenState
     _initializeChatProvider();
     _loadVehicleIcon();
     _loadMapStyle();
-    _setupMapElements();
-    _calculateRoute();
+    if (_hasValidRouteCoords() || _rideId == 'demo_ride') {
+      _setupMapElements();
+      _calculateRoute();
+    }
     _subscribeToRideCancellation();
     _initializeDriverLocation();
     _fetchWalletBalance();
@@ -293,6 +301,21 @@ class _DriverActiveRideScreenState
           if (backendFare > 0) _earning = backendFare;
           if (backendPayment.isNotEmpty) _paymentMethod = backendPayment;
         });
+      }
+
+      final backendStops = parseRideStopsFromJson(
+        data['stops'] ?? data['intermediateStops'] ?? data['waypoints'],
+      );
+      if (backendStops.isNotEmpty) {
+        setState(() => _intermediateStops = backendStops);
+        final accepted = ref.read(driverRidesProvider).acceptedRide;
+        if (accepted != null) {
+          ref.read(driverRidesProvider.notifier).patchAcceptedRide(
+                accepted.copyWith(stops: backendStops),
+              );
+        }
+        _setupMapElements();
+        unawaited(_calculateRoute());
       }
 
       // Check if driver has arrived
@@ -466,6 +489,7 @@ class _DriverActiveRideScreenState
     _unsubscribeChat?.call();
     _unsubscribeHistory?.call();
     _unsubscribeRideCancelled?.call();
+    _rideCancelSseSubscription?.cancel();
     _chatUpdateNotifier.dispose();
     super.dispose();
   }
@@ -495,15 +519,18 @@ class _DriverActiveRideScreenState
     });
   }
 
-  /// Subscribe to ride cancellation events from rider (Socket.io path).
+  /// Subscribe to ride cancellation events from rider (Socket.io + SSE).
   void _subscribeToRideCancellation() {
+    _unsubscribeRideCancelled?.call();
+    _rideCancelSseSubscription?.cancel();
+
     _unsubscribeRideCancelled =
         webSocketService.subscribe('ride_cancelled', (message) {
       final data = message.data as Map<String, dynamic>?;
       if (data == null) return;
 
       final cancelledRideId = rideIdFromRealtimePayload(data);
-      if (cancelledRideId != null && cancelledRideId == _rideId) {
+      if (_isCancellationForThisRide(cancelledRideId)) {
         debugPrint('⚠️ Ride $_rideId was cancelled by rider (socket)');
         _exitAfterRiderCancellation(
           reason: data['reason'] as String? ??
@@ -512,6 +539,30 @@ class _DriverActiveRideScreenState
         );
       }
     });
+
+    if (_rideId.isEmpty || _rideId == 'demo_ride') return;
+
+    _rideCancelSseSubscription = realtimeService.connectRide(
+      _rideId,
+      onEvent: (type, data) {
+        if (type != 'cancelled' && type != 'ride_cancelled') return;
+        final cancelledRideId = rideIdFromRealtimePayload(data);
+        if (!_isCancellationForThisRide(cancelledRideId)) return;
+        debugPrint('⚠️ Ride $_rideId was cancelled by rider (SSE)');
+        _exitAfterRiderCancellation(
+          reason: data['reason'] as String? ??
+              data['cancelReason'] as String? ??
+              ref.tr('ride_cancelled_by_rider'),
+        );
+      },
+    );
+  }
+
+  bool _isCancellationForThisRide(String? cancelledRideId) {
+    if (cancelledRideId == null || cancelledRideId.isEmpty) return false;
+    if (cancelledRideId == _rideId) return true;
+    final accepted = ref.read(driverRidesProvider).acceptedRide;
+    return rideOfferMatchesId(accepted, cancelledRideId);
   }
 
   /// Clear ride state and return driver to home when rider cancels.
@@ -657,17 +708,16 @@ class _DriverActiveRideScreenState
     final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
 
     if (acceptedRide != null) {
-      _rideId = acceptedRide.id;
+      _rideId = acceptedRide.linkedActiveRideId ?? acceptedRide.id;
       _activeRideIdForChat = _rideId;
-      _pickupLocation =
-          acceptedRide.pickupLocation ?? const LatLng(28.5245, 77.1855);
-      _dropLocation =
-          acceptedRide.destinationLocation ?? const LatLng(28.6507, 77.2334);
+      _pickupLocation = acceptedRide.pickupLocation ?? const LatLng(0, 0);
+      _dropLocation = acceptedRide.destinationLocation ?? const LatLng(0, 0);
       _riderName = acceptedRide.riderName ?? 'Rider';
       _riderPhone = _normalizePhone(acceptedRide.riderPhone);
       _passengerId = acceptedRide.riderId ?? '';
       _pickupAddress = acceptedRide.pickupAddress;
       _dropAddress = acceptedRide.dropAddress;
+      _intermediateStops = List<RideStop>.from(acceptedRide.stops);
       // OTP is NOT shown to driver - they must ask passenger for it
       // Backend will verify OTP when driver calls POST /api/rides/:id/start
       _earning = acceptedRide.earning;
@@ -679,6 +729,9 @@ class _DriverActiveRideScreenState
       debugPrint('   OTP: Driver must ask rider for OTP (backend validates)');
       debugPrint('   Pickup: $_pickupAddress');
       debugPrint('   Drop: $_dropAddress');
+      if (_intermediateStops.isNotEmpty) {
+        debugPrint('   Stops: ${_intermediateStops.length}');
+      }
       debugPrint('   Payment Method: $_paymentMethod');
       debugPrint(
           '   Pickup LatLng: ${_pickupLocation.latitude}, ${_pickupLocation.longitude}');
@@ -687,15 +740,14 @@ class _DriverActiveRideScreenState
     } else if ((widget.initialRideId ?? '').isNotEmpty) {
       _rideId = widget.initialRideId!;
       _activeRideIdForChat = _rideId;
-      _pickupLocation = const LatLng(28.5245, 77.1855);
-      _dropLocation = const LatLng(28.6507, 77.2334);
+      _pickupLocation = const LatLng(0, 0);
+      _dropLocation = const LatLng(0, 0);
       _riderName = 'Rider';
       _riderPhone = '';
       _pickupAddress = 'Pickup';
       _dropAddress = 'Drop';
       _earning = 0.0;
       _paymentMethod = 'cash';
-      unawaited(_hydrateRideContextFromBackend());
     } else {
       _rideId = 'demo_ride';
       _activeRideIdForChat = _rideId;
@@ -708,14 +760,20 @@ class _DriverActiveRideScreenState
       _dropAddress = 'Chandni Chowk, Metro Station gate 4';
       // Demo mode - OTP verification will fail but that's expected
       _earning = 200.00;
-      _paymentMethod = 'cash'; // Default to cash for demo
+      _paymentMethod = 'cash';
     }
 
-    // Driver location slightly before pickup
-    _driverLocation = LatLng(
-      _pickupLocation.latitude + 0.003,
-      _pickupLocation.longitude + 0.002,
-    );
+    if (_rideId != 'demo_ride') {
+      unawaited(_hydrateRideContextFromBackend());
+    }
+
+    // Driver location: GPS stream overrides; use pickup offset until then.
+    _driverLocation = _hasValidRouteCoords()
+        ? LatLng(
+            _pickupLocation.latitude + 0.003,
+            _pickupLocation.longitude + 0.002,
+          )
+        : const LatLng(0, 0);
     _maybeAutoOpenChat();
     if (_pendingPushChatOpen && _rideId != 'demo_ride') {
       _pendingPushChatOpen = false;
@@ -727,20 +785,20 @@ class _DriverActiveRideScreenState
     }
   }
 
+  bool _hasValidRouteCoords() {
+    return isValidLatLng(_pickupLocation) && isValidLatLng(_dropLocation);
+  }
+
   Future<void> _hydrateRideContextFromBackend() async {
     try {
       final response = await apiClient.getRide(_rideId);
-      final data = response['data'] is Map<String, dynamic>
-          ? response['data'] as Map<String, dynamic>
-          : response;
-      final pickupLat = (data['pickupLat'] as num?)?.toDouble() ??
-          (data['pickupLatitude'] as num?)?.toDouble();
-      final pickupLng = (data['pickupLng'] as num?)?.toDouble() ??
-          (data['pickupLongitude'] as num?)?.toDouble();
-      final dropLat = (data['dropLat'] as num?)?.toDouble() ??
-          (data['dropLatitude'] as num?)?.toDouble();
-      final dropLng = (data['dropLng'] as num?)?.toDouble() ??
-          (data['dropLongitude'] as num?)?.toDouble();
+      final data = Ride.unwrapRidePayload(
+        response['data'] is Map<String, dynamic>
+            ? response['data'] as Map<String, dynamic>
+            : Map<String, dynamic>.from(response),
+      );
+      final pickupPoint = parsePickupLatLngFromJson(data);
+      final dropPoint = parseDropLatLngFromJson(data);
       final passenger = data['passenger'] is Map<String, dynamic>
           ? data['passenger'] as Map<String, dynamic>
           : null;
@@ -765,11 +823,17 @@ class _DriverActiveRideScreenState
         }
         _pickupAddress = data['pickupAddress']?.toString() ?? _pickupAddress;
         _dropAddress = data['dropAddress']?.toString() ?? _dropAddress;
-        if (pickupLat != null && pickupLng != null) {
-          _pickupLocation = LatLng(pickupLat, pickupLng);
+        final backendStops = parseRideStopsFromJson(
+          data['stops'] ?? data['intermediateStops'] ?? data['waypoints'],
+        );
+        if (backendStops.isNotEmpty) {
+          _intermediateStops = backendStops;
         }
-        if (dropLat != null && dropLng != null) {
-          _dropLocation = LatLng(dropLat, dropLng);
+        if (pickupPoint != null) {
+          _pickupLocation = pickupPoint;
+        }
+        if (dropPoint != null) {
+          _dropLocation = dropPoint;
         }
         if (backendFare > 0) {
           _earning = backendFare;
@@ -778,8 +842,27 @@ class _DriverActiveRideScreenState
           _paymentMethod = backendPayment;
         }
       });
-      _setupMapElements();
-      unawaited(_calculateRoute());
+      final accepted = ref.read(driverRidesProvider).acceptedRide;
+      if (accepted != null) {
+        ref.read(driverRidesProvider.notifier).patchAcceptedRide(
+              accepted.copyWith(
+                stops: _intermediateStops,
+                pickupLocation: isValidLatLng(_pickupLocation)
+                    ? _pickupLocation
+                    : accepted.pickupLocation,
+                destinationLocation: isValidLatLng(_dropLocation)
+                    ? _dropLocation
+                    : accepted.destinationLocation,
+                pickupAddress: _pickupAddress,
+                dropAddress: _dropAddress,
+              ),
+            );
+      }
+      if (_hasValidRouteCoords()) {
+        _setupMapElements();
+        unawaited(_calculateRoute());
+        unawaited(_fitAllBounds());
+      }
       _maybeAutoOpenChat();
     } catch (e) {
       debugPrint('Failed to hydrate ride context from backend: $e');
@@ -821,6 +904,19 @@ class _DriverActiveRideScreenState
         icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
         infoWindow: InfoWindow(title: 'Drop', snippet: _dropAddress),
       ),
+      for (var i = 0; i < _intermediateStops.length; i++)
+        if (_intermediateStops[i].location != null)
+          Marker(
+            markerId: MarkerId('stop_$i'),
+            position: _intermediateStops[i].location!,
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueYellow,
+            ),
+            infoWindow: InfoWindow(
+              title: 'Stop ${i + 1}',
+              snippet: _intermediateStops[i].address,
+            ),
+          ),
     };
   }
 
@@ -829,10 +925,11 @@ class _DriverActiveRideScreenState
     setState(() => _isLoadingRoute = true);
 
     try {
-      // Calculate route from pickup to drop (the main ride route)
+      // Calculate route from pickup to drop via intermediate stops
       final rideRoute = await _directionsService.getRoute(
         origin: _pickupLocation,
         destination: _dropLocation,
+        waypoints: rideStopWaypoints(_intermediateStops),
         mode: TravelMode.driving,
       );
 
@@ -1078,7 +1175,8 @@ class _DriverActiveRideScreenState
       List<LatLng> allPoints = [
         _driverLocation,
         _pickupLocation,
-        _dropLocation
+        _dropLocation,
+        ...rideStopWaypoints(_intermediateStops),
       ];
       for (final polyline in _polylines) {
         allPoints.addAll(polyline.points);
@@ -2031,10 +2129,10 @@ class _DriverActiveRideScreenState
       driverRidesProvider.select((s) => s.acceptedRide?.id),
       (previous, next) {
         if (!mounted || _exitingActiveRide || _rideCompletionFlowActive) return;
-        if (previous != null &&
-            previous == _rideId &&
-            next == null) {
-          _exitAfterRiderCancellation(reason: ref.tr('ride_cancelled_by_rider'));
+        if (previous != null && next == null) {
+          _exitAfterRiderCancellation(
+            reason: ref.tr('ride_cancelled_by_rider'),
+          );
         }
       },
     );
@@ -2574,74 +2672,24 @@ class _DriverActiveRideScreenState
 
                 const SizedBox(height: 16),
 
-                // Address info
-                Row(
-                  children: [
-                    Column(
-                      children: [
-                        Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: _isPickedUp
-                                ? const Color(0xFF4CAF50)
-                                : const Color(0xFFD4956A),
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        Container(
-                          width: 2,
-                          height: 30,
-                          color: const Color(0xFFE0E0E0),
-                        ),
-                        Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: _isPickedUp
-                                ? const Color(0xFFD4956A)
-                                : const Color(0xFF4CAF50),
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                                color: const Color(0xFFE0E0E0), width: 2),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _pickupAddress,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: _isPickedUp
-                                  ? FontWeight.normal
-                                  : FontWeight.w600,
-                              color: _isPickedUp
-                                  ? const Color(0xFF888888)
-                                  : const Color(0xFF1A1A1A),
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          Text(
-                            _dropAddress,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: _isPickedUp
-                                  ? FontWeight.w600
-                                  : FontWeight.normal,
-                              color: _isPickedUp
-                                  ? const Color(0xFF1A1A1A)
-                                  : const Color(0xFF888888),
-                            ),
-                          ),
-                        ],
+                if (_intermediateStops.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: DriverMultiStopBadge(
+                        stopCount: _intermediateStops.length,
                       ),
                     ),
-                  ],
+                  ),
+
+                DriverTripRouteSummary(
+                  pickupAddress: _pickupAddress,
+                  dropAddress: _dropAddress,
+                  stops: _intermediateStops,
+                  compact: true,
+                  highlightPickup: !_isPickedUp,
+                  highlightDrop: _isPickedUp,
                 ),
                 
                 const SizedBox(height: 20),

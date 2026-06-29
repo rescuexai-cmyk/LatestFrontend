@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,6 +10,7 @@ import '../widgets/figma_ride_selection_widgets.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
+import 'scheduled_ride_screen.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 class PaymentScreen extends ConsumerStatefulWidget {
@@ -17,13 +19,64 @@ class PaymentScreen extends ConsumerStatefulWidget {
   ConsumerState<PaymentScreen> createState() => _PaymentScreenState();
 }
 class _PaymentScreenState extends ConsumerState<PaymentScreen> {
+  static const Duration _statusBannerDuration = Duration(milliseconds: 2500);
+
   String _selectedPaymentMethod = 'cash';
   bool _isLoading = false;
   String? _appliedVoucher;
   double _voucherDiscount = 0;
   // Linked UPI accounts - will be displayed in payment methods section
   final List<Map<String, dynamic>> _linkedUpiAccounts = [];
-  /// Generate a 4-digit PIN for ride verification.
+  /// Maps UI payment selection to backend enum: CASH | CARD | UPI | WALLET.
+  String _paymentMethodForApi() {
+    final id = _selectedPaymentMethod.toLowerCase();
+    switch (id) {
+      case 'cash':
+        return 'CASH';
+      case 'card':
+      case 'netbanking':
+        return 'CARD';
+      case 'scan':
+      case 'qr_pay':
+        return 'UPI';
+      case 'raahi_wallet':
+        return 'WALLET';
+      default:
+        final isLinkedUpi = _linkedUpiAccounts.any(
+          (a) => (a['id'] as String?)?.toLowerCase() == id,
+        );
+        if (isLinkedUpi ||
+            id.contains('upi') ||
+            id.contains('paytm') ||
+            id.contains('gpay') ||
+            id.contains('phonepe')) {
+          return 'UPI';
+        }
+        return 'CASH';
+    }
+  }
+
+  String _rideCreationErrorMessage(Object error) {
+    if (error is DioException) {
+      final data = error.response?.data;
+      if (data is Map) {
+        final backendMsg = data['error'] ?? data['message'];
+        if (backendMsg != null && backendMsg.toString().trim().isNotEmpty) {
+          return backendMsg.toString();
+        }
+      }
+      if (error.response?.statusCode == 400) {
+        return 'Invalid booking details. Please check your trip and payment method.';
+      }
+      if (error.type == DioExceptionType.connectionError ||
+          error.type == DioExceptionType.connectionTimeout ||
+          error.type == DioExceptionType.receiveTimeout) {
+        return 'Cannot connect to server. Please check your connection.';
+      }
+    }
+    return 'Failed to create ride. Please try again.';
+  }
+
   /// This is a fallback when backend doesn't provide OTP.
   String _generateRidePin() {
     final random = DateTime.now().millisecondsSinceEpoch % 9000 + 1000;
@@ -149,19 +202,17 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       } else {
         // App not installed
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${app['name']} is not installed'),
-              backgroundColor: Colors.orange,
-              action: SnackBarAction(
-                label: 'Install',
-                textColor: Colors.white,
-                onPressed: () {
-                  final playStoreUrl = Uri.parse(
-                      'https://play.google.com/store/apps/details?id=${app['package']}');
-                  launchUrl(playStoreUrl, mode: LaunchMode.externalApplication);
-                },
-              ),
+          _showStatusSnackBar(
+            '${app['name']} is not installed',
+            backgroundColor: Colors.orange,
+            action: SnackBarAction(
+              label: 'Install',
+              textColor: Colors.white,
+              onPressed: () {
+                final playStoreUrl = Uri.parse(
+                    'https://play.google.com/store/apps/details?id=${app['package']}');
+                launchUrl(playStoreUrl, mode: LaunchMode.externalApplication);
+              },
             ),
           );
         }
@@ -603,14 +654,25 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       ],
     );
   }
-  void _showPaymentSelectedSnackbar(String method) {
-    ScaffoldMessenger.of(context).showSnackBar(
+  void _showStatusSnackBar(
+    String message, {
+    Color backgroundColor = const Color(0xFF4CAF50),
+    SnackBarAction? action,
+  }) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(
       SnackBar(
-        content: Text('$method selected'),
-        backgroundColor: const Color(0xFF4CAF50),
-        duration: const Duration(seconds: 1),
+        content: Text(message),
+        backgroundColor: backgroundColor,
+        duration: _statusBannerDuration,
+        action: action,
       ),
     );
+  }
+
+  void _showPaymentSelectedSnackbar(String method) {
+    _showStatusSnackBar('$method selected');
   }
   void _addWalletToLinkedAccounts() {
     setState(() {
@@ -631,13 +693,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       // Select Raahi Wallet
       _selectedPaymentMethod = 'raahi_wallet';
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Raahi Wallet selected'),
-        backgroundColor: Color(0xFF4CAF50),
-        duration: Duration(seconds: 1),
-      ),
-    );
+    _showStatusSnackBar('Raahi Wallet selected');
   }
   void _showUpiInputDialog(String upiMethod, String methodId) {
     final upiController = TextEditingController();
@@ -792,12 +848,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                   // Select this payment method
                   _selectedPaymentMethod = linkedId;
                 });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('$upiMethod linked: $upiId'),
-                    backgroundColor: const Color(0xFF4CAF50),
-                  ),
-                );
+                _showStatusSnackBar('$upiMethod linked: $upiId');
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFD4956A),
@@ -1199,12 +1250,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     _voucherDiscount = 50;
                   });
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Voucher FIRST50 applied!'),
-                      backgroundColor: Color(0xFF4CAF50),
-                    ),
-                  );
+                  _showStatusSnackBar('Voucher FIRST50 applied!');
                 },
               ),
               const SizedBox(height: 12),
@@ -1219,12 +1265,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                     _voucherDiscount = 20;
                   });
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Voucher RAAHI20 applied!'),
-                      backgroundColor: Color(0xFF4CAF50),
-                    ),
-                  );
+                  _showStatusSnackBar('Voucher RAAHI20 applied!');
                 },
               ),
               const SizedBox(height: 24),
@@ -1249,12 +1290,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                             : (code == 'RAAHI20' ? 20 : 10);
                       });
                       Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Voucher $code applied!'),
-                          backgroundColor: const Color(0xFF4CAF50),
-                        ),
-                      );
+                      _showStatusSnackBar('Voucher $code applied!');
                     } else {
                       AppMessenger.showErrorBanner(context, 'Invalid voucher code');
                     }
@@ -1676,7 +1712,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     final existingRideId = ref.read(rideBookingProvider).rideId;
     if (existingRideId != null && existingRideId.isNotEmpty) {
       debugPrint('⚠️ Ride already created ($existingRideId) — resuming');
-      if (mounted) context.push(AppRoutes.searchingDrivers);
+      if (mounted) resumePendingRideNavigation(context, ref);
       return;
     }
     // ── Guard 2: user already has an active ride in provider ──
@@ -1715,9 +1751,10 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         pickupAddress: rideBookingState.pickupAddress ?? 'Unknown pickup',
         dropAddress:
             rideBookingState.destinationAddress ?? 'Unknown destination',
-        paymentMethod: _selectedPaymentMethod.toUpperCase(),
+        paymentMethod: _paymentMethodForApi(),
         stops: stopsForApi,
         vehicleType: rideBookingState.selectedCabTypeId,
+        scheduledTime: rideBookingState.scheduledTime?.toUtc().toIso8601String(),
       );
       debugPrint('API Response: $responseData');
       if (responseData['success'] == true) {
@@ -1741,8 +1778,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                 otp: rideOtp,
               );
           if (mounted) {
-            // Navigate to searching drivers screen
-            context.push(AppRoutes.searchingDrivers);
+            navigateAfterRideCreated(context, ref);
           }
         } else {
           debugPrint('❌ Invalid ride data received');
@@ -1758,7 +1794,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     } catch (e) {
       debugPrint('❌ Error creating ride: $e');
       if (mounted) {
-        AppMessenger.showErrorBanner(context, 'Error creating ride: ${e.toString().contains('Connection') ? 'Cannot connect to server' : e}');
+        AppMessenger.showErrorBanner(context, _rideCreationErrorMessage(e));
       }
     } finally {
       if (mounted) {

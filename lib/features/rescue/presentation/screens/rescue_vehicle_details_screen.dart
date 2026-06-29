@@ -96,7 +96,7 @@ class _RescueVehicleDetailsScreenState
                 return GestureDetector(
                   onTap: () => setState(() => _category = cat),
                   child: Container(
-                    width: 72,
+                    width: 80,
                     decoration: BoxDecoration(
                       color: sel ? Colors.white : RescueTheme.cardBg,
                       borderRadius: BorderRadius.circular(12),
@@ -111,8 +111,18 @@ class _RescueVehicleDetailsScreenState
                         Image.asset(cat.asset, height: 32, errorBuilder: (_, __, ___) =>
                             Icon(Icons.directions_car, color: RescueTheme.accent)),
                         const SizedBox(height: 4),
-                        Text(cat.label,
-                            style: RescueTheme.body.copyWith(fontSize: 11)),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              cat.label,
+                              style: RescueTheme.body.copyWith(fontSize: 11),
+                              maxLines: 1,
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),

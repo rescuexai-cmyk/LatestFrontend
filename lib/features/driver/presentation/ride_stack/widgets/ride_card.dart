@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
 import '../../../providers/driver_rides_provider.dart';
+import '../../widgets/driver_trip_route_summary.dart';
 import '../controllers/swipe_controller.dart';
 
 class RideCard extends StatefulWidget {
@@ -303,6 +304,10 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
                   ),
                   const SizedBox(width: 8),
                 ],
+                if (widget.ride.hasIntermediateStops) ...[
+                  DriverMultiStopBadge(stopCount: widget.ride.stopCount),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: Text(
                     widget.ride.isRescue
@@ -385,83 +390,15 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
           
           const SizedBox(height: 16),
           
-          // Pickup and Drop addresses — scroll when card height is tight
+          // Pickup, stop(s), and drop
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Pickup
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text(
-                            'Pickup',
-                            style: TextStyle(
-                              color: _textDark,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            widget.ride.pickupAddress,
-                            style: const TextStyle(
-                              color: _textGrey,
-                              fontSize: 12,
-                              height: 1.3,
-                            ),
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    
-                    // Arrow
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Icon(
-                        Icons.arrow_forward,
-                        color: _textGrey,
-                        size: 18,
-                      ),
-                    ),
-                    
-                    // Drop
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text(
-                            'Drop',
-                            style: TextStyle(
-                              color: _textDark,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            widget.ride.dropAddress,
-                            style: const TextStyle(
-                              color: _textGrey,
-                              fontSize: 12,
-                              height: 1.3,
-                            ),
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+              child: DriverTripRouteSummary(
+                pickupAddress: widget.ride.pickupAddress,
+                dropAddress: widget.ride.dropAddress,
+                stops: widget.ride.stops,
+                compact: widget.ride.hasIntermediateStops,
               ),
             ),
           ),

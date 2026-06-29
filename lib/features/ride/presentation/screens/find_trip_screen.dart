@@ -262,6 +262,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   Set<Marker> _driverClusterMarkers = {};
   final Map<String, BitmapDescriptor> _clusterIconCache = {};
   Timer? _clusterPulseTimer;
+  Timer? _sheetMapSyncTimer;
   bool _clusterPulsePhase = false;
   double _currentZoomLevel = 12.0;
   BitmapDescriptor? _carIcon;
@@ -296,6 +297,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     _selectedCabType = widget.initialServiceType ?? 'bike_rescue';
     // Set scheduled time from parameter
     _scheduledTime = widget.scheduledTime;
+    if (_scheduledTime != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          ref
+              .read(rideBookingProvider.notifier)
+              .setScheduledTime(_scheduledTime);
+        }
+      });
+    }
     // Sync from provider if we have saved booking (e.g. returning after driver cancel)
     _loadFromProvider();
     _loadCustomMarkers();
@@ -1183,14 +1193,26 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     return true;
   }
   void _onSheetSizeChanged() {
-    if (mounted) {
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {});
+      // GoogleMap applies bottom padding on the next layout pass; project pills after that.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() {});
+        if (mounted) unawaited(_refreshMapPillPositions());
       });
-    }
+    });
+
+    // One more refresh after sheet snap/drag settles (native map may still be settling).
+    _sheetMapSyncTimer?.cancel();
+    _sheetMapSyncTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      unawaited(_refreshMapPillPositions());
+    });
   }
   @override
   void dispose() {
+    _sheetMapSyncTimer?.cancel();
     _sheetController.removeListener(_onSheetSizeChanged);
     _sheetController.dispose();
     _pickupController.dispose();
@@ -3790,6 +3812,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     ref.read(rideBookingProvider.notifier).setDriverCount(
           _selectedCabType == 'bike_rescue' && _needExtraDriver ? 2 : 1,
         );
+    ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
     context.push(AppRoutes.ridePayment);
   }
 

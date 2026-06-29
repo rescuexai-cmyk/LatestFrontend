@@ -19,6 +19,7 @@ import '../../features/chat/presentation/screens/ride_chat_screen.dart';
 import '../../features/ride/presentation/screens/find_trip_screen.dart';
 import '../../features/ride/presentation/screens/payment_screen.dart';
 import '../../features/ride/presentation/screens/searching_drivers_screen.dart';
+import '../../features/ride/presentation/screens/scheduled_ride_screen.dart';
 import '../../features/ride/presentation/screens/driver_assigned_screen.dart';
 import '../../features/driver/presentation/screens/driver_home_screen.dart';
 import '../../features/driver/presentation/screens/driver_active_ride_screen.dart';
@@ -386,6 +387,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: AppRoutes.searchingDrivers,
         name: 'searchingDrivers',
         builder: (context, state) => const SearchingDriversScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.scheduledRide,
+        name: 'scheduledRide',
+        builder: (context, state) => const ScheduledRideScreen(),
       ),
       GoRoute(
         path: AppRoutes.driverAssigned,

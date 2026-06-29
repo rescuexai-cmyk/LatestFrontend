@@ -23,6 +23,7 @@ class AppRoutes {
   static const String findTrip = '/booking/find-trip';
   static const String ridePayment = '/booking/payment';
   static const String searchingDrivers = '/booking/searching';
+  static const String scheduledRide = '/booking/scheduled';
   static const String driverAssigned = '/booking/driver-assigned';
 
   // Rescue flow — full Figma 11-screen journey

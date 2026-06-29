@@ -12,6 +12,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/firebase_phone_auth_service.dart';
+import '../../../../core/widgets/otp_input_field.dart';
 import '../../providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'signup_screen.dart';
@@ -36,9 +37,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   bool _otpStepVisible = false;
   String? _pendingPhone;
   final TextEditingController _phoneController = TextEditingController();
-  final List<TextEditingController> _otpControllers =
-      List.generate(6, (_) => TextEditingController());
-  final List<FocusNode> _otpFocusNodes = List.generate(6, (_) => FocusNode());
+  final TextEditingController _otpController = TextEditingController();
+  final FocusNode _otpFocusNode = FocusNode();
   int _resendTimer = 0;
   Timer? _resendCountdownTimer;
   bool _termsAccepted = false;
@@ -71,12 +71,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     _phoneController.removeListener(_onPhoneTextChanged);
     _resendCountdownTimer?.cancel();
     _phoneController.dispose();
-    for (final c in _otpControllers) {
-      c.dispose();
-    }
-    for (final n in _otpFocusNodes) {
-      n.dispose();
-    }
+    _otpController.dispose();
+    _otpFocusNode.dispose();
     super.dispose();
   }
 
@@ -122,28 +118,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _resendTimer = 0;
       _isVerifyLoading = false;
     });
-    for (final c in _otpControllers) {
-      c.clear();
-    }
+    _otpController.clear();
   }
 
-  String get _inlineOtpDigits => _otpControllers.map((c) => c.text).join();
+  String get _inlineOtpDigits => _otpController.text;
 
   void _clearInlineOtp() {
-    for (final c in _otpControllers) {
-      c.clear();
-    }
-    if (mounted) _otpFocusNodes[0].requestFocus();
-  }
-
-  void _onInlineOtpChanged(String value, int index) {
-    if (_isVerifyLoading) return;
-    if (value.isNotEmpty && index < 5) {
-      _otpFocusNodes[index + 1].requestFocus();
-    } else if (value.isNotEmpty && index == 5) {
-      _otpFocusNodes[index].unfocus();
-      _verifyInlineOtp();
-    }
+    _otpController.clear();
+    if (mounted) _otpFocusNode.requestFocus();
   }
 
   void _beginOtpStep(String phone) {
@@ -154,7 +136,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     _clearInlineOtp();
     _startInlineResendTimer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _otpFocusNodes[0].requestFocus();
+      if (mounted) _otpFocusNode.requestFocus();
     });
   }
 
@@ -1049,55 +1031,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           ),
         ),
         const SizedBox(height: 14),
-        Row(
-          children: [
-            for (var index = 0; index < 6; index++) ...[
-              if (index > 0) const SizedBox(width: 6),
-              Expanded(
-                child: SizedBox(
-                  height: 56,
-                  child: TextField(
-                    controller: _otpControllers[index],
-                    focusNode: _otpFocusNodes[index],
-                    textAlign: TextAlign.center,
-                    textAlignVertical: TextAlignVertical.center,
-                    keyboardType: TextInputType.number,
-                    maxLength: 1,
-                    enabled: !otpDisabled,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1A1A1A),
-                    ),
-                    decoration: InputDecoration(
-                      counterText: '',
-                      filled: true,
-                      fillColor: const Color(0xFFF5F5F5),
-                      contentPadding:
-                          const EdgeInsets.symmetric(vertical: 14),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide.none,
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(
-                          color: Color(0xFF1A1A1A),
-                          width: 2,
-                        ),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide.none,
-                      ),
-                    ),
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    onChanged: (value) => _onInlineOtpChanged(value, index),
-                  ),
-                ),
-              ),
-            ],
-          ],
+        OtpInputField(
+          controller: _otpController,
+          focusNode: _otpFocusNode,
+          enabled: !otpDisabled,
+          gap: 6,
+          alignment: MainAxisAlignment.start,
+          onCompleted: (_) => _verifyInlineOtp(),
+          onChanged: (_) {
+            if (mounted) setState(() {});
+          },
         ),
         const SizedBox(height: 14),
         Center(

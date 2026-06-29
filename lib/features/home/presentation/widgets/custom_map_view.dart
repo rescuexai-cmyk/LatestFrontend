@@ -40,6 +40,7 @@ class CustomMapView extends StatefulWidget {
   final List<Driver> drivers;
   final LocationCoordinate? pickupLocation;
   final LocationCoordinate? dropoffLocation;
+  final List<LocationCoordinate> intermediateStops;
   final LocationCoordinate? currentUserLocation;
   final String userType;
   final bool showUserLocation;
@@ -65,6 +66,7 @@ class CustomMapView extends StatefulWidget {
     this.drivers = const [],
     this.pickupLocation,
     this.dropoffLocation,
+    this.intermediateStops = const [],
     this.currentUserLocation,
     this.userType = 'rider',
     this.showUserLocation = true,
@@ -629,7 +631,8 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
     
     // Pickup or dropoff changed
     if (widget.pickupLocation != oldWidget.pickupLocation ||
-        widget.dropoffLocation != oldWidget.dropoffLocation) {
+        widget.dropoffLocation != oldWidget.dropoffLocation ||
+        widget.intermediateStops != oldWidget.intermediateStops) {
       debugPrint('🗺️ [Location] Pickup/dropoff changed, recalculating route');
       _calculateRouteForPhase();
     }
@@ -700,6 +703,7 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
     if (widget.drivers != oldWidget.drivers ||
         widget.pickupLocation != oldWidget.pickupLocation ||
         widget.dropoffLocation != oldWidget.dropoffLocation ||
+        widget.intermediateStops != oldWidget.intermediateStops ||
         widget.driverLocation != oldWidget.driverLocation ||
         widget.driverHeading != oldWidget.driverHeading) {
       _updateMarkers();
@@ -721,6 +725,9 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
             widget.pickupLocation!,
             widget.dropoffLocation!,
             isDriverArriving: false,
+            waypoints: widget.intermediateStops.isNotEmpty
+                ? widget.intermediateStops
+                : null,
           );
         }
         break;
@@ -755,6 +762,9 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
             widget.driverLocation!,
             widget.dropoffLocation!,
             isDriverArriving: false,
+            waypoints: widget.intermediateStops.isNotEmpty
+                ? widget.intermediateStops
+                : null,
           );
         } else if (widget.pickupLocation != null && widget.dropoffLocation != null) {
           debugPrint('🗺️ [Route] RIDE_IN_PROGRESS: fallback pickup → destination');
@@ -762,6 +772,9 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
             widget.pickupLocation!,
             widget.dropoffLocation!,
             isDriverArriving: false,
+            waypoints: widget.intermediateStops.isNotEmpty
+                ? widget.intermediateStops
+                : null,
           );
         } else {
           debugPrint('🗺️ [Route] RIDE_IN_PROGRESS: Missing required locations');
@@ -787,6 +800,7 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
     LocationCoordinate origin,
     LocationCoordinate destination, {
     bool isDriverArriving = false,
+    List<LocationCoordinate>? waypoints,
   }) async {
     final rideId = widget.rideId ?? 'unknown';
     final routeType = isDriverArriving ? 'PICKUP' : 'DROPOFF';
@@ -800,7 +814,11 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
     );
     
     try {
-      final directions = await mapsService.getDirections(origin, destination);
+      final directions = await mapsService.getDirections(
+        origin,
+        destination,
+        waypoints: waypoints,
+      );
       
       if (directions != null) {
         final coordinates = mapsService.decodePolyline(directions.polyline);
@@ -1578,9 +1596,10 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
       );
     }
 
-    // Drop marker: show only in searching preview
-    // During active ride, keep map focused on vehicle + route only.
-    if (widget.dropoffLocation != null && widget.ridePhase == RidePhase.searching) {
+    // Drop marker: show in searching preview and when multi-stop trip is active
+    if (widget.dropoffLocation != null &&
+        (widget.ridePhase == RidePhase.searching ||
+            widget.intermediateStops.isNotEmpty)) {
       markers.add(
         Marker(
           markerId: const MarkerId('dropoff'),
@@ -1588,6 +1607,19 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
           icon: _dropoffIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
           anchor: const Offset(0.5, 1.0),
           infoWindow: const InfoWindow(title: 'Destination'),
+        ),
+      );
+    }
+
+    for (var i = 0; i < widget.intermediateStops.length; i++) {
+      final stop = widget.intermediateStops[i];
+      markers.add(
+        Marker(
+          markerId: MarkerId('stop_$i'),
+          position: LatLng(stop.lat, stop.lng),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueYellow),
+          anchor: const Offset(0.5, 1.0),
+          infoWindow: InfoWindow(title: 'Stop ${i + 1}'),
         ),
       );
     }

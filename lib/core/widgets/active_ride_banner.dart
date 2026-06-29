@@ -32,7 +32,9 @@ class ActiveRideBanner extends ConsumerWidget {
 
     // Determine ride phase
     final _BannerPhase phase;
-    if (rideState.activeRide != null) {
+    if (booking.isScheduledRide) {
+      phase = _BannerPhase.scheduled;
+    } else if (rideState.activeRide != null) {
       final status = rideState.activeRide!.status;
       if (status == RideStatus.completed || status == RideStatus.cancelled) {
         // Ride is done — hide the banner
@@ -47,6 +49,7 @@ class ActiveRideBanner extends ConsumerWidget {
     // ── Don't show if already on the target screen ──
     final currentRoute = GoRouterState.of(context).matchedLocation;
     if (currentRoute == AppRoutes.searchingDrivers ||
+        currentRoute == AppRoutes.scheduledRide ||
         currentRoute == AppRoutes.driverAssigned ||
         currentRoute.startsWith('/ride/')) {
       return const SizedBox.shrink();
@@ -55,6 +58,9 @@ class ActiveRideBanner extends ConsumerWidget {
     final pickup = booking.pickupAddress ?? 'Pickup';
     final destination = booking.destinationAddress ?? 'Destination';
     final otp = booking.rideOtp ?? '----';
+    final scheduledLabel = booking.scheduledTime != null
+        ? _formatScheduledTime(booking.scheduledTime!)
+        : null;
 
     // OTP only before ride start (driver arriving); hide once OTP verified / in progress
     final showOtp = phase == _BannerPhase.driverArriving;
@@ -138,19 +144,34 @@ class ActiveRideBanner extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(height: 3),
-                    Text(
-                      _shorten(destination, 30),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
+                    if (phase == _BannerPhase.scheduled &&
+                        scheduledLabel != null)
+                      Text(
+                        scheduledLabel,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      )
+                    else
+                      Text(
+                        _shorten(destination, 30),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
                     const SizedBox(height: 2),
                     Text(
-                      'From: ${_shorten(pickup, 28)}',
+                      phase == _BannerPhase.scheduled
+                          ? 'To: ${_shorten(destination, 28)}'
+                          : 'From: ${_shorten(pickup, 28)}',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.55),
                         fontSize: 11,
@@ -191,6 +212,36 @@ class ActiveRideBanner extends ConsumerWidget {
                         fontSize: 18,
                         fontWeight: FontWeight.w800,
                         letterSpacing: 3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            // Scheduled ride indicator
+            if (phase == _BannerPhase.scheduled)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.schedule,
+                      size: 14,
+                      color: Colors.white.withValues(alpha: 0.85),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Later',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ],
@@ -244,6 +295,9 @@ class ActiveRideBanner extends ConsumerWidget {
   /// Navigate to the correct screen based on ride phase.
   void _navigate(BuildContext context, _BannerPhase phase, String rideId) {
     switch (phase) {
+      case _BannerPhase.scheduled:
+        context.push(AppRoutes.scheduledRide);
+        break;
       case _BannerPhase.searching:
         context.push(AppRoutes.searchingDrivers);
         break;
@@ -274,16 +328,40 @@ class ActiveRideBanner extends ConsumerWidget {
     if (text.length <= max) return text;
     return '${text.substring(0, max)}...';
   }
+
+  String _formatScheduledTime(DateTime scheduled) {
+    final now = DateTime.now();
+    final tomorrow = DateTime(now.year, now.month, now.day + 1);
+    final timeStr =
+        '${scheduled.hour > 12 ? scheduled.hour - 12 : (scheduled.hour == 0 ? 12 : scheduled.hour)}:'
+        '${scheduled.minute.toString().padLeft(2, '0')} '
+        '${scheduled.hour >= 12 ? 'PM' : 'AM'}';
+
+    if (scheduled.year == now.year &&
+        scheduled.month == now.month &&
+        scheduled.day == now.day) {
+      return 'Today, $timeStr';
+    }
+    if (scheduled.year == tomorrow.year &&
+        scheduled.month == tomorrow.month &&
+        scheduled.day == tomorrow.day) {
+      return 'Tomorrow, $timeStr';
+    }
+    return '${scheduled.day}/${scheduled.month}/${scheduled.year}, $timeStr';
+  }
 }
 
 /// Internal ride phase for the banner.
 enum _BannerPhase {
+  scheduled,
   searching,
   driverArriving,
   inProgress;
 
   String get label {
     switch (this) {
+      case scheduled:
+        return 'Scheduled Ride';
       case searching:
         return 'Searching for Driver';
       case driverArriving:
@@ -295,6 +373,8 @@ enum _BannerPhase {
 
   Color get labelColor {
     switch (this) {
+      case scheduled:
+        return const Color(0xFF9CA3AF);
       case searching:
         return const Color(0xFFD4956A);
       case driverArriving:
@@ -306,6 +386,8 @@ enum _BannerPhase {
 
   Color get dotColor {
     switch (this) {
+      case scheduled:
+        return const Color(0xFF9CA3AF);
       case searching:
         return const Color(0xFFD4956A);
       case driverArriving:

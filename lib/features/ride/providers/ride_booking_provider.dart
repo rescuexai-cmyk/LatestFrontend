@@ -1,13 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../../core/models/ride_stop.dart';
+import '../data/pending_ride_storage.dart';
 
-/// A stop between pickup and destination (Ola/Uber/Rapido style).
-/// [location] may be null while the user is still choosing the place inline.
-class RideStop {
-  final String address;
-  final LatLng? location;
-  const RideStop({required this.address, this.location});
-}
+export '../../../core/models/ride_stop.dart';
 
 /// State class to hold ride booking information
 class RideBookingState {
@@ -36,6 +34,8 @@ class RideBookingState {
   final bool isEcoPickup; // Whether eco pickup option was selected
   final String? ecoPickupAddress; // Alternate pickup address for eco pickup
   final LatLng? ecoPickupLocation; // Alternate pickup location for eco pickup
+  /// When set, ride is booked for later — driver matching starts closer to pickup.
+  final DateTime? scheduledTime;
 
   const RideBookingState({
     this.rideId,
@@ -62,7 +62,14 @@ class RideBookingState {
     this.isEcoPickup = false,
     this.ecoPickupAddress,
     this.ecoPickupLocation,
+    this.scheduledTime,
   });
+
+  bool get hasActiveRideId => rideId != null && rideId!.isNotEmpty;
+
+  /// True when user booked for a future pickup time (not immediate search).
+  bool get isScheduledRide =>
+      scheduledTime != null && hasActiveRideId;
 
   RideBookingState copyWith({
     String? rideId,
@@ -89,6 +96,8 @@ class RideBookingState {
     bool? isEcoPickup,
     String? ecoPickupAddress,
     LatLng? ecoPickupLocation,
+    DateTime? scheduledTime,
+    bool clearScheduledTime = false,
     /// When true, clears drop + route summary (used by Plan Your Ride clear ×).
     bool clearDestination = false,
     /// When true, clears pickup (+ eco pickup hints) and route summary (pickup clear ×).
@@ -132,6 +141,9 @@ class RideBookingState {
           clearPickup ? null : ecoPickupAddress ?? this.ecoPickupAddress,
       ecoPickupLocation:
           clearPickup ? null : ecoPickupLocation ?? this.ecoPickupLocation,
+      scheduledTime: clearScheduledTime
+          ? null
+          : (scheduledTime ?? this.scheduledTime),
     );
   }
 }
@@ -277,10 +289,33 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
 
   void setRideDetails({String? rideId, String? otp}) {
     state = state.copyWith(rideId: rideId, rideOtp: otp);
+    unawaited(_persistIfNeeded());
+  }
+
+  void setScheduledTime(DateTime? scheduledTime) {
+    state = state.copyWith(
+      scheduledTime: scheduledTime,
+      clearScheduledTime: scheduledTime == null,
+    );
+  }
+
+  /// Restore booking from disk after cold start (scheduled / in-progress rides).
+  Future<bool> restorePersistedBooking() async {
+    final saved = await PendingRideStorage.load();
+    if (saved == null) return false;
+    state = saved;
+    return true;
+  }
+
+  Future<void> _persistIfNeeded() async {
+    if (state.hasActiveRideId) {
+      await PendingRideStorage.save(state);
+    }
   }
 
   void reset() {
     state = const RideBookingState();
+    unawaited(PendingRideStorage.clear());
   }
 
   /// Clear ride ID and OTP only — keep pickup, drop, fare, cab type for a new search.
@@ -311,7 +346,9 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
       isEcoPickup: state.isEcoPickup,
       ecoPickupAddress: state.ecoPickupAddress,
       ecoPickupLocation: state.ecoPickupLocation,
+      scheduledTime: state.scheduledTime,
     );
+    unawaited(PendingRideStorage.clear());
   }
 }
 

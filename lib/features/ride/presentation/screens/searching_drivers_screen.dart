@@ -482,33 +482,47 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
       ),
     );
   }
+
+  bool _isRescueBooking(RideBookingState booking) {
+    final cabId = booking.selectedCabTypeId.toLowerCase();
+    final cabName = booking.selectedCabTypeName.toLowerCase();
+    return cabId.contains('rescue') || cabName.contains('rescue');
+  }
+
   Widget _buildHeader() {
+    final isRescue = _isRescueBooking(ref.watch(rideBookingProvider));
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           FigmaSquareBackButton(onPressed: () => context.pop()),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFFD4956A),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Text(
-              'Rescue',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
+          if (isRescue) ...[
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFFD4956A),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Text(
+                'Rescue',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-          ),
+            const Spacer(),
+          ] else
+            const Spacer(),
           const SizedBox(width: 24),
         ],
       ),
     );
   }
+
   Widget _buildMapLayer() {
     return Stack(
       children: [

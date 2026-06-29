@@ -1909,6 +1909,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           data['driverRoleNeeded'],
       'hasVehicle': data['hasVehicle'],
       'vehicleDropAddress': data['vehicleDropAddress'],
+      'stops': data['stops'] ?? data['intermediateStops'] ?? data['waypoints'],
+      'pickupLocation': data['pickupLocation'] ?? data['pickup_location'],
+      'dropLocation': data['dropLocation'] ??
+          data['destination_location'] ??
+          data['drop_location'],
+      'pickupLat': data['pickupLat'] ?? data['pickup_lat'],
+      'pickupLng': data['pickupLng'] ?? data['pickup_lng'],
+      'dropLat': data['dropLat'] ?? data['drop_lat'],
+      'dropLng': data['dropLng'] ?? data['drop_lng'],
     });
   }
 
@@ -1975,6 +1984,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       'estimatedFare': offer.earning,
       if (offer.riderName != null) 'riderName': offer.riderName,
     };
+    if (offer.stops.isNotEmpty) {
+      payload['stops'] = offer.stops.map((s) => s.toApiJson()).toList();
+      payload['stopCount'] = offer.stopCount;
+    }
 
     final tripMins = _inferTripMinutesFromEtaLabel(offer.dropTime);
     if (tripMins != null) payload['estimatedDurationMinutes'] = tripMins;
@@ -2130,7 +2143,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         notifier.removeRide(rideId);
         // If the cancelled ride was our accepted ride, clear it and return home
         final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
-        if (acceptedRide != null && acceptedRide.id == rideId) {
+        if (acceptedRide != null && rideOfferMatchesId(acceptedRide, rideId)) {
           notifier.clearAcceptedRide();
           final reason = data['reason'] as String? ??
               data['cancelReason'] as String? ??
@@ -2152,7 +2165,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       debugPrint('✅ Ride completed: $rideId');
       if (mounted && rideId != null) {
         final acceptedRide = ref.read(driverRidesProvider).acceptedRide;
-        if (acceptedRide != null && acceptedRide.id == rideId) {
+        if (acceptedRide != null && rideOfferMatchesId(acceptedRide, rideId)) {
           ref.read(driverRidesProvider.notifier).clearAcceptedRide();
         }
       }
@@ -3291,7 +3304,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   ),
                   SizedBox(height: compact ? 2 : 4),
                   Text(
-                    '${acceptedRide.pickupAddress} → ${acceptedRide.dropAddress}',
+                    acceptedRide.hasIntermediateStops
+                        ? '${acceptedRide.pickupAddress} → ${acceptedRide.stopCount} stop(s) → ${acceptedRide.dropAddress}'
+                        : '${acceptedRide.pickupAddress} → ${acceptedRide.dropAddress}',
                     style: subtitleStyle,
                     maxLines: compact ? 1 : 2,
                     overflow: TextOverflow.ellipsis,

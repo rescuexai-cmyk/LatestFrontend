@@ -19,6 +19,9 @@ import 'core/router/app_routes.dart';
 import 'features/auth/providers/auth_provider.dart';
 import 'features/driver/providers/driver_rides_provider.dart';
 import 'features/ride/providers/ride_booking_provider.dart';
+import 'features/ride/providers/ride_provider.dart';
+import 'core/models/ride.dart';
+import 'core/services/api_client.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 // supportedLanguages is already exported from settings_provider.dart
 
@@ -402,6 +405,7 @@ class RideHailingApp extends ConsumerStatefulWidget {
 
 class _RideHailingAppState extends ConsumerState<RideHailingApp> {
   bool _pendingRideReplayStarted = false;
+  bool _pendingBookingRestoreStarted = false;
 
   @override
   void initState() {
@@ -410,6 +414,7 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
     _setupNotificationHandler();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _replayPendingRideAcceptActions();
+      _restorePersistedRiderBooking();
     });
   }
 
@@ -452,6 +457,52 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
       paymentMethod: (data['paymentMethod'] ?? 'cash').toString(),
       createdAt: DateTime.now(),
     );
+  }
+
+  Future<void> _restorePersistedRiderBooking() async {
+    if (_pendingBookingRestoreStarted) return;
+    _pendingBookingRestoreStarted = true;
+
+    for (int i = 0; i < 6; i++) {
+      if (!mounted) return;
+      final user = ref.read(authStateProvider).user;
+      if (user != null && user.userType != UserType.driver) break;
+      if (user?.userType == UserType.driver) return;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    if (!mounted) return;
+    final user = ref.read(authStateProvider).user;
+    if (user == null || user.userType == UserType.driver) return;
+
+    final current = ref.read(rideBookingProvider);
+    if (current.hasActiveRideId) return;
+
+    final restored =
+        await ref.read(rideBookingProvider.notifier).restorePersistedBooking();
+    if (!restored || !mounted) return;
+
+    final booking = ref.read(rideBookingProvider);
+    if (!booking.hasActiveRideId) return;
+
+    // Verify ride still exists on backend (handles stale local cache).
+    try {
+      final response = await apiClient.getRide(booking.rideId!);
+      final ride = Ride.fromJson(Ride.unwrapRidePayload(response));
+      if (ride.status == RideStatus.cancelled ||
+          ride.status == RideStatus.completed) {
+        ref.read(rideBookingProvider.notifier).reset();
+        return;
+      }
+      if (ride.status == RideStatus.accepted ||
+          ride.status == RideStatus.arriving ||
+          ride.status == RideStatus.driverArriving ||
+          ride.status == RideStatus.inProgress) {
+        ref.read(activeRideProvider.notifier).setActiveRide(ride);
+      }
+    } catch (_) {
+      ref.read(rideBookingProvider.notifier).reset();
+    }
   }
 
   Future<void> _replayPendingRideAcceptActions() async {

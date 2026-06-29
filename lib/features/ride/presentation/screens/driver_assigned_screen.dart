@@ -8,6 +8,8 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/models/ride.dart';
+import '../../../../core/models/ride_stop.dart';
+import '../../../driver/presentation/widgets/driver_trip_route_summary.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
@@ -121,6 +123,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   late String _dropAddress;
   late LatLng _pickupLocation;
   late LatLng _destinationLocation;
+  List<RideStop> _intermediateStops = const [];
   late LatLng _driverLocation;
   String? _rideId;
 
@@ -209,6 +212,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         bookingState.pickupLocation ?? const LatLng(28.4595, 77.0266); // Fallback only for safety
     _destinationLocation =
         bookingState.destinationLocation ?? const LatLng(28.4949, 77.0887); // Fallback only for safety
+    _intermediateStops = List<RideStop>.from(bookingState.stops);
     _driverLocation = LatLng(
       _pickupLocation.latitude + 0.003,
       _pickupLocation.longitude + 0.002,
@@ -260,7 +264,41 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       debugPrint('🔐 getRide response: $response');
 
       // Backend returns { success: true, data: { rideOtp: "1234", driver: {...}, status, ... } }
-      final rideData = response['data'] as Map<String, dynamic>? ?? response;
+      final rideData = Ride.unwrapRidePayload(
+        response['data'] is Map<String, dynamic>
+            ? response['data'] as Map<String, dynamic>
+            : Map<String, dynamic>.from(response),
+      );
+
+      final backendStops = parseRideStopsFromJson(
+        rideData['stops'] ??
+            rideData['intermediateStops'] ??
+            rideData['waypoints'],
+      );
+      final pickupPoint = parsePickupLatLngFromJson(rideData);
+      final dropPoint = parseDropLatLngFromJson(rideData);
+      if (mounted) {
+        setState(() {
+          if (backendStops.isNotEmpty) {
+            _intermediateStops = backendStops;
+          } else if (_intermediateStops.isEmpty) {
+            _intermediateStops =
+                List<RideStop>.from(ref.read(rideBookingProvider).stops);
+          }
+          if (pickupPoint != null) _pickupLocation = pickupPoint;
+          if (dropPoint != null) _destinationLocation = dropPoint;
+          final pickupAddr = rideData['pickupAddress']?.toString();
+          final dropAddr = rideData['dropAddress']?.toString();
+          if (pickupAddr != null && pickupAddr.isNotEmpty) {
+            _pickupAddress = pickupAddr;
+          }
+          if (dropAddr != null && dropAddr.isNotEmpty) {
+            _dropAddress = dropAddr;
+          }
+        });
+        _setupMapElements();
+        unawaited(_calculateRoutes());
+      }
 
       // Sync phase from backend status — handles cases where driver already started/completed before we connected
       _syncPhaseFromStatus(rideData);
@@ -957,6 +995,33 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
 
     // Do not add pickup marker in rideInProgress/completed.
     // This mirrors real ride behavior where passenger is already in the vehicle.
+    if (_phase != _RidePhase.driverEnRoute || _intermediateStops.isNotEmpty) {
+      nextMarkers.add(
+        Marker(
+          markerId: const MarkerId('drop'),
+          position: _destinationLocation,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          infoWindow: const InfoWindow(title: 'Drop'),
+        ),
+      );
+    }
+
+    for (var i = 0; i < _intermediateStops.length; i++) {
+      final stop = _intermediateStops[i];
+      if (stop.location == null) continue;
+      nextMarkers.add(
+        Marker(
+          markerId: MarkerId('stop_$i'),
+          position: stop.location!,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueYellow),
+          infoWindow: InfoWindow(
+            title: 'Stop ${i + 1}',
+            snippet: stop.address,
+          ),
+        ),
+      );
+    }
+
     _markers = nextMarkers;
   }
 
@@ -985,6 +1050,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       final route = await _directionsService.getRoute(
         origin: origin,
         destination: destination,
+        waypoints: _phase == _RidePhase.rideInProgress
+            ? rideStopWaypoints(_intermediateStops)
+            : null,
         mode: TravelMode.driving,
       );
 
@@ -2618,6 +2686,15 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
   }
 
   Widget _buildTripLocations() {
+    if (_intermediateStops.isNotEmpty) {
+      return DriverTripRouteSummary(
+        pickupAddress: _pickupAddress,
+        dropAddress: _dropAddress,
+        stops: _intermediateStops,
+        compact: true,
+      );
+    }
+
     return Column(children: [
       _locationRow(_pickupAddress, const Color(0xFF1A1A1A)),
       Container(

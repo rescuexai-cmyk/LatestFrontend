@@ -255,7 +255,11 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     }
 
     if (bookingState.rideId != null && bookingState.rideId!.isNotEmpty) {
-      context.push(AppRoutes.searchingDrivers);
+      if (bookingState.isScheduledRide) {
+        context.push(AppRoutes.scheduledRide);
+      } else {
+        context.push(AppRoutes.searchingDrivers);
+      }
       return;
     }
 

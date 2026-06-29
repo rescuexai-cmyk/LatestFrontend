@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/widgets/otp_input_field.dart';
 import '../../providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
@@ -30,8 +31,8 @@ class OTPVerificationScreen extends ConsumerStatefulWidget {
 }
 
 class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
-  final List<TextEditingController> _controllers = List.generate(6, (_) => TextEditingController());
-  final List<FocusNode> _focusNodes = List.generate(6, (_) => FocusNode());
+  final TextEditingController _otpController = TextEditingController();
+  final FocusNode _otpFocusNode = FocusNode();
   int _resendTimer = 30;
   Timer? _timer;
   bool _isLoading = false;
@@ -45,12 +46,8 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
 
   @override
   void dispose() {
-    for (final controller in _controllers) {
-      controller.dispose();
-    }
-    for (final node in _focusNodes) {
-      node.dispose();
-    }
+    _otpController.dispose();
+    _otpFocusNode.dispose();
     _timer?.cancel();
     super.dispose();
   }
@@ -67,7 +64,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
     });
   }
 
-  String get _otp => _controllers.map((c) => c.text).join();
+  String get _otp => _otpController.text;
 
   /// [context.pop()] is no-op when this screen replaced the stack via [context.go].
   void _handleOtpExit() {
@@ -164,20 +161,8 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
   }
 
   void _clearOTP() {
-    for (final controller in _controllers) {
-      controller.clear();
-    }
-    _focusNodes[0].requestFocus();
-  }
-
-  void _onOTPChanged(String value, int index) {
-    if (value.isNotEmpty && index < 5) {
-      _focusNodes[index + 1].requestFocus();
-    } else if (value.isNotEmpty && index == 5) {
-      _focusNodes[index].unfocus();
-      // Auto-verify when OTP is complete
-      _verifyOTP();
-    }
+    _otpController.clear();
+    _otpFocusNode.requestFocus();
   }
 
   void _showResendOptions() {
@@ -311,51 +296,14 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
               
               const SizedBox(height: 32),
               
-              // OTP Input boxes (6 digits)
-              // Note: Do NOT use the same FocusNode for both a parent listener and TextField -
-              // that causes "Tried to make a child into a parent of itself" (focus tree conflict).
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: List.generate(6, (index) {
-                  return SizedBox(
-                    width: 48,
-                    height: 56,
-                    child: TextField(
-                      controller: _controllers[index],
-                      focusNode: _focusNodes[index],
-                      textAlign: TextAlign.center,
-                      textAlignVertical: TextAlignVertical.center,
-                      keyboardType: TextInputType.number,
-                      maxLength: 1,
-                      enabled: !_isLoading,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1A1A1A),
-                      ),
-                      decoration: InputDecoration(
-                        counterText: '',
-                        filled: true,
-                        fillColor: const Color(0xFFF5F5F5),
-                        contentPadding: const EdgeInsets.symmetric(vertical: 14),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(color: Color(0xFF1A1A1A), width: 2),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      onChanged: (value) => _onOTPChanged(value, index),
-                    ),
-                  );
-                }),
+              // OTP Input boxes (6 digits) — single hidden field for iOS autofill.
+              OtpInputField(
+                controller: _otpController,
+                focusNode: _otpFocusNode,
+                enabled: !_isLoading,
+                boxWidth: 48,
+                onCompleted: (_) => _verifyOTP(),
+                onChanged: (_) => setState(() {}),
               ),
               
               const SizedBox(height: 24),
