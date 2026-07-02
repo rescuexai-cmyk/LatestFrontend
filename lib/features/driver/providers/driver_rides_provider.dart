@@ -1240,7 +1240,18 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final response = await _apiClient.acceptRide(rideId);
+      // The Redis claim gate can briefly report RIDE_BEING_ACCEPTED when another
+      // accept for the same ride is mid-flight. That's retryable — the ride may
+      // still be free once the in-flight attempt resolves — so try once more
+      // after a short delay before giving up.
+      Map<String, dynamic> response = await _apiClient.acceptRide(rideId);
+      if (response['success'] != true &&
+          (response['code'] == 'RIDE_BEING_ACCEPTED' ||
+              response['retryable'] == true)) {
+        debugPrint('⏳ Ride $rideId claim gate busy, retrying accept once...');
+        await Future.delayed(const Duration(milliseconds: 600));
+        response = await _apiClient.acceptRide(rideId);
+      }
 
       if (response['success'] == true) {
         RideOffer? acceptedRide;
@@ -1318,14 +1329,32 @@ class DriverRidesNotifier extends StateNotifier<DriverRidesState> {
         final code = response['code'] as String?;
         String errorMessage;
 
-        if (code == 'RIDE_ALREADY_TAKEN') {
-          errorMessage = 'This ride has already been accepted by another driver';
-          // Remove the ride since it's taken
-          removeRide(rideId);
-        } else if (code == 'FORBIDDEN') {
-          errorMessage = response['message'] ?? 'You are not authorized to accept rides';
-        } else {
-          errorMessage = response['message'] ?? 'Failed to accept ride';
+        switch (code) {
+          case 'RIDE_ALREADY_TAKEN':
+          case 'INVALID_RIDE_STATUS':
+            // Ride is gone — drop it from the offer queues.
+            errorMessage = response['message']?.toString() ??
+                'This ride has already been accepted by another driver';
+            removeRide(rideId);
+            break;
+          case 'DRIVER_BUSY':
+            // Keep the offer around; the driver must finish their active ride.
+            errorMessage = response['message']?.toString() ??
+                'You already have an active ride. Complete it before accepting another.';
+            break;
+          case 'RIDE_BEING_ACCEPTED':
+            // Still contended after the retry — leave the offer so the driver
+            // can try again in a moment.
+            errorMessage = response['message']?.toString() ??
+                'This ride is being accepted by another driver. Please try again.';
+            break;
+          case 'FORBIDDEN':
+            errorMessage = response['message']?.toString() ??
+                'You are not authorized to accept rides';
+            break;
+          default:
+            errorMessage =
+                response['message']?.toString() ?? 'Failed to accept ride';
         }
 
         state = state.copyWith(isLoading: false, error: errorMessage);

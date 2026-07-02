@@ -9,6 +9,7 @@ import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/widgets/otp_input_field.dart';
 import '../../providers/auth_provider.dart';
+import '../widgets/phone_already_registered_dialog.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 class OTPVerificationScreen extends ConsumerStatefulWidget {
@@ -68,17 +69,35 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
 
   /// [context.pop()] is no-op when this screen replaced the stack via [context.go].
   void _handleOtpExit() {
+    firebasePhoneAuth.clearVerification();
     final router = GoRouter.of(context);
     if (router.canPop()) {
       router.pop();
       return;
     }
-    firebasePhoneAuth.clearVerification();
     if (widget.isPhoneLinkMode) {
-      router.go('${AppRoutes.signup}?mode=linkPhone');
+      router.go('${AppRoutes.phoneNumber}?mode=linkPhone');
     } else {
       router.go(AppRoutes.signup);
     }
+  }
+
+  Future<void> _exitToLoginWithPhone() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+    firebasePhoneAuth.clearVerification();
+    await ref.read(authStateProvider.notifier).signOut();
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+    context.go('${AppRoutes.login}?phone=${_cleanPhone}');
+  }
+
+  void _handlePhoneRegistrationConflict() {
+    showPhoneAlreadyRegisteredDialog(
+      context: context,
+      onLoginWithPhone: _exitToLoginWithPhone,
+      onUseDifferentNumber: _handleOtpExit,
+    );
   }
 
   /// Returns the 10-digit phone number without country code
@@ -148,7 +167,12 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
             context.go(AppRoutes.home);
           }
         } else {
-          AppMessenger.showErrorBanner(context, result.error ?? 'Invalid OTP');
+          final error = result.error ?? 'Invalid OTP';
+          if (isPhoneAlreadyRegisteredError(error)) {
+            _handlePhoneRegistrationConflict();
+          } else {
+            AppMessenger.showErrorBanner(context, error);
+          }
           _clearOTP();
         }
       }
@@ -264,7 +288,12 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && !_isLoading) _handleOtpExit();
+      },
+      child: Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
         child: Padding(
@@ -404,6 +433,7 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
           ),
         ),
       ),
+    ),
     );
   }
 }

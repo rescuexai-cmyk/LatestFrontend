@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
@@ -1494,7 +1495,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           mode = MarketplaceMode.launch;
         }
         // Parse cab options from backend (v2 returns per-category pricing)
-        final List<CabType> options = [];
+        List<CabType> options = [];
         final cabOptionsData = pricingData['cab_options'] ??
             pricingData['cabOptions'] ??
             pricingData['options'];
@@ -1600,8 +1601,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               totalSavings = subsidy.maxSubsidyCap;
           }
         }
-        // Add eco pickup option if available
-        if (ecoPickup != null && ecoPickup.isAvailable) {
+        // Prefer the backend's authoritative allowed + available vehicle list
+        // (POST /api/pricing/calculate-all). It already omits cross-zone-blocked
+        // and no-driver types and includes personal_driver / eco_pickup when
+        // applicable. Falls back to the calculate-derived list on any failure.
+        final allowedOptions = await _fetchAllowedVehicleOptions();
+        if (allowedOptions != null && allowedOptions.isNotEmpty) {
+          options = allowedOptions;
+        } else if (ecoPickup != null && ecoPickup.isAvailable) {
+          // Fallback path: synthesize the eco pickup option locally.
           final baseFare = options.isNotEmpty ? options.first.fare : 100.0;
           final ecoFare = (baseFare * (1 - ecoPickup.discountPct))
               .clamp(15.0, double.infinity);
@@ -1634,6 +1642,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             .toDouble();
         setState(() {
           _cabTypes = options;
+          _ensureValidSelectedCab(options);
           _cabFares = fares;
           _isSurgeActive = isSurge;
           _surgeMultiplier = surgeMultiplier;
@@ -1666,11 +1675,174 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             '❌ Pricing API returned unsuccessful: ${data['message'] ?? 'Unknown error'}');
         _loadFallbackPricing(distance, duration);
       }
+    } on DioException catch (e) {
+      // Cross-zone block (e.g. auto with no interstate permit) → surface the
+      // backend message instead of silently pricing a disallowed vehicle.
+      final data = e.response?.data;
+      if (e.response?.statusCode == 422 &&
+          data is Map &&
+          data['code'] == 'CROSS_ZONE_VEHICLE_BLOCKED') {
+        final msg = (data['message'] ??
+                'This vehicle is not permitted on the selected route.')
+            .toString();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(msg)),
+          );
+        }
+      }
+      debugPrint('❌ Error fetching pricing: $e');
+      _loadFallbackPricing(distance, duration);
     } catch (e) {
       debugPrint('❌ Error fetching pricing: $e');
       _loadFallbackPricing(distance, duration);
     }
   }
+
+  /// Fetch the authoritative allowed + currently-available vehicle list from the
+  /// backend (POST /api/pricing/calculate-all). Returns null when the endpoint
+  /// is unavailable or returns nothing, so callers can fall back gracefully.
+  /// The server omits cross-zone-blocked and no-driver types, so we render only
+  /// whatever keys come back — never a hardcoded list.
+  Future<List<CabType>?> _fetchAllowedVehicleOptions() async {
+    if (_pickupLocation == null || _destinationLocation == null) return null;
+    try {
+      final completeStops = _stops.where((s) => s.location != null).toList();
+      final stopsForPricing = completeStops.isNotEmpty
+          ? completeStops
+              .map((s) => {
+                    'lat': s.location!.latitude,
+                    'lng': s.location!.longitude,
+                    'address': s.address,
+                  })
+              .toList()
+          : null;
+      final res = await apiClient.getRidePricingAll(
+        pickupLat: _pickupLocation!.latitude,
+        pickupLng: _pickupLocation!.longitude,
+        dropLat: _destinationLocation!.latitude,
+        dropLng: _destinationLocation!.longitude,
+        stops: stopsForPricing,
+        scheduledTime: _scheduledTime?.toUtc().toIso8601String(),
+      );
+      if (res['success'] != true) return null;
+      final map = res['data'];
+      if (map is! Map || map.isEmpty) return null;
+      final options = _cabOptionsFromTypeMap(Map<String, dynamic>.from(map));
+      return options.isEmpty ? null : options;
+    } catch (e) {
+      debugPrint('⚠️ calculate-all unavailable, using single-quote pricing: $e');
+      return null;
+    }
+  }
+
+  /// Preferred display order; unknown keys are appended alphabetically after.
+  static const List<String> _vehicleTypeOrder = [
+    'bike_rescue',
+    'auto',
+    'cab_mini',
+    'cab_xl',
+    'cab_premium',
+    'personal_driver',
+    'eco_pickup',
+  ];
+  static const Map<String, String> _vehicleNames = {
+    'bike_rescue': 'Bike Rescue',
+    'auto': 'Auto',
+    'cab_mini': 'Cab Mini',
+    'cab_xl': 'Cab XL',
+    'cab_premium': 'Premium',
+    'personal_driver': 'Personal Driver',
+    'eco_pickup': 'Eco Pickup',
+  };
+  static const Map<String, String> _vehicleDescriptions = {
+    'bike_rescue': 'Quick bike rescue',
+    'auto': 'Auto rickshaw',
+    'cab_mini': 'Compact car',
+    'cab_xl': 'Spacious ride',
+    'cab_premium': 'Luxury ride',
+    'personal_driver': 'Hire a driver, pay by time',
+    'eco_pickup': 'Walk a little, save more',
+  };
+  static const Map<String, int> _vehicleCapacities = {
+    'bike_rescue': 1,
+    'auto': 3,
+    'cab_mini': 4,
+    'cab_xl': 6,
+    'cab_premium': 4,
+    'personal_driver': 4,
+    'eco_pickup': 1,
+  };
+
+  String _prettifyVehicleKey(String key) {
+    return key
+        .split('_')
+        .where((w) => w.isNotEmpty)
+        .map((w) => '${w[0].toUpperCase()}${w.substring(1)}')
+        .join(' ');
+  }
+
+  /// Build ordered [CabType]s from a `calculate-all` `{ "<type>": {fare} }` map.
+  List<CabType> _cabOptionsFromTypeMap(Map<String, dynamic> byType) {
+    final keys = byType.keys.toList()
+      ..sort((a, b) {
+        final ia = _vehicleTypeOrder.indexOf(a);
+        final ib = _vehicleTypeOrder.indexOf(b);
+        final sa = ia == -1 ? 900 : ia;
+        final sb = ib == -1 ? 900 : ib;
+        if (sa != sb) return sa.compareTo(sb);
+        return a.compareTo(b);
+      });
+    final result = <CabType>[];
+    for (final key in keys) {
+      final raw = byType[key];
+      if (raw is! Map) continue;
+      final entry = Map<String, dynamic>.from(raw);
+      final fare = (entry['effective_fare'] ??
+              entry['effectiveFare'] ??
+              entry['totalFare'] ??
+              entry['total_fare'] ??
+              entry['fare'] ??
+              0)
+          .toDouble();
+      result.add(CabType(
+        id: key,
+        name: (entry['name'] ?? _vehicleNames[key] ?? _prettifyVehicleKey(key))
+            .toString(),
+        description:
+            (entry['description'] ?? _vehicleDescriptions[key] ?? '').toString(),
+        iconName: _getIconName(key),
+        capacity: (entry['capacity'] as num?)?.toInt() ??
+            _vehicleCapacities[key] ??
+            4,
+        fare: fare,
+        baseFare: (entry['base_fare'] ?? entry['baseFare'] ?? 0).toDouble(),
+        perKmRate:
+            (entry['per_km_rate'] ?? entry['perKmRate'] ?? 0).toDouble(),
+        perMinRate:
+            (entry['per_min_rate'] ?? entry['perMinRate'] ?? 0).toDouble(),
+        eta: (entry['eta'] ?? '5 min').toString(),
+        isPopular: entry['is_popular'] ?? entry['isPopular'] ?? key == 'cab_mini',
+        badge: entry['badge'],
+        surgeMultiplier:
+            (entry['surge_multiplier'] ?? entry['surgeMultiplier'] ?? 1.0)
+                .toDouble(),
+        isSurge: entry['is_surge'] ?? entry['isSurge'] ?? false,
+      ));
+    }
+    return result;
+  }
+
+  /// Keep [_selectedCabType] pointing at a type that actually exists in the
+  /// current list (calculate-all may omit the previously-selected type).
+  void _ensureValidSelectedCab(List<CabType> options) {
+    if (options.isEmpty) return;
+    if (options.any((c) => c.id == _selectedCabType)) return;
+    final preferred =
+        options.firstWhere((c) => c.isPopular, orElse: () => options.first);
+    _selectedCabType = preferred.id;
+  }
+
   /// Get icon name for vehicle type
   String _getIconName(String vehicleType) {
     switch (vehicleType.toLowerCase()) {
@@ -1690,6 +1862,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         return 'diamond';
       case 'eco_pickup':
         return 'directions_walk';
+      case 'personal_driver':
+        return 'person';
       default:
         return 'directions_car';
     }
@@ -1783,6 +1957,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
     setState(() {
       _cabTypes = options;
+      _ensureValidSelectedCab(options);
       _cabFares = fares;
       _isLoadingPricing = false;
     });
@@ -3646,7 +3821,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     );
   }
   Widget _buildFareBreakdown() {
-    final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType);
+    final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType,
+        orElse: () => _cabTypes.first);
     final fare = _cabFares[_selectedCabType] ?? 0;
     final distanceKm = _distanceText.isNotEmpty
         ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0
@@ -3817,7 +3993,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
 
   void _onBookRideSlideComplete() {
-    final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType);
+    final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType,
+        orElse: () => _cabTypes.first);
     final fare = _cabFares[_selectedCabType] ?? selectedCab.baseFare;
     final bookingState = ref.read(rideBookingProvider);
     final distanceKm = bookingState.distance / 1000;

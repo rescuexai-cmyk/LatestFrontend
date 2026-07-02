@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../providers/auth_provider.dart';
+import '../widgets/phone_already_registered_dialog.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
 /// Input formatter for Indian phone numbers.
@@ -121,10 +122,60 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
         '${AppRoutes.otpVerification}?phone=$phone&isNewUser=true$modeQuery';
     debugPrint('📱 SignUpScreen: Navigating to OTP screen → $otpPath');
     if (widget.isPhoneLinkMode) {
-      context.go(otpPath);
+      context.push(otpPath);
     } else {
       context.push(otpPath);
     }
+  }
+
+  String _normalizedPhoneInput() {
+    String phone = _phoneController.text.trim();
+    phone = phone.replaceAll(RegExp(r'[\s\-()]'), '');
+    if (phone.startsWith('+91')) {
+      phone = phone.substring(3);
+    } else if (phone.startsWith('91') && phone.length > 10) {
+      phone = phone.substring(2);
+    }
+    return phone;
+  }
+
+  Future<void> _exitPhoneLinkFlow({String? phoneForLogin}) async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+    firebasePhoneAuth.clearVerification();
+    await ref.read(authStateProvider.notifier).signOut();
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+    final phone = phoneForLogin?.trim();
+    final loginPath = (phone != null && phone.length == 10)
+        ? '${AppRoutes.login}?phone=$phone'
+        : AppRoutes.login;
+    context.go(loginPath);
+  }
+
+  Future<void> _handleBack() async {
+    if (_isLoading) return;
+    if (widget.isPhoneLinkMode) {
+      await _exitPhoneLinkFlow(phoneForLogin: _normalizedPhoneInput());
+      return;
+    }
+    final router = GoRouter.of(context);
+    if (router.canPop()) {
+      router.pop();
+    } else {
+      router.go(AppRoutes.login);
+    }
+  }
+
+  void _handlePhoneRegistrationConflict(String phone) {
+    showPhoneAlreadyRegisteredDialog(
+      context: context,
+      onLoginWithPhone: () => _exitPhoneLinkFlow(phoneForLogin: phone),
+      onUseDifferentNumber: () {
+        _phoneController.clear();
+        setState(() {});
+      },
+    );
   }
 
   void _startCooldown(int seconds) {
@@ -154,13 +205,7 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
       return;
     }
 
-    String phone = _phoneController.text.trim();
-    phone = phone.replaceAll(RegExp(r'[\s\-()]'), '');
-    if (phone.startsWith('+91')) {
-      phone = phone.substring(3);
-    } else if (phone.startsWith('91') && phone.length > 10) {
-      phone = phone.substring(2);
-    }
+    String phone = _normalizedPhoneInput();
 
     if (phone.isEmpty || phone.length != 10 || !RegExp(r'^[6-9]\d{9}$').hasMatch(phone)) {
       AppMessenger.showErrorBanner(context, 'Please enter a valid 10-digit mobile number');
@@ -204,7 +249,9 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
         }
 
         final error = result.error ?? '';
-        if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
+        if (isPhoneAlreadyRegisteredError(error)) {
+          _handlePhoneRegistrationConflict(phone);
+        } else if (error.contains('429') || error.toLowerCase().contains('too many') || error.toLowerCase().contains('rate limit')) {
           _retryCount++;
           final cooldown = _getCooldownDuration();
           _startCooldown(cooldown);
@@ -226,7 +273,9 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
         }
 
         final errorStr = e.toString();
-        if (errorStr.contains('429') || errorStr.toLowerCase().contains('too many')) {
+        if (isPhoneAlreadyRegisteredError(errorStr)) {
+          _handlePhoneRegistrationConflict(phone);
+        } else if (errorStr.contains('429') || errorStr.toLowerCase().contains('too many')) {
           _retryCount++;
           final cooldown = _getCooldownDuration();
           _startCooldown(cooldown);
@@ -242,7 +291,12 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _handleBack();
+      },
+      child: Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
         child: Padding(
@@ -263,6 +317,17 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
                   color: Color(0xFF1A1A1A),
                 ),
               ),
+              if (widget.isPhoneLinkMode) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Link a mobile number to complete your Google sign-up.',
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.4,
+                    color: Color(0xFF757575),
+                  ),
+                ),
+              ],
               
               const SizedBox(height: 40),
               
@@ -326,6 +391,25 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
                 ),
               ),
               
+              if (widget.isPhoneLinkMode) ...[
+                const SizedBox(height: 16),
+                GestureDetector(
+                  onTap: _isLoading
+                      ? null
+                      : () => _exitPhoneLinkFlow(
+                            phoneForLogin: _normalizedPhoneInput(),
+                          ),
+                  child: const Text(
+                    'Already have an account? Log in',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFFCF923D),
+                    ),
+                  ),
+                ),
+              ],
+              
               const Spacer(),
               
               // Back and Next buttons
@@ -340,7 +424,7 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
                       borderRadius: BorderRadius.circular(28),
                     ),
                     child: IconButton(
-                      onPressed: _isLoading ? null : () => context.pop(),
+                      onPressed: _isLoading ? null : _handleBack,
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
                     ),
                   ),
@@ -403,6 +487,7 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
           ),
         ),
       ),
+    ),
     );
   }
 }

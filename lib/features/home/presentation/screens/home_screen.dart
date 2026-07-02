@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -12,9 +10,10 @@ import '../../../auth/providers/auth_provider.dart';
 import '../../../auth/presentation/widgets/switch_account_sheet.dart';
 import '../../../driver/providers/driver_onboarding_provider.dart';
 import '../../../driver/providers/personal_driver_onboarding_provider.dart';
+import '../../../ride/providers/ride_booking_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 
-/// Figma: Select frame 390×848, background #F6EFD8
+/// Figma: App selection op1 — 390×848, background #FBF2E8
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -22,28 +21,25 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen>
-    with SingleTickerProviderStateMixin {
+class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _isCheckingDriver = false;
 
-  /// User chip "peek": animate in, stay ~2–2.5s, animate out, then remove from tree.
-  late final AnimationController _userChipRevealController;
-  late final Animation<double> _userChipRevealOpacity;
-  late final Animation<Offset> _userChipRevealSlide;
-  bool _userChipRemoved = false;
-
-  /// Extra space below status bar so the header isn’t cramped against the notch.
-  static const _topContentInset = 14.0;
   static const _designW = 390.0;
-  static const _designH = 848.0;
 
-  // Figma tokens
-  static const _cream = Color(0xFFF6EFD8);
-  static const _primaryBtn = Color(0xFFCF923D);
-  static const _secondaryFill = Color(0xFFEEE5CA);
+  // Figma frame height reference: 848px (positions scale uniformly by width).
+  static const _cream = Color(0xFFFBF2E8);
+  static const _primaryBtn = Color(0xFFCB9C5E);
+  static const _secondaryFill = Color(0xFFF9EEDE);
+  static const _iconCircleFill = Color(0xFFFAEEDC);
   static const _borderBrown = Color(0xFFA89C8A);
+  static const _brownIcon = Color(0xFF6F5131);
   static const _textDark = Color(0xFF353535);
-  static const _textSwitch = Color(0xFF353330);
+  static const _headline = Color(0xFF231409);
+  static const _subhead = Color(0xFF545052);
+  static const _secondarySubtitle = Color(0xFF898989);
+  static const _switchLink = Color(0xFF78572A);
+  static const _footerText = Color(0xFF606060);
+
   Future<void> _openDriversApp() async {
     if (_isCheckingDriver) return;
     setState(() => _isCheckingDriver = true);
@@ -54,7 +50,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
       if (!mounted) return;
 
-      // Rescue driver path — chosen on driver onboarding step 2 (vehicle type).
       if (pd.driverAppMode == PersonalDriverOnboardingNotifier.modePersonalRescue) {
         if (pd.canStartRescueJobs) {
           context.push(AppRoutes.driverHome);
@@ -113,7 +108,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     } catch (e) {
       debugPrint('❌ _openDriversApp error: $e');
       if (mounted) {
-        AppMessenger.showErrorBanner(context, '${ref.tr('driver_status_error')}: ${e.toString().replaceAll('Exception: ', '')}',);
+        AppMessenger.showErrorBanner(
+          context,
+          '${ref.tr('driver_status_error')}: ${e.toString().replaceAll('Exception: ', '')}',
+        );
       }
     } finally {
       if (mounted) setState(() => _isCheckingDriver = false);
@@ -124,67 +122,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     AppMessenger.showErrorBanner(context, message);
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _userChipRevealController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 360),
-      reverseDuration: const Duration(milliseconds: 320),
-    );
-    final curve = CurvedAnimation(
-      parent: _userChipRevealController,
-      curve: Curves.easeOutCubic,
-      reverseCurve: Curves.easeInCubic,
-    );
-    _userChipRevealOpacity = curve;
-    _userChipRevealSlide = Tween<Offset>(
-      begin: const Offset(0, -0.22),
-      end: Offset.zero,
-    ).animate(curve);
+  bool _hasActiveRideBanner(BuildContext context) {
+    final booking = ref.watch(rideBookingProvider);
+    final rideId = booking.rideId;
+    if (rideId == null || rideId.isEmpty) return false;
 
-    WidgetsBinding.instance.addPostFrameCallback((_) => _runUserChipPeekAnimation());
+    final route = GoRouterState.of(context).matchedLocation;
+    if (route == AppRoutes.searchingDrivers ||
+        route == AppRoutes.scheduledRide ||
+        route == AppRoutes.driverAssigned ||
+        route.startsWith('/ride/')) {
+      return false;
+    }
+    return true;
   }
 
-  Future<void> _runUserChipPeekAnimation() async {
-    if (!mounted || _userChipRemoved) return;
-    await _userChipRevealController.forward();
-    if (!mounted || _userChipRemoved) return;
-    final dwellMs = 2000 + Random().nextInt(501); // 2000–2500 ms inclusive
-    await Future<void>.delayed(Duration(milliseconds: dwellMs));
-    if (!mounted || _userChipRemoved) return;
-    await _userChipRevealController.reverse();
-    if (!mounted) return;
-    setState(() => _userChipRemoved = true);
-  }
-
-  @override
-  void dispose() {
-    _userChipRevealController.dispose();
-    super.dispose();
-  }
+  double _figma(double width, double v) => v * (width / _designW);
 
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(currentUserProvider);
     final mq = MediaQuery.of(context);
     final w = mq.size.width;
-    final h = mq.size.height;
-    final vx = w / _designW;
-    final vy = h / _designH;
-    final pt = mq.padding.top;
-    final pl = mq.padding.left;
-    final pr = mq.padding.right;
     final bottomSafe = mq.viewPadding.bottom;
+    final s = w / _designW;
+    final showRideBanner = _hasActiveRideBanner(context);
 
-    /// Figma tops are from frame top; overlay is laid out below status bar.
-    double y(double figmaTop) => (figmaTop * vy - pt).clamp(0.0, double.infinity);
+    double figma(double v) => _figma(w, v);
 
-    final contentW = 346 * vx;
-    final heroH = 587 * vy;
-    final heroTop = -31 * vy;
-    final gradTop = 129 * vy;
-    final gradH = 427 * vy;
+    // Hero zoom-out + vertical crop tuned to Figma wide street framing.
+    const heroImageWidthFactor = 0.68;
+    const heroImageAlignY = 0.82;
 
     return Scaffold(
       backgroundColor: _cream,
@@ -193,25 +161,34 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         children: [
           const Positioned.fill(child: ColoredBox(color: _cream)),
 
-          // ChatGPT hero: 391×587, top -31
+          // Layer 1 — hero 688×627 at (-119, -21)
           Positioned(
-            top: heroTop,
-            left: 0,
-            right: 0,
-            height: heroH,
-            child: Image.asset(
-              'assets/images/home_traffic_hero.png',
-              fit: BoxFit.cover,
-              alignment: Alignment.topCenter,
+            left: figma(-119),
+            top: figma(-21),
+            width: figma(688),
+            height: figma(627),
+            child: ClipRect(
+              child: ColoredBox(
+                color: const Color(0xFFB8C5D0),
+                child: Align(
+                  alignment: Alignment(0, heroImageAlignY),
+                  child: Image.asset(
+                    'assets/images/home_selection_hero_bg.png',
+                    width: figma(688) * heroImageWidthFactor,
+                    fit: BoxFit.fitWidth,
+                    alignment: Alignment.topCenter,
+                  ),
+                ),
+              ),
             ),
           ),
 
-          // Rectangle 4072: gradient 390×427, top 129
+          // Layer 2 — gradient fade top 396, height 210
           Positioned(
-            top: gradTop,
+            top: figma(396),
             left: 0,
             right: 0,
-            height: gradH,
+            height: figma(210),
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
@@ -219,63 +196,49 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   end: Alignment.bottomCenter,
                   colors: [
                     _cream.withValues(alpha: 0),
+                    _cream.withValues(alpha: 0.6548),
                     _cream,
                   ],
+                  stops: const [0.0, 0.6548, 1.0],
                 ),
               ),
             ),
           ),
 
-          // Foreground: positions match Figma after subtracting status-bar inset.
-          Padding(
-            padding: EdgeInsets.only(
-              top: pt + _topContentInset,
-              left: pl,
-              right: pr,
-            ),
-            child: SizedBox(
-              width: w - pl - pr,
-              height: h - pt - _topContentInset - bottomSafe,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  if (!_userChipRemoved)
-                    Positioned(
-                      top: y(70),
-                      left: 16,
-                      right: 16,
-                      child: Center(
-                        child: FadeTransition(
-                          opacity: _userChipRevealOpacity,
-                          child: SlideTransition(
-                            position: _userChipRevealSlide,
-                            child: _buildUserChip(
-                              context,
-                              user,
-                              vx,
-                              max(
-                                120.0,
-                                (w - pl - pr) - 32,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  Positioned(
-                    left: (w - 311 * vx) / 2 - pl,
-                    top: y(264),
-                    width: 311 * vx,
-                    child: _buildRaahiLogo(vx),
-                  ),
-                  Positioned(
-                    left: (w - contentW) / 2 - pl,
-                    top: y(583),
-                    width: contentW,
-                    child: _buildActionColumn(context, vx),
-                  ),
-                ],
+          // Layer 3 — profile chip top 70
+          Positioned(
+            top: figma(70),
+            left: 0,
+            right: 0,
+            child: Center(child: _buildUserChip(context, user, s)),
+          ),
+
+          // Layer 4 — headline top 506
+          Positioned(
+            top: figma(506),
+            left: 0,
+            right: 0,
+            child: _buildHeadlineBlock(s),
+          ),
+
+          // Layer 5 — buttons + switch top 603, left 22
+          Positioned(
+            top: figma(603),
+            left: figma(22),
+            width: figma(346),
+            child: _buildActionColumn(context, s),
+          ),
+
+          // Layer 6 — footer top 815
+          Positioned(
+            top: figma(815),
+            left: 0,
+            right: 0,
+            child: Padding(
+              padding: EdgeInsets.only(
+                bottom: bottomSafe + (showRideBanner ? 72 : 0),
               ),
+              child: _buildFooter(s),
             ),
           ),
 
@@ -290,89 +253,239 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
   }
 
-  Widget _buildUserChip(
-    BuildContext context,
-    User? user,
-    double vx,
-    double maxChipOuterWidth,
-  ) {
+  Widget _buildHeadlineBlock(double s) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Move Better. Stress Less',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.poppins(
+            fontSize: 23 * s,
+            fontWeight: FontWeight.w600,
+            height: 34 / 23,
+            letterSpacing: -0.23 * s,
+            color: _headline,
+          ),
+        ),
+        SizedBox(height: 4 * s),
+        Text(
+          'Reliable rides, Everytime',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.poppins(
+            fontSize: 14 * s,
+            fontWeight: FontWeight.w500,
+            height: 21 / 14,
+            letterSpacing: -0.14 * s,
+            color: _subhead,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFooter(double s) {
+    return Text(
+      'Curated with love in Delhi, NCR 💛',
+      textAlign: TextAlign.center,
+      style: GoogleFonts.poppins(
+        fontSize: 10 * s,
+        fontWeight: FontWeight.w300,
+        height: 15 / 10,
+        color: _footerText,
+      ),
+    );
+  }
+
+  Widget _buildUserChip(BuildContext context, User? user, double s) {
     final trimmedName = (user?.name ?? '').trim();
     final trimmedEmail = (user?.email ?? '').trim();
     final label = trimmedName.isNotEmpty
         ? trimmedName
         : (trimmedEmail.isNotEmpty ? trimmedEmail : 'User');
     final initial = label.isNotEmpty ? label[0].toUpperCase() : 'U';
+    final avatarUrl = user?.avatarUrl?.trim();
 
-    /// Horizontal chrome: paddings + avatar + gaps + chevron (pill grows/shrinks with label).
-    final hPadChip = (5.5 + 10) * vx;
-    final rowFixed =
-        (24.3 + 11 + 4 + 18) * vx; // avatar, gap text↔arrow, spacer, arrow
-    final maxLabelWidth = max(
-      40.0,
-      maxChipOuterWidth - hPadChip - rowFixed,
+    // Figma: Frame 1410081555 — 236×38, radius 14, border 0.361px #A89C8A
+    return SizedBox(
+      width: 236 * s,
+      height: 38 * s,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14 * s),
+          border: Border.all(color: _borderBrown, width: 0.361285 * s),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => showSwitchAccountSheet(context),
+            borderRadius: BorderRadius.circular(14 * s),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                5.52279 * s,
+                0,
+                10 * s,
+                0,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // Ellipse 299 — 24.3×24.3
+                  Container(
+                    width: 24.3 * s,
+                    height: 24.3 * s,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFDD9797),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 0.552279 * s),
+                      image: avatarUrl != null && avatarUrl.isNotEmpty
+                          ? DecorationImage(
+                              image: NetworkImage(avatarUrl),
+                              fit: BoxFit.cover,
+                            )
+                          : null,
+                    ),
+                    alignment: Alignment.center,
+                    child: avatarUrl == null || avatarUrl.isEmpty
+                        ? Text(
+                            initial,
+                            style: GoogleFonts.poppins(
+                              fontSize: 10 * s,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          )
+                        : null,
+                  ),
+                  SizedBox(width: 11.05 * s),
+                  // Email — width 156, 12px / 18px line-height
+                  SizedBox(
+                    width: 156 * s,
+                    child: Text(
+                      trimmedEmail.isNotEmpty ? trimmedEmail : label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        fontSize: 12 * s,
+                        fontWeight: FontWeight.w500,
+                        height: 18 / 12,
+                        color: _textDark,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 11.05 * s),
+                  // icon_back — 6.63×12.15 chevron down
+                  Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    size: 12.15 * s,
+                    color: _borderBrown,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
+  }
 
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxChipOuterWidth),
+  Widget _buildActionColumn(BuildContext context, double s) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildFindRideButton(context, s),
+            SizedBox(height: 20 * s),
+            _buildDriversAppButton(context, s),
+          ],
+        ),
+        SizedBox(height: 23 * s),
+        _buildSwitchAccountLink(context, s),
+      ],
+    );
+  }
+
+  Widget _buildLineArrow({required double s, required Color color}) {
+    return SizedBox(
+      width: 20 * s,
+      height: 20 * s,
+      child: Center(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(width: 14 * s, height: 2 * s, color: color),
+            CustomPaint(
+              size: Size(6 * s, 10 * s),
+              painter: _ArrowHeadPainter(color: color),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionButton({
+    required double s,
+    required VoidCallback? onTap,
+    required Color backgroundColor,
+    required Color borderColor,
+    required Widget leadingIcon,
+    required String title,
+    required String subtitle,
+    required Color titleColor,
+    required Color subtitleColor,
+    required Color arrowColor,
+    Widget? trailing,
+  }) {
+    return SizedBox(
+      width: 346 * s,
+      height: 60 * s,
       child: Material(
-        color: Colors.white,
+        color: backgroundColor,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(38),
-          side: const BorderSide(color: _borderBrown, width: 0.36),
+          borderRadius: BorderRadius.circular(13 * s),
+          side: BorderSide(color: borderColor, width: 0.5),
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => showSwitchAccountSheet(context),
-          borderRadius: BorderRadius.circular(38),
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(13 * s),
           child: Padding(
-            padding: EdgeInsets.only(
-              left: 5.5 * vx,
-              right: 10 * vx,
-              top: 9.75 * vx,
-              bottom: 9.75 * vx,
-            ),
+            padding: EdgeInsets.only(left: 23 * s, right: 31 * s),
             child: Row(
-              mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  width: 24.3 * vx,
-                  height: 24.3 * vx,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFD4956A),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 0.55),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    initial,
-                    style: GoogleFonts.poppins(
-                      fontSize: 11 * vx,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-                SizedBox(width: 11 * vx),
-                ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: maxLabelWidth),
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      height: 18 / 12,
-                      color: _textDark,
-                    ),
+                leadingIcon,
+                SizedBox(width: 20 * s),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: GoogleFonts.poppins(
+                          fontSize: 16 * s,
+                          fontWeight: FontWeight.w600,
+                          height: 24 / 16,
+                          color: titleColor,
+                        ),
+                      ),
+                      Text(
+                        subtitle,
+                        style: GoogleFonts.poppins(
+                          fontSize: 10 * s,
+                          fontWeight: FontWeight.w400,
+                          height: 15 / 10,
+                          color: subtitleColor,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                SizedBox(width: 4 * vx),
-                Icon(
-                  Icons.keyboard_arrow_down_rounded,
-                  size: 18 * vx,
-                  color: _borderBrown,
-                ),
+                trailing ?? _buildLineArrow(s: s, color: arrowColor),
               ],
             ),
           ),
@@ -381,117 +494,126 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
   }
 
-  Widget _buildRaahiLogo(double vx) {
-    return Image.asset(
-      'assets/images/raahi_logo_tagline.png',
-      width: 237.86 * vx,
-      fit: BoxFit.contain,
+  Widget _buildIconBadge({
+    required double s,
+    required String assetPath,
+    required bool bordered,
+    required double iconW,
+    required double iconH,
+  }) {
+    // Figma Ellipse 375 — 39×39
+    return Container(
+      width: 39 * s,
+      height: 39 * s,
+      decoration: BoxDecoration(
+        color: _iconCircleFill,
+        shape: BoxShape.circle,
+        border: bordered ? Border.all(color: _brownIcon, width: 0.5) : null,
+      ),
+      alignment: Alignment.center,
+      child: Image.asset(
+        assetPath,
+        width: iconW * s,
+        height: iconH * s,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.high,
+      ),
     );
   }
 
-  Widget _buildActionColumn(BuildContext context, double vx) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _buildFindRideButton(context, vx),
-        SizedBox(height: 20 * vx),
-        _buildDriversAppButton(context, vx),
-        SizedBox(height: 23 * vx),
-        _buildSwitchAccountLink(context, vx),
-      ],
+  Widget _buildFindRideButton(BuildContext context, double s) {
+    return _buildActionButton(
+      s: s,
+      onTap: () => context.push(AppRoutes.services),
+      backgroundColor: _primaryBtn,
+      borderColor: Colors.transparent,
+      leadingIcon: _buildIconBadge(
+        s: s,
+        assetPath: 'assets/images/home_icon_ride_car.png',
+        bordered: false,
+        iconW: 32,
+        iconH: 26,
+      ),
+      title: 'Find a Ride Now!',
+      subtitle: 'Get a ride in just a few steps',
+      titleColor: Colors.white,
+      subtitleColor: Colors.white,
+      arrowColor: Colors.white,
     );
   }
 
-  Widget _buildFindRideButton(BuildContext context, double vx) {
-    final h = 60 * vx;
-    return SizedBox(
-      width: 346 * vx,
-      height: h,
-      child: Material(
-        color: _primaryBtn,
-        borderRadius: BorderRadius.circular(50),
-        child: InkWell(
-          onTap: () => context.push(AppRoutes.services),
-          borderRadius: BorderRadius.circular(50),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                'Find a Ride Now!',
-                style: GoogleFonts.poppins(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  height: 24 / 16,
-                  color: Colors.white,
-                ),
+  Widget _buildDriversAppButton(BuildContext context, double s) {
+    return _buildActionButton(
+      s: s,
+      onTap: _isCheckingDriver ? null : _openDriversApp,
+      backgroundColor: _secondaryFill,
+      borderColor: const Color(0xB3898989),
+      leadingIcon: _buildIconBadge(
+        s: s,
+        assetPath: 'assets/images/home_icon_steering.png',
+        bordered: true,
+        iconW: 28,
+        iconH: 28,
+      ),
+      title: "Open Driver's App",
+      subtitle: 'Go online and start earning',
+      titleColor: _brownIcon,
+      subtitleColor: _secondarySubtitle,
+      arrowColor: _secondarySubtitle,
+      trailing: _isCheckingDriver
+          ? SizedBox(
+              width: 22 * s,
+              height: 22 * s,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: _brownIcon.withValues(alpha: 0.7),
               ),
-              SizedBox(width: 14 * vx),
-              Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 18 * vx),
-            ],
-          ),
-        ),
-      ),
+            )
+          : null,
     );
   }
 
-  Widget _buildDriversAppButton(BuildContext context, double vx) {
-    final h = 60 * vx;
-    return SizedBox(
-      width: 346 * vx,
-      height: h,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: _isCheckingDriver ? null : _openDriversApp,
-          borderRadius: BorderRadius.circular(50),
-          child: Ink(
-            height: h,
-            decoration: BoxDecoration(
-              color: _secondaryFill,
-              borderRadius: BorderRadius.circular(50),
-              border: Border.all(color: _borderBrown, width: 0.59),
-            ),
-            child: Center(
-              child: _isCheckingDriver
-                  ? SizedBox(
-                      width: 22 * vx,
-                      height: 22 * vx,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: _textDark.withValues(alpha: 0.7),
-                      ),
-                    )
-                  : Text(
-                      ref.tr('open_drivers_app'),
-                      style: GoogleFonts.poppins(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                        height: 24 / 16,
-                        color: _textDark,
-                      ),
-                    ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSwitchAccountLink(BuildContext context, double vx) {
+  Widget _buildSwitchAccountLink(BuildContext context, double s) {
     return GestureDetector(
       onTap: () => showSwitchAccountSheet(context),
       child: Text(
-        ref.tr('switch_account'),
+        'Switch Account?',
         textAlign: TextAlign.center,
         style: GoogleFonts.poppins(
-          fontSize: 16,
+          fontSize: 14 * s,
           fontWeight: FontWeight.w400,
-          height: 24 / 16,
-          color: _textSwitch,
+          height: 21 / 14,
+          color: _switchLink,
           decoration: TextDecoration.underline,
-          decorationColor: _textSwitch,
+          decorationColor: _switchLink,
         ),
       ),
     );
   }
+}
+
+class _ArrowHeadPainter extends CustomPainter {
+  _ArrowHeadPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width, size.height / 2)
+      ..lineTo(0, size.height);
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ArrowHeadPainter oldDelegate) =>
+      oldDelegate.color != color;
 }

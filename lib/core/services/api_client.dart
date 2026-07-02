@@ -502,8 +502,15 @@ class ApiClient {
 
   /// Create a ride.
   /// Backend: POST /api/rides  body: { pickupLat, pickupLng, dropLat, dropLng,
-  ///   pickupAddress, dropAddress, paymentMethod, stops?, scheduledTime?, vehicleType? }
+  ///   pickupAddress, dropAddress, paymentMethod, stops?, scheduledTime?, vehicleType?, promoCode? }
   /// stops: optional list of {lat, lng, address} for multi-stop trips
+  ///
+  /// When [promoCode] is supplied the backend validates + applies it at booking
+  /// time. An invalid/expired/limit-reached code makes the backend respond with
+  /// HTTP 400 and body { code: 'PROMO_INVALID', message }; the ride is NOT
+  /// created in that case, so callers should surface the message and let the
+  /// user retry (with or without the code). That error propagates here as a
+  /// DioException for the caller to inspect.
   Future<Map<String, dynamic>> createRide({
     required double pickupLat,
     required double pickupLng,
@@ -515,6 +522,7 @@ class ApiClient {
     List<Map<String, dynamic>>? stops,
     String? scheduledTime,
     String? vehicleType,
+    String? promoCode,
   }) async {
     final data = <String, dynamic>{
       'pickupLat': pickupLat,
@@ -526,6 +534,8 @@ class ApiClient {
       'paymentMethod': paymentMethod,
       if (scheduledTime != null) 'scheduledTime': scheduledTime,
       if (vehicleType != null) 'vehicleType': vehicleType,
+      if (promoCode != null && promoCode.trim().isNotEmpty)
+        'promoCode': promoCode.trim(),
     };
     if (stops != null && stops.isNotEmpty) {
       data['stops'] = stops;
@@ -646,27 +656,46 @@ class ApiClient {
 
   /// Driver accepts a ride (driver self-accept).
   /// Backend: POST /api/rides/:id/accept
-  /// Returns: { success, data: { ride } } or 409 if already taken
+  /// Success: { success: true, data: { ride } }
+  /// Conflict (409) codes surfaced by the backend:
+  ///   - RIDE_BEING_ACCEPTED  (retryable: true) — Redis claim gate busy; the
+  ///     ride may still be free once the in-flight accept resolves.
+  ///   - DRIVER_BUSY          — this driver already has an active ride.
+  ///   - RIDE_ALREADY_TAKEN / INVALID_RIDE_STATUS — ride no longer available.
+  /// This method passes the backend's structured { code, message, retryable }
+  /// straight through so the caller can react precisely.
   Future<Map<String, dynamic>> acceptRide(String rideId) async {
     try {
       final response = await _dio.post('/api/rides/$rideId/accept');
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
-      // Handle 409 Conflict - ride already taken
-      if (e.response?.statusCode == 409) {
+      final statusCode = e.response?.statusCode;
+      final data = e.response?.data;
+      // Prefer the backend's structured error body (code / message / retryable).
+      if (data is Map) {
+        final map = Map<String, dynamic>.from(data);
+        map['success'] = map['success'] ?? false;
+        if (map['code'] == null) {
+          if (statusCode == 409) {
+            map['code'] = 'RIDE_ALREADY_TAKEN';
+          } else if (statusCode == 403) {
+            map['code'] = 'FORBIDDEN';
+          }
+        }
+        return map;
+      }
+      // Fallbacks when the body is missing/unparseable.
+      if (statusCode == 409) {
         return {
           'success': false,
           'message': 'This ride has already been accepted by another driver',
           'code': 'RIDE_ALREADY_TAKEN',
         };
       }
-      // Handle 403 Forbidden - not a driver or not authorized
-      if (e.response?.statusCode == 403) {
-        final message = e.response?.data?['message']?.toString() ??
-            'You are not authorized to accept this ride';
+      if (statusCode == 403) {
         return {
           'success': false,
-          'message': message,
+          'message': 'You are not authorized to accept this ride',
           'code': 'FORBIDDEN',
         };
       }
@@ -844,6 +873,127 @@ class ApiClient {
     return response.data as Map<String, dynamic>;
   }
 
+  /// Get active promo/coupon codes available to the current user.
+  /// Backend: GET /api/promo/active?vehicleType=&city=
+  /// Returns a list of { code, description, type, value, maxDiscount?, minFare? }.
+  ///
+  /// Promo definitions are server-owned and change at runtime, so the app never
+  /// hardcodes codes. On any failure this returns an empty list so the UI simply
+  /// shows no promos rather than breaking the payment screen.
+  Future<List<Map<String, dynamic>>> getActivePromos({
+    String? vehicleType,
+    String? city,
+  }) async {
+    try {
+      final response = await _dio.get('/api/promo/active', queryParameters: {
+        if (vehicleType != null && vehicleType.trim().isNotEmpty)
+          'vehicleType': vehicleType.trim(),
+        if (city != null && city.trim().isNotEmpty) 'city': city.trim(),
+      });
+      final data = response.data;
+      // Tolerate several envelope shapes:
+      //   { data: [ ... ] }              (documented)
+      //   { data: { promos: [ ... ] } }
+      //   { promos: [ ... ] }
+      //   [ ... ]                        (bare list)
+      List? list;
+      if (data is List) {
+        list = data;
+      } else if (data is Map) {
+        final d = data['data'];
+        if (d is List) {
+          list = d;
+        } else if (d is Map && d['promos'] is List) {
+          list = d['promos'] as List;
+        } else if (data['promos'] is List) {
+          list = data['promos'] as List;
+        }
+      }
+      list ??= const [];
+      final promos = list
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      debugPrint('getActivePromos: ${promos.length} promo(s) '
+          '(vehicleType=$vehicleType, city=$city)');
+      return promos;
+    } on DioException catch (e) {
+      debugPrint('getActivePromos error: ${e.response?.statusCode} '
+          '${e.response?.data}');
+      return [];
+    } catch (e) {
+      debugPrint('getActivePromos unexpected error: $e');
+      return [];
+    }
+  }
+
+  /// Validate a promo code + preview its discount for a given fare.
+  /// Backend: POST /api/promo/apply
+  /// 200 → { success:true, data:{ promoId, code, discountAmount, discountType,
+  ///          originalFare, discountedFare, cashbackAmount? } }
+  /// 400 → { success:false, message } — invalid / expired / limit-reached, etc.
+  ///
+  /// This is the authoritative check used to decide whether a code can be
+  /// applied on the payment screen. The discount shown must come from here,
+  /// never computed client-side.
+  Future<Map<String, dynamic>> applyPromoPreview({
+    required String code,
+    required double fare,
+    String? vehicleType,
+    String? city,
+  }) async {
+    try {
+      final response = await _dio.post('/api/promo/apply', data: {
+        'code': code.trim(),
+        'fare': fare,
+        if (vehicleType != null && vehicleType.trim().isNotEmpty)
+          'vehicleType': vehicleType.trim(),
+        if (city != null && city.trim().isNotEmpty) 'city': city.trim(),
+      });
+      final data = response.data;
+      if (data is Map) return Map<String, dynamic>.from(data);
+      return {'success': true, 'data': data};
+    } on DioException catch (e) {
+      final data = e.response?.data;
+      if (data is Map) {
+        final map = Map<String, dynamic>.from(data);
+        map['success'] = map['success'] ?? false;
+        return map;
+      }
+      return {
+        'success': false,
+        'message': 'Could not apply this voucher. Please try again.',
+      };
+    }
+  }
+
+  /// Calculate fares for ALL allowed + currently-available vehicle types.
+  /// Backend: POST /api/pricing/calculate-all
+  /// Always 200. Returns { success, data: { "<vehicleType>": { fare object }, ... } }.
+  /// Cross-zone-blocked and no-driver types are omitted by the server — render
+  /// whatever keys come back; never hardcode the list.
+  Future<Map<String, dynamic>> getRidePricingAll({
+    required double pickupLat,
+    required double pickupLng,
+    required double dropLat,
+    required double dropLng,
+    List<Map<String, dynamic>>? stops,
+    String? scheduledTime,
+  }) async {
+    final data = <String, dynamic>{
+      'pickupLat': pickupLat,
+      'pickupLng': pickupLng,
+      'dropLat': dropLat,
+      'dropLng': dropLng,
+      if (scheduledTime != null) 'scheduledTime': scheduledTime,
+    };
+    if (stops != null && stops.isNotEmpty) {
+      data['stops'] = stops;
+    }
+    final response = await _dio.post('/api/pricing/calculate-all', data: data);
+    return response.data as Map<String, dynamic>;
+  }
+
   /// Get nearby drivers.
   /// Backend: GET /api/pricing/nearby-drivers?lat=&lng=&radius=
   Future<Map<String, dynamic>> getNearbyDrivers(double lat, double lng,
@@ -975,6 +1125,14 @@ class ApiClient {
       'page': page,
       'limit': limit,
     });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Get available driver onboarding categories (e.g. ride-share vs
+  /// independent_driver) with their required service types and documents.
+  /// Backend: GET /api/driver/onboarding/categories
+  Future<Map<String, dynamic>> getDriverOnboardingCategories() async {
+    final response = await _dio.get('/api/driver/onboarding/categories');
     return response.data as Map<String, dynamic>;
   }
 

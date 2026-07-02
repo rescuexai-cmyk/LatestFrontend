@@ -227,10 +227,11 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     return defaultIcon;
   }
 
-  // Services that are not yet available
-  static const _comingSoonServices = {
-    'personal_driver', // Driver Rental — not yet launched
-  };
+  // Services that are not yet available.
+  // Personal Driver ("Hire a Driver") is now live: it's dispatched to
+  // independent drivers and surfaces via calculate-all / vehicleType
+  // "personal_driver" in the Find Trip flow.
+  static const _comingSoonServices = <String>{};
 
   void _navigateToRescueFlow() {
     ref.read(rescueBookingProvider.notifier).reset();

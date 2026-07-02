@@ -159,7 +159,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppRoutes.login,
         name: 'login',
-        builder: (context, state) => const LoginScreen(),
+        builder: (context, state) {
+          final phone = state.uri.queryParameters['phone'];
+          return LoginScreen(initialPhone: phone);
+        },
       ),
       GoRoute(
         path: AppRoutes.signup,

@@ -18,7 +18,10 @@ import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'signup_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.initialPhone});
+
+  /// Pre-fill phone field when returning from signup / phone-link flow.
+  final String? initialPhone;
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -63,6 +66,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   void initState() {
     super.initState();
+    final seed = widget.initialPhone;
+    if (seed != null && seed.trim().isNotEmpty) {
+      _phoneController.text = _normalizeIndianPhone(seed);
+    }
     _phoneController.addListener(_onPhoneTextChanged);
   }
 
@@ -133,7 +140,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _otpStepVisible = true;
       _pendingPhone = phone;
     });
-    _clearInlineOtp();
+    _otpController.clear();
     _startInlineResendTimer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _otpFocusNode.requestFocus();
@@ -674,250 +681,270 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     return value;
   }
 
+  /// Figma login hero — bg 590×393 at (-94, -3), logo at top 68.
+  Widget _buildLoginHero(MediaQueryData mq, double Function(double) figma) {
+    const heroW = 590.0;
+    const heroH = 393.0;
+    const heroLeft = -94.0;
+    const heroTop = -3.0;
+    const logoW = 171.13;
+    const logoTop = 68.0;
+    // Tuned to match Figma wide highway + skyline framing.
+    const heroImageWidthFactor = 0.74;
+    const heroImageAlignY = 0.52;
+
+    final statusTop = mq.padding.top;
+
+    return Stack(
+      clipBehavior: Clip.none,
+      fit: StackFit.expand,
+      children: [
+        const Positioned.fill(
+          child: ColoredBox(color: Color(0xFFADB9C5)),
+        ),
+        Positioned(
+          left: figma(heroLeft),
+          top: figma(heroTop) - statusTop,
+          width: figma(heroW),
+          height: figma(heroH) + statusTop,
+          child: ClipRect(
+            child: ColoredBox(
+              color: const Color(0xFFADB9C5),
+              child: Align(
+                alignment: Alignment(0, heroImageAlignY),
+                child: Image.asset(
+                  'assets/images/login_hero_bg.png',
+                  width: figma(heroW) * heroImageWidthFactor,
+                  fit: BoxFit.fitWidth,
+                  alignment: Alignment.topCenter,
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          top: figma(logoTop),
+          child: Center(
+            child: Image.asset(
+              'assets/images/raahi_login_logo.png',
+              width: figma(logoW),
+              fit: BoxFit.contain,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
+    const figmaW = 390.0;
+    const figmaSheetTop = 309.0;
+    const figmaSheetRadius = 20.0;
+
+    final s = mq.size.width / figmaW;
+    double figma(double v) => v * s;
     final keyboardInset = mq.viewInsets.bottom;
     final bottomSafe = mq.viewPadding.bottom;
     final keyboardOpen = keyboardInset > 0;
     final showApple = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
     final blocked = _isSocialLoading || _isOtpLoading || _isVerifyLoading;
-    final sheetMaxHeight = mq.size.height *
-        (keyboardOpen ? 0.92 : (_otpStepVisible ? 0.72 : 0.68));
 
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      backgroundColor: Colors.white,
-      body: AnimatedPadding(
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOutCubic,
-        padding: EdgeInsets.only(bottom: keyboardInset),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned.fill(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Image.asset(
-                    'assets/images/home_traffic_hero.png',
-                    fit: BoxFit.cover,
-                    alignment: Alignment.topCenter,
-                  ),
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.black.withValues(alpha: 0.12),
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: 0.35),
-                        ],
-                      ),
+    final sheetTop = keyboardOpen
+        ? math.max(48.0, figma(figmaSheetTop) - keyboardInset * 0.35)
+        : figma(figmaSheetTop);
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.dark.copyWith(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: _cardCreamBg,
+      ),
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        backgroundColor: const Color(0xFFADB9C5),
+        body: Stack(
+        fit: StackFit.expand,
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(child: _buildLoginHero(mq, figma)),
+
+          // Figma panel: 392×538 from top 309, radius 20 top corners.
+          Positioned(
+            left: 0,
+            right: 0,
+            top: sheetTop,
+            bottom: 0,
+            child: ClipRRect(
+              borderRadius: BorderRadius.vertical(
+                top: Radius.circular(figmaSheetRadius * s),
+              ),
+              child: Material(
+                color: _cardCreamBg,
+                elevation: 0,
+                child: AnimatedPadding(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  padding: EdgeInsets.only(bottom: keyboardInset),
+                  child: SingleChildScrollView(
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    padding: EdgeInsets.fromLTRB(
+                      24,
+                      24,
+                      24,
+                      math.max(bottomSafe, 20),
                     ),
-                  ),
-                  SafeArea(
-                    bottom: false,
-                    child: Padding(
-                      padding:
-                          const EdgeInsets.only(left: 24, right: 24, top: 8),
-                      child: Align(
-                        alignment: Alignment.bottomCenter,
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                            bottom: math.max(28, mq.size.height * 0.085),
-                          ),
-                          child: Image.asset(
-                            'assets/images/raahi_logo_tagline.png',
-                            width: 200,
-                            fit: BoxFit.contain,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Welcome to Raahi 👋',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1A1A1A),
+                            height: 1.2,
                           ),
                         ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: ClipRRect(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(28)),
-                child: Material(
-                  color: _cardCreamBg,
-                  elevation: 12,
-                  shadowColor: Colors.black26,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(maxHeight: sheetMaxHeight),
-                    child: SingleChildScrollView(
-                      keyboardDismissBehavior:
-                          ScrollViewKeyboardDismissBehavior.onDrag,
-                      padding: EdgeInsets.fromLTRB(
-                        24,
-                        14,
-                        24,
-                        math.max(bottomSafe, 16),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Center(
-                            child: Container(
-                              width: 49,
-                              height: 3,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF424242),
-                                borderRadius: BorderRadius.circular(4),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Get started in seconds',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w400,
+                            color: Colors.grey.shade600,
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        _buildPhoneField(enabled: !blocked),
+                        if (_otpStepVisible)
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              onPressed:
+                                  blocked ? null : () => _collapseOtpStep(),
+                              child: Text(
+                                'Change number',
+                                style: TextStyle(
+                                  color: _brandGold,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
                           ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            'Welcome to Raahi 👋',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF1A1A1A),
-                              height: 1.2,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Get started in seconds',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w400,
-                              color: Colors.grey.shade600,
-                              height: 1.35,
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-                          _buildPhoneField(enabled: !blocked),
-                          if (_otpStepVisible)
-                            Align(
-                              alignment: Alignment.centerRight,
-                              child: TextButton(
-                                onPressed:
-                                    blocked ? null : () => _collapseOtpStep(),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 280),
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.topCenter,
+                          child: _otpStepVisible
+                              ? Padding(
+                                  padding: const EdgeInsets.only(top: 16),
+                                  child: _buildInlineOtpSection(
+                                      interactionBlocked: blocked),
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                        if (!_otpStepVisible) ...[
+                          const SizedBox(height: 12),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.shield_outlined,
+                                  size: 18, color: _brandGold),
+                              const SizedBox(width: 8),
+                              Expanded(
                                 child: Text(
-                                  'Change number',
+                                  "We'll send you a 6-digit OTP",
                                   style: TextStyle(
-                                    color: _brandGold,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                    color: Colors.grey.shade700,
                                   ),
                                 ),
                               ),
-                            ),
-                          AnimatedSize(
-                            duration: const Duration(milliseconds: 280),
-                            curve: Curves.easeOutCubic,
-                            alignment: Alignment.topCenter,
-                            child: _otpStepVisible
-                                ? Padding(
-                                    padding: const EdgeInsets.only(top: 16),
-                                    child: _buildInlineOtpSection(
-                                        interactionBlocked: blocked),
-                                  )
-                                : const SizedBox.shrink(),
+                            ],
                           ),
-                          if (!_otpStepVisible) ...[
-                            const SizedBox(height: 12),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Icon(Icons.shield_outlined,
-                                    size: 18, color: _brandGold),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    "We'll send you a 6-digit OTP",
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color: Colors.grey.shade700,
-                                    ),
-                                  ),
+                        ],
+                        const SizedBox(height: 22),
+                        _buildTermsRow(),
+                        const SizedBox(height: 20),
+                        if (!_otpStepVisible)
+                          SizedBox(
+                            width: double.infinity,
+                            height: 54,
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: _brandGold,
+                                foregroundColor: Colors.white,
+                                disabledBackgroundColor:
+                                    Colors.grey.shade300,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
                                 ),
-                              ],
-                            ),
-                          ],
-                          const SizedBox(height: 22),
-                          _buildTermsRow(),
-                          const SizedBox(height: 20),
-                          if (!_otpStepVisible)
-                            SizedBox(
-                              width: double.infinity,
-                              height: 54,
-                              child: FilledButton(
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: _brandGold,
-                                  foregroundColor: Colors.white,
-                                  disabledBackgroundColor:
-                                      Colors.grey.shade300,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                  elevation: 0,
-                                ),
-                                onPressed:
-                                    !_canPressGetOtp ? null : _handleGetOtp,
-                                child: _isOtpLoading
-                                    ? const SizedBox(
-                                        width: 22,
-                                        height: 22,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.white,
-                                        ),
-                                      )
-                                    : const Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          Text(
-                                            'Get OTP',
-                                            style: TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                          SizedBox(width: 8),
-                                          Icon(
-                                            Icons.arrow_forward_rounded,
-                                            size: 20,
-                                          ),
-                                        ],
-                                      ),
+                                elevation: 0,
                               ),
+                              onPressed:
+                                  !_canPressGetOtp ? null : _handleGetOtp,
+                              child: _isOtpLoading
+                                  ? const SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : const Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          'Get OTP',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        SizedBox(width: 8),
+                                        Icon(
+                                          Icons.arrow_forward_rounded,
+                                          size: 20,
+                                        ),
+                                      ],
+                                    ),
                             ),
-                          const SizedBox(height: 24),
-                          _buildOrDivider(),
-                          const SizedBox(height: 20),
-                          _buildContinueGoogle(
+                          ),
+                        const SizedBox(height: 24),
+                        _buildOrDivider(),
+                        const SizedBox(height: 20),
+                        _buildContinueGoogle(
+                          enabled: !_isSocialLoading &&
+                              !_isOtpLoading &&
+                              !_isVerifyLoading,
+                        ),
+                        if (showApple) ...[
+                          const SizedBox(height: 14),
+                          _buildContinueApple(
                             enabled: !_isSocialLoading &&
                                 !_isOtpLoading &&
                                 !_isVerifyLoading,
                           ),
-                          if (showApple) ...[
-                            const SizedBox(height: 14),
-                            _buildContinueApple(
-                              enabled: !_isSocialLoading &&
-                                  !_isOtpLoading &&
-                                  !_isVerifyLoading,
-                            ),
-                          ],
                         ],
-                      ),
+                      ],
                     ),
                   ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
+    ),
     );
   }
 
@@ -1036,7 +1063,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           focusNode: _otpFocusNode,
           enabled: !otpDisabled,
           gap: 6,
-          alignment: MainAxisAlignment.start,
           onCompleted: (_) => _verifyInlineOtp(),
           onChanged: (_) {
             if (mounted) setState(() {});

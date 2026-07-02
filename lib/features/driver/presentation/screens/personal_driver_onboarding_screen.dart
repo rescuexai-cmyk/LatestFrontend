@@ -28,7 +28,6 @@ class _PersonalDriverOnboardingScreenState
   static const _textPrimary = Color(0xFF1A1A1A);
   static const _textSecondary = Color(0xFF888888);
   static const _border = Color(0xFFE8E0D4);
-  static const _success = Color(0xFF4CAF50);
 
   final PageController _pageController = PageController();
   final ImagePicker _picker = ImagePicker();
@@ -179,6 +178,8 @@ class _PersonalDriverOnboardingScreenState
                   _DocumentsPage(
                     drivingLicense: pd.drivingLicense,
                     aadhaar: pd.aadhaar,
+                    pan: pd.pan,
+                    profilePhoto: pd.profilePhoto,
                     isLoading: pd.isLoading,
                     onPick: _pickDocument,
                     onSubmit: _submitDocuments,
@@ -282,7 +283,7 @@ class _IntroPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'Personal Rescue Drivers drive a car and carry the rider while a bike partner moves their vehicle. You only need Aadhaar and a valid driving license.',
+                  'Personal drivers chauffeur the rider (and can also join rescues). No vehicle needed — just your License, PAN, Aadhaar and a profile photo.',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.poppins(
                     fontSize: 14,
@@ -294,9 +295,9 @@ class _IntroPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          _bullet(Icons.two_wheeler, 'Works with a bike rescue partner'),
-          _bullet(Icons.directions_car, 'You drive the car — rider travels with you'),
-          _bullet(Icons.verified_user_outlined, 'Quick verification — 2 documents'),
+          _bullet(Icons.directions_car, 'You drive — the rider travels with you'),
+          _bullet(Icons.timer_outlined, 'Time-based earnings, no vehicle needed'),
+          _bullet(Icons.verified_user_outlined, 'License, PAN, Aadhaar & photo'),
           const Spacer(),
           SizedBox(
             height: 56,
@@ -512,6 +513,8 @@ class _DocumentsPage extends StatelessWidget {
   const _DocumentsPage({
     required this.drivingLicense,
     required this.aadhaar,
+    required this.pan,
+    required this.profilePhoto,
     required this.isLoading,
     required this.onPick,
     required this.onSubmit,
@@ -519,6 +522,8 @@ class _DocumentsPage extends StatelessWidget {
 
   final PersonalDriverDocument drivingLicense;
   final PersonalDriverDocument aadhaar;
+  final PersonalDriverDocument pan;
+  final PersonalDriverDocument profilePhoto;
   final bool isLoading;
   final Future<void> Function({
     required String docType,
@@ -529,7 +534,10 @@ class _DocumentsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ready = drivingLicense.isComplete && aadhaar.isComplete;
+    final ready = drivingLicense.isComplete &&
+        aadhaar.isComplete &&
+        pan.isComplete &&
+        profilePhoto.isComplete;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
@@ -544,7 +552,7 @@ class _DocumentsPage extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          'Only Aadhaar and Driving License are required for Personal Rescue Drivers.',
+          'Upload your License, PAN, Aadhaar and a profile photo. No RC or insurance needed.',
           style: GoogleFonts.poppins(fontSize: 14, color: const Color(0xFF888888)),
         ),
         const SizedBox(height: 20),
@@ -558,6 +566,19 @@ class _DocumentsPage extends StatelessWidget {
             docType: 'driving_license',
             isFront: true,
             title: 'Driving License',
+          ),
+        ),
+        const SizedBox(height: 12),
+        _DocCard(
+          title: 'PAN Card',
+          subtitle: 'Clear photo of your PAN card',
+          icon: Icons.credit_card,
+          color: const Color(0xFFFF9800),
+          imagePath: pan.frontPath,
+          onTap: () => onPick(
+            docType: 'pan_card',
+            isFront: true,
+            title: 'PAN Card',
           ),
         ),
         const SizedBox(height: 12),
@@ -584,6 +605,19 @@ class _DocumentsPage extends StatelessWidget {
             docType: 'aadhaar_card',
             isFront: false,
             title: 'Aadhaar Back',
+          ),
+        ),
+        const SizedBox(height: 12),
+        _DocCard(
+          title: 'Profile Photo',
+          subtitle: 'A clear photo of your face',
+          icon: Icons.account_circle_outlined,
+          color: const Color(0xFF9C27B0),
+          imagePath: profilePhoto.frontPath,
+          onTap: () => onPick(
+            docType: 'profile_photo',
+            isFront: true,
+            title: 'Profile Photo',
           ),
         ),
         const SizedBox(height: 24),

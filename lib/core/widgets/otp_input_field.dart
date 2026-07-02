@@ -156,8 +156,8 @@ class _OtpInputFieldState extends State<OtpInputField> {
     );
   }
 
-  Widget _buildDigitBox(int index, String text, bool isFocused) {
-    final box = Container(
+  Widget _buildDigitBoxContent(String text, bool isFocused) {
+    return Container(
       height: widget.boxHeight,
       alignment: Alignment.center,
       decoration: BoxDecoration(
@@ -177,11 +177,23 @@ class _OtpInputFieldState extends State<OtpInputField> {
         ),
       ),
     );
+  }
+
+  Widget _buildDigitSlot(int index, String code, int focusedIndex) {
+    final text = index < code.length ? code[index] : '';
+    final isFocused = widget.enabled && focusedIndex == index;
+    final box = _buildDigitBoxContent(text, isFocused);
+
+    final tappable = GestureDetector(
+      onTap: () => _focusBox(index),
+      behavior: HitTestBehavior.opaque,
+      child: box,
+    );
 
     if (widget.boxWidth != null) {
-      return SizedBox(width: widget.boxWidth, child: box);
+      return SizedBox(width: widget.boxWidth, child: tappable);
     }
-    return Expanded(child: box);
+    return Expanded(child: tappable);
   }
 
   @override
@@ -190,7 +202,9 @@ class _OtpInputFieldState extends State<OtpInputField> {
     final focusedIndex = _focusedBoxIndex(code);
 
     return AutofillGroup(
-      child: Stack(
+      child: SizedBox(
+        width: double.infinity,
+        child: Stack(
         alignment: Alignment.center,
         children: [
           // Hidden field receives full OTP from iOS QuickType / SMS autofill.
@@ -235,19 +249,12 @@ class _OtpInputFieldState extends State<OtpInputField> {
             children: [
               for (var i = 0; i < widget.length; i++) ...[
                 if (i > 0) SizedBox(width: widget.gap),
-                GestureDetector(
-                  onTap: () => _focusBox(i),
-                  behavior: HitTestBehavior.opaque,
-                  child: _buildDigitBox(
-                    i,
-                    i < code.length ? code[i] : '',
-                    widget.enabled && focusedIndex == i,
-                  ),
-                ),
+                _buildDigitSlot(i, code, focusedIndex),
               ],
             ],
           ),
         ],
+      ),
       ),
     );
   }

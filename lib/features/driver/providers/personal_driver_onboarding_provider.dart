@@ -2,8 +2,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Lightweight onboarding for rescue personal drivers (passenger leg).
-/// Backend integration will replace local persistence later.
+import '../../../core/services/api_client.dart';
+
+/// Onboarding for independent / personal-rescue drivers (no vehicle).
+/// Maps to the backend `independent_driver` category (service types
+/// personal_driver + bike_rescue). Documents required: LICENSE, PAN_CARD,
+/// AADHAAR_CARD, PROFILE_PHOTO (no RC / Insurance).
 enum PersonalDriverOnboardingStatus {
   notStarted,
   inProgress,
@@ -96,6 +100,8 @@ class PersonalDriverOnboardingState {
     this.status = PersonalDriverOnboardingStatus.notStarted,
     this.drivingLicense = const PersonalDriverDocument(type: 'driving_license'),
     this.aadhaar = const PersonalDriverDocument(type: 'aadhaar_card'),
+    this.pan = const PersonalDriverDocument(type: 'pan_card'),
+    this.profilePhoto = const PersonalDriverDocument(type: 'profile_photo'),
     this.fullName = '',
     this.email = '',
     this.driverAppMode = 'ride_share',
@@ -103,11 +109,20 @@ class PersonalDriverOnboardingState {
     this.error,
   });
 
+  /// Rider-facing product type this driver serves.
   static const vehicleTypeId = 'personal_driver';
+
+  /// Backend onboarding category / vehicleType for independent drivers.
+  static const onboardingVehicleType = 'independent_driver';
+
+  /// Service types an independent driver can fulfil.
+  static const serviceTypes = ['personal_driver', 'bike_rescue'];
 
   final PersonalDriverOnboardingStatus status;
   final PersonalDriverDocument drivingLicense;
   final PersonalDriverDocument aadhaar;
+  final PersonalDriverDocument pan;
+  final PersonalDriverDocument profilePhoto;
   final String fullName;
   final String? email;
   final String driverAppMode;
@@ -120,7 +135,9 @@ class PersonalDriverOnboardingState {
   bool get documentsReady =>
       fullName.trim().isNotEmpty &&
       drivingLicense.isComplete &&
-      aadhaar.isComplete;
+      aadhaar.isComplete &&
+      pan.isComplete &&
+      profilePhoto.isComplete;
 
   bool get canStartRescueJobs =>
       status == PersonalDriverOnboardingStatus.verified ||
@@ -140,6 +157,8 @@ class PersonalDriverOnboardingState {
     PersonalDriverOnboardingStatus? status,
     PersonalDriverDocument? drivingLicense,
     PersonalDriverDocument? aadhaar,
+    PersonalDriverDocument? pan,
+    PersonalDriverDocument? profilePhoto,
     String? fullName,
     String? email,
     String? driverAppMode,
@@ -151,6 +170,8 @@ class PersonalDriverOnboardingState {
       status: status ?? this.status,
       drivingLicense: drivingLicense ?? this.drivingLicense,
       aadhaar: aadhaar ?? this.aadhaar,
+      pan: pan ?? this.pan,
+      profilePhoto: profilePhoto ?? this.profilePhoto,
       fullName: fullName ?? this.fullName,
       email: email ?? this.email,
       driverAppMode: driverAppMode ?? this.driverAppMode,
@@ -192,6 +213,8 @@ class PersonalDriverOnboardingNotifier
         drivingLicense:
             PersonalDriverDocument.fromPrefs('driving_license', prefs),
         aadhaar: PersonalDriverDocument.fromPrefs('aadhaar_card', prefs),
+        pan: PersonalDriverDocument.fromPrefs('pan_card', prefs),
+        profilePhoto: PersonalDriverDocument.fromPrefs('profile_photo', prefs),
       );
     } catch (e) {
       debugPrint('⚠️ Failed to load personal driver prefs: $e');
@@ -256,25 +279,48 @@ class PersonalDriverOnboardingNotifier
     required bool isFront,
   }) async {
     PersonalDriverDocument doc;
-    if (docType == 'driving_license') {
-      doc = state.drivingLicense.copyWith(
-        frontPath: isFront ? path : state.drivingLicense.frontPath,
-        status: PersonalDocStatus.uploaded,
-      );
-      state = state.copyWith(drivingLicense: doc);
-    } else {
-      doc = state.aadhaar.copyWith(
-        frontPath: isFront ? path : state.aadhaar.frontPath,
-        backPath: !isFront ? path : state.aadhaar.backPath,
-        status: PersonalDocStatus.uploaded,
-      );
-      state = state.copyWith(aadhaar: doc);
+    switch (docType) {
+      case 'driving_license':
+        doc = state.drivingLicense.copyWith(
+          frontPath: isFront ? path : state.drivingLicense.frontPath,
+          status: PersonalDocStatus.uploaded,
+        );
+        state = state.copyWith(drivingLicense: doc);
+        break;
+      case 'pan_card':
+        doc = state.pan.copyWith(
+          frontPath: isFront ? path : state.pan.frontPath,
+          status: PersonalDocStatus.uploaded,
+        );
+        state = state.copyWith(pan: doc);
+        break;
+      case 'profile_photo':
+        doc = state.profilePhoto.copyWith(
+          frontPath: isFront ? path : state.profilePhoto.frontPath,
+          status: PersonalDocStatus.uploaded,
+        );
+        state = state.copyWith(profilePhoto: doc);
+        break;
+      case 'aadhaar_card':
+      default:
+        doc = state.aadhaar.copyWith(
+          frontPath: isFront ? path : state.aadhaar.frontPath,
+          backPath: !isFront ? path : state.aadhaar.backPath,
+          status: PersonalDocStatus.uploaded,
+        );
+        state = state.copyWith(aadhaar: doc);
+        break;
     }
     final prefs = await SharedPreferences.getInstance();
     await doc.saveToPrefs(prefs);
   }
 
-  /// Stub submit — marks docs under review until backend is wired.
+  /// Submit onboarding to the backend as an `independent_driver`.
+  ///
+  /// Sequence (all under /api/driver/onboarding/*):
+  /// start → email → language → vehicle(independent_driver) → personal-info →
+  /// document uploads (LICENSE, AADHAAR front+back, PAN, PROFILE_PHOTO) →
+  /// documents/submit.
   Future<bool> submitDocuments() async {
     if (state.fullName.trim().isEmpty) {
       state = state.copyWith(error: 'Please enter your full name');
@@ -285,28 +331,96 @@ class PersonalDriverOnboardingNotifier
       return false;
     }
     state = state.copyWith(isLoading: true, clearError: true);
+    final email = state.email?.trim() ?? '';
     try {
-      await Future<void>.delayed(const Duration(milliseconds: 600));
-      final dl = state.drivingLicense.copyWith(status: PersonalDocStatus.inReview);
+      // Non-critical steps: keep going even if the backend rejects a repeat
+      // (e.g. onboarding already started).
+      try {
+        await apiClient.startDriverOnboarding();
+      } catch (e) {
+        debugPrint('ℹ️ startDriverOnboarding skipped: $e');
+      }
+      if (email.isNotEmpty) {
+        try {
+          await apiClient.updateDriverEmail(email);
+        } catch (e) {
+          debugPrint('ℹ️ updateDriverEmail skipped: $e');
+        }
+      }
+      try {
+        await apiClient.updateDriverLanguage('en');
+      } catch (e) {
+        debugPrint('ℹ️ updateDriverLanguage skipped: $e');
+      }
+
+      // Critical steps.
+      await apiClient.updateDriverVehicle(
+        vehicleType: PersonalDriverOnboardingState.onboardingVehicleType,
+        serviceTypes: PersonalDriverOnboardingState.serviceTypes,
+      );
+      await apiClient.updateDriverPersonalInfo(
+        fullName: state.fullName.trim(),
+        email: email.isNotEmpty ? email : null,
+      );
+
+      await _uploadDoc('driving_license', state.drivingLicense.frontPath,
+          isFront: true);
+      await _uploadDoc('aadhaar_card', state.aadhaar.frontPath, isFront: true);
+      await _uploadDoc('aadhaar_card', state.aadhaar.backPath, isFront: false);
+      await _uploadDoc('pan_card', state.pan.frontPath, isFront: true);
+      await _uploadDoc('profile_photo', state.profilePhoto.frontPath,
+          isFront: true);
+
+      await apiClient.submitDriverDocuments();
+
+      final dl =
+          state.drivingLicense.copyWith(status: PersonalDocStatus.inReview);
       final ad = state.aadhaar.copyWith(status: PersonalDocStatus.inReview);
+      final pn = state.pan.copyWith(status: PersonalDocStatus.inReview);
+      final ph = state.profilePhoto.copyWith(status: PersonalDocStatus.inReview);
       state = state.copyWith(
         drivingLicense: dl,
         aadhaar: ad,
+        pan: pn,
+        profilePhoto: ph,
         status: PersonalDriverOnboardingStatus.documentsSubmitted,
         isLoading: false,
       );
       final prefs = await SharedPreferences.getInstance();
       await dl.saveToPrefs(prefs);
       await ad.saveToPrefs(prefs);
+      await pn.saveToPrefs(prefs);
+      await ph.saveToPrefs(prefs);
       await _persistStatus(PersonalDriverOnboardingStatus.documentsSubmitted);
       return true;
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
-        error: 'Could not submit documents. Try again.',
+        error: _friendlyError(e),
       );
       return false;
     }
+  }
+
+  Future<void> _uploadDoc(
+    String docType,
+    String? path, {
+    required bool isFront,
+  }) async {
+    if (path == null || path.isEmpty) {
+      throw Exception('Missing document: $docType');
+    }
+    await apiClient.uploadDriverDocument(
+      documentType: docType,
+      filePath: path,
+      isFront: isFront,
+    );
+  }
+
+  String _friendlyError(Object e) {
+    final msg = e.toString().replaceFirst('Exception: ', '').trim();
+    if (msg.isEmpty) return 'Could not submit documents. Please try again.';
+    return msg;
   }
 
   Future<void> markVerifiedLocally() async {
@@ -325,6 +439,12 @@ class PersonalDriverOnboardingNotifier
     await prefs.remove('pd_aadhaar_card_front');
     await prefs.remove('pd_aadhaar_card_back');
     await prefs.remove('pd_aadhaar_card_status');
+    await prefs.remove('pd_pan_card_front');
+    await prefs.remove('pd_pan_card_back');
+    await prefs.remove('pd_pan_card_status');
+    await prefs.remove('pd_profile_photo_front');
+    await prefs.remove('pd_profile_photo_back');
+    await prefs.remove('pd_profile_photo_status');
     await prefs.setString(_modeKey, modeRideShare);
     state = const PersonalDriverOnboardingState();
   }
