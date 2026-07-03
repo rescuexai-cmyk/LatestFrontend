@@ -190,6 +190,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: Text(ref.tr('profile')),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: _ProfileHelpIconButton(
+              onTap: () => _openHelpOptions(context),
+            ),
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -202,89 +210,101 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
             child: Column(
               children: [
                 // Profile header (Figma-style: avatar + details + compact rating badge)
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: AppColors.inputBackground,
+                Material(
+                  color: AppColors.inputBackground,
+                  borderRadius: BorderRadius.circular(16),
+                  child: InkWell(
                     borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      CircleAvatar(
-                        radius: 36,
-                        backgroundColor:
-                            AppColors.secondary.withValues(alpha: 0.22),
-                        backgroundImage:
-                            user?.avatarUrl != null && user!.avatarUrl!.isNotEmpty
+                    onTap: () => _showProfileDetailsPopup(context, user),
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          CircleAvatar(
+                            radius: 36,
+                            backgroundColor:
+                                AppColors.secondary.withValues(alpha: 0.22),
+                            backgroundImage: user?.avatarUrl != null &&
+                                    user!.avatarUrl!.isNotEmpty
                                 ? NetworkImage(user.avatarUrl!)
                                 : null,
-                        child: user?.avatarUrl == null ||
-                                user!.avatarUrl!.isEmpty
-                            ? Text(
-                                _getUserInitials(user),
-                                style: const TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.secondary,
+                            child: user?.avatarUrl == null ||
+                                    user!.avatarUrl!.isEmpty
+                                ? Text(
+                                    _getUserInitials(user),
+                                    style: const TextStyle(
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.bold,
+                                      color: AppColors.secondary,
+                                    ),
+                                  )
+                                : null,
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  user?.name ?? 'User',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleMedium
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.bold,
+                                      ),
                                 ),
-                              )
-                            : null,
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              user?.name ?? 'User',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleMedium
-                                  ?.copyWith(
-                                    fontWeight: FontWeight.bold,
+                                if ((user?.email ?? '').trim().isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    (user?.email ?? '').trim(),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(
+                                          color: AppColors.textSecondary,
+                                        ),
                                   ),
+                                ],
+                                if (user?.phone != null &&
+                                    user!.phone!.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    _formatPhone(user.phone!),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(
+                                          color: AppColors.textSecondary,
+                                        ),
+                                  ),
+                                ],
+                              ],
                             ),
-                            if ((user?.email ?? '').trim().isNotEmpty) ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                (user?.email ?? '').trim(),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .bodyMedium
-                                    ?.copyWith(
-                                      color: AppColors.textSecondary,
-                                    ),
-                              ),
-                            ],
-                            if (user?.phone != null &&
-                                user!.phone!.isNotEmpty) ...[
-                              const SizedBox(height: 2),
-                              Text(
-                                _formatPhone(user.phone!),
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .bodyMedium
-                                    ?.copyWith(
-                                      color: AppColors.textSecondary,
-                                    ),
-                              ),
-                            ],
-                          ],
-                        ),
+                          ),
+                          const SizedBox(width: 8),
+                          _ProfileRatingPill(
+                            isLoading: _isLoadingStats,
+                            ratingLabel: !_isLoadingStats && _rating > 0
+                                ? _rating.toStringAsFixed(1)
+                                : ref.tr('rating_na'),
+                          ),
+                          const SizedBox(width: 2),
+                          Icon(
+                            Icons.chevron_right_rounded,
+                            color: const Color(0xFF1A1A1A).withValues(alpha: 0.45),
+                            size: 22,
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      _ProfileRatingPill(
-                        isLoading: _isLoadingStats,
-                        ratingLabel: !_isLoadingStats && _rating > 0
-                            ? _rating.toStringAsFixed(1)
-                            : ref.tr('rating_na'),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
                 const SizedBox(height: 22),
@@ -1439,6 +1459,141 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     _syncNotificationStatus();
   }
 
+  /// Lightweight "Profile Details" popup opened by tapping the header card.
+  /// Shows the full (non-truncated) name / phone / email + rating.
+  void _showProfileDetailsPopup(BuildContext context, User? user) {
+    final ratingValue = _rating;
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 12, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Profile Details',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1A1A),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close, size: 20),
+                    splashRadius: 20,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    CircleAvatar(
+                      radius: 32,
+                      backgroundColor: AppColors.secondary.withValues(alpha: 0.22),
+                      backgroundImage:
+                          user?.avatarUrl != null && user!.avatarUrl!.isNotEmpty
+                              ? NetworkImage(user.avatarUrl!)
+                              : null,
+                      child: user?.avatarUrl == null || user!.avatarUrl!.isEmpty
+                          ? Text(
+                              _getUserInitials(user),
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: AppColors.secondary,
+                              ),
+                            )
+                          : null,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            user?.name ?? 'User',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF1A1A1A),
+                            ),
+                          ),
+                          if (user?.phone != null && user!.phone!.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              _formatPhone(user.phone!),
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: AppColors.textSecondary,
+                              ),
+                            ),
+                          ],
+                          if ((user?.email ?? '').trim().isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              (user?.email ?? '').trim(),
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: AppColors.textSecondary,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 6),
+                          Row(
+                            children: List.generate(5, (i) {
+                              final filled = i < ratingValue.round();
+                              return Icon(
+                                filled ? Icons.star_rounded : Icons.star_outline_rounded,
+                                size: 18,
+                                color: const Color(0xFFCF923D),
+                              );
+                            }),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _openRiderDriverGateway(context);
+                },
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  foregroundColor: const Color(0xFF1A1A1A),
+                ),
+                child: const Text(
+                  'Switch Account?',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    decoration: TextDecoration.underline,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _openHelpOptions(BuildContext context) async {
     const supportNumber = '+18001234567';
     const supportEmail = 'support@raahi.app';
@@ -1559,6 +1714,42 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
         }
       }
     }
+  }
+}
+
+/// Small circular help/support shortcut shown on the profile header card.
+class _ProfileHelpIconButton extends StatelessWidget {
+  const _ProfileHelpIconButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      shape: const CircleBorder(),
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: const Color(0xFFE8E0D4),
+              width: 1,
+            ),
+          ),
+          alignment: Alignment.center,
+          child: const Icon(
+            Icons.headset_mic_outlined,
+            size: 17,
+            color: AppColors.secondary,
+          ),
+        ),
+      ),
+    );
   }
 }
 

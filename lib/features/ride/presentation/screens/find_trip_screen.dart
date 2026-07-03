@@ -31,6 +31,7 @@ import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
 import '../../../../core/utils/cab_map_icon.dart';
 import '../../providers/ride_booking_provider.dart';
+import 'confirm_location_on_map_screen.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../rescue/providers/rescue_booking_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
@@ -3332,8 +3333,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           mapPillTop: mapPillTop,
           sheetHeightPx: sheetHeightPx,
         ),
-        // Loading indicator for route calculation
-        if (_isLoadingRoute)
+        // Route shimmer — only before vehicle sheet (pick+drop not both set).
+        // Once drop is chosen, loading is shown inside the bottom sheet instead.
+        if (_isLoadingRoute && _destinationLocation == null)
           Positioned.fill(
             child: Container(
               color: Colors.black26,
@@ -3391,10 +3393,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     );
   }
   Widget _buildBottomSheet(ScrollController scrollController) {
-    final bool showBookButton =
-        _cabTypes.isNotEmpty && _destinationController.text.isNotEmpty;
-    final bool showTripCapsules =
-        _destinationController.text.isNotEmpty && !_isLoadingRoute;
+    final bool showBookButton = _destinationController.text.isNotEmpty &&
+        (_needExtraDriver || _cabTypes.isNotEmpty);
 
     final radius = BorderRadius.only(
       topLeft: Radius.circular(figmaRideSheetTopRadius),
@@ -3459,9 +3459,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     slivers: [
                       SliverPadding(
                         padding: EdgeInsets.fromLTRB(
-                          12,
+                          21,
                           6,
-                          12,
+                          23,
                           showBookButton ? 8 : 24,
                         ),
                         sliver: SliverList(
@@ -3477,18 +3477,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                           ),
                         ),
                       ),
-                  if (showTripCapsules) ...[
-                    const SizedBox(height: 12),
-                    FigmaTripSummaryCapsules(
-                      dropOffLabel: 'Drop off',
-                      dropOffAddress: _destinationController.text,
-                      distanceText: _distanceText,
-                      durationText: _durationText,
-                      onDropOffTap: () =>
-                          _showLocationSearchSheet(isPickup: false),
-                    ),
+                  // Rescue-mode header (Figma Frame 1707478743): eyebrow + title
+                  // on the left, R toggle on the right, divider below. Replaces
+                  // the old drop-off / distance-time summary pills.
+                  if (_cabTypes.isNotEmpty) ...[
+                    const SizedBox(height: 27),
+                    _buildRescueModeHeader(),
                   ] else
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 27),
                     if (_isLoadingPricing && _cabTypes.isEmpty)
                       const Padding(
                         padding: EdgeInsets.symmetric(vertical: 40),
@@ -3642,6 +3638,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                       ),
                     ),
                   )
+                    else if (_needExtraDriver)
+                      _buildRescueModeContent()
                     else
                       ..._cabTypes.map((cab) => _buildCabOption(cab)),
                             ],
@@ -3792,28 +3790,195 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     return '₹${fare.toStringAsFixed(2)}';
   }
 
+  /// Figma Frame 1707478743 — rescue-mode header shown above the vehicle list.
+  /// The R toggle drives [_needExtraDriver]; turning it on also selects the
+  /// rescue vehicle so slide-to-book routes through the rescue flow.
+  Widget _buildRescueModeHeader() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Stuck Somewhere?',
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        height: 15 / 12,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                    Text(
+                      _needExtraDriver
+                          ? 'Back to Normal mode'
+                          : 'Switch to Rescue Mode',
+                      style: GoogleFonts.poppins(
+                        fontSize: 16,
+                        height: 24 / 16,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Figma Frame 1410081846 — 77×35.24. The shared toggle is drawn at
+              // a smaller hit size, so scale it up to match the design exactly.
+              SizedBox(
+                width: 77,
+                height: 35.24,
+                child: Center(
+                  child: Transform.scale(
+                    scale: 77 / FigmaRescueExtraDriverToggle.hitW,
+                    child: FigmaRescueExtraDriverToggle(
+                      value: _needExtraDriver,
+                      onChanged: (value) {
+                        setState(() {
+                          _needExtraDriver = value;
+                          if (value &&
+                              _cabTypes.any((c) => c.id == 'bike_rescue')) {
+                            _selectedCabType = 'bike_rescue';
+                          }
+                        });
+                        _updateDriverMarkers();
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
+      ],
+    );
+  }
+
+  /// Rescue-mode intro card shown when the R toggle is ON (Figma Frame
+  /// 1707478747). Replaces the vehicle list: three info rows with alternating
+  /// image/text alignment, gold-bordered container, gap 31 between rows.
+  Widget _buildRescueModeContent() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: figmaRideAccent, width: 1),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildRescueInfoRow(imageRight: true),
+          const SizedBox(height: 31),
+          _buildRescueInfoRow(imageRight: false),
+          const SizedBox(height: 31),
+          _buildRescueInfoRow(imageRight: true),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRescueInfoRow({required bool imageRight}) {
+    final text = _buildRescueInfoText();
+    final image = _buildRescueInfoImage();
+    return SizedBox(
+      height: 93,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: imageRight
+            ? [
+                Expanded(child: text),
+                const SizedBox(width: 10),
+                image,
+              ]
+            : [
+                image,
+                const SizedBox(width: 30),
+                Expanded(child: text),
+              ],
+      ),
+    );
+  }
+
+  Widget _buildRescueInfoImage() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Image.asset(
+        'assets/images/rescue_service_card.png',
+        width: 93,
+        height: 93,
+        fit: BoxFit.cover,
+      ),
+    );
+  }
+
+  Widget _buildRescueInfoText() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Switch to Rescue Mode',
+          style: GoogleFonts.poppins(
+            fontSize: 16,
+            height: 21 / 16,
+            fontWeight: FontWeight.w600,
+            color: Colors.black,
+          ),
+        ),
+        const SizedBox(height: 5),
+        RichText(
+          text: TextSpan(
+            style: GoogleFonts.inter(
+              fontSize: 12,
+              height: 15 / 12,
+              fontWeight: FontWeight.w400,
+              color: const Color(0xFF3B3B3B),
+            ),
+            children: [
+              const TextSpan(
+                text: 'Lorem ipsum dolor set amet cons consequtor... ',
+              ),
+              TextSpan(
+                text: 'hum hai raahi pyaar k phir milenge chalte chalte',
+                style: GoogleFonts.inter(
+                  fontSize: 12,
+                  height: 15 / 12,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF3B3B3B),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildCabOption(CabType cab) {
     final isSelected = _selectedCabType == cab.id;
     final fare = _cabFares[cab.id];
-    final isRescue = cab.id == 'bike_rescue';
 
     return FigmaVehicleOptionCard(
-      title: isRescue ? 'Switch to Rescue' : cab.name,
+      title: cab.name,
       imageAsset: _getVehicleImage(cab.id),
-      capacity: isRescue && _needExtraDriver ? 2 : cab.capacity,
+      capacity: cab.capacity,
       eta: cab.eta,
       priceText: _formatFareDisplay(fare, cab),
       isSelected: isSelected,
-      isRescue: isRescue,
-      rescueEyebrow: isRescue ? 'Stuck Somewhere?' : null,
-      paymentNote:
-          isRescue ? null : 'Pay directly to driver, cash/UPI only',
+      isRescue: false,
+      paymentNote: 'Pay directly to driver, cash/UPI only',
       fallbackIcon: cab.icon,
-      needExtraDriver: _needExtraDriver,
-      showExtraDriversBadge: isRescue && _needExtraDriver,
-      onNeedExtraDriverChanged: isRescue && isSelected
-          ? (value) => setState(() => _needExtraDriver = value)
-          : null,
       onTap: () {
         setState(() => _selectedCabType = cab.id);
         _updateDriverMarkers();
@@ -3933,36 +4098,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
   static const double _intercityThresholdKm = 50;
 
-  /// Starts the dedicated 11-screen Figma rescue flow (locations prefilled from Find Trip).
-  void _startRescueBookingFlow(CabType selectedCab, double fare) {
-    if (!mounted) return;
-    final isEcoPickup = selectedCab.id == 'eco_pickup';
-    ref.read(rideBookingProvider.notifier).setCabType(
-          id: selectedCab.id,
-          name: selectedCab.name,
-          fare: fare,
-          originalFare: _riderSubsidy != null && _riderSubsidy!.isActive
-              ? fare / (1 - _riderSubsidy!.subsidyPct)
-              : fare,
-          subsidyAmount: _savingsAmount,
-          isSubsidyApplied: _riderSubsidy?.isActive ?? false,
-          isEcoPickup: isEcoPickup,
-          ecoPickupAddress:
-              isEcoPickup ? _ecoPickup?.suggestedPickupAddress : null,
-          ecoPickupLocation: isEcoPickup && _ecoPickup != null
-              ? LatLng(
-                  _ecoPickup!.suggestedLat,
-                  _ecoPickup!.suggestedLng,
-                )
-              : null,
-        );
-    ref.read(rescueBookingProvider.notifier).reset();
-    ref.read(rescueBookingProvider.notifier).prefillFromRideBooking();
-    ref.read(rescueBookingProvider.notifier).setVehicleWithYou(_needExtraDriver);
-    context.push(AppRoutes.rescueLanding);
-  }
-
-  /// After cab + fare selected: persist cab type then open payment route.
+  /// After cab + fare selected: persist selection then pin exact locations.
   void _pushRidePaymentWithSelectedCab(CabType selectedCab, double fare) {
     if (!mounted) return;
     final isEcoPickup = selectedCab.id == 'eco_pickup';
@@ -3989,7 +4125,46 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           _selectedCabType == 'bike_rescue' && _needExtraDriver ? 2 : 1,
         );
     ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
-    context.push(AppRoutes.ridePayment);
+    _openConfirmLocationPin(flow: ConfirmLocationFlow.payment);
+  }
+
+  void _openConfirmLocationPin({required ConfirmLocationFlow flow}) {
+    final flowParam =
+        flow == ConfirmLocationFlow.rescue ? 'rescue' : 'payment';
+    final vehicleParam = _needExtraDriver ? 'true' : 'false';
+    context.push(
+      '${AppRoutes.confirmLocationPin}?flow=$flowParam&vehicleWithYou=$vehicleParam',
+    );
+  }
+
+  /// Starts rescue flow after map pin confirmation (locations prefilled from Find Trip).
+  void _startRescueBookingFlow(CabType selectedCab, double fare) {
+    if (!mounted) return;
+    final isEcoPickup = selectedCab.id == 'eco_pickup';
+    ref.read(rideBookingProvider.notifier).setCabType(
+          id: selectedCab.id,
+          name: selectedCab.name,
+          fare: fare,
+          originalFare: _riderSubsidy != null && _riderSubsidy!.isActive
+              ? fare / (1 - _riderSubsidy!.subsidyPct)
+              : fare,
+          subsidyAmount: _savingsAmount,
+          isSubsidyApplied: _riderSubsidy?.isActive ?? false,
+          isEcoPickup: isEcoPickup,
+          ecoPickupAddress:
+              isEcoPickup ? _ecoPickup?.suggestedPickupAddress : null,
+          ecoPickupLocation: isEcoPickup && _ecoPickup != null
+              ? LatLng(
+                  _ecoPickup!.suggestedLat,
+                  _ecoPickup!.suggestedLng,
+                )
+              : null,
+        );
+    ref.read(rideBookingProvider.notifier).setDriverCount(
+          _selectedCabType == 'bike_rescue' && _needExtraDriver ? 2 : 1,
+        );
+    ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
+    _openConfirmLocationPin(flow: ConfirmLocationFlow.rescue);
   }
 
   void _onBookRideSlideComplete() {
@@ -4051,13 +4226,35 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     _pushRidePaymentWithSelectedCab(selectedCab, fare);
   }
 
+  /// Enter rescue selection flow after map pin confirmation (R toggle ON).
+  void _onSelectRescueServices() {
+    if (!mounted) return;
+    if (_pickupLocation != null &&
+        _pickupController.text.trim().isNotEmpty) {
+      ref.read(rideBookingProvider.notifier).setPickupLocation(
+            _pickupController.text.trim(),
+            _pickupLocation!,
+          );
+    }
+    if (_destinationLocation != null &&
+        _destinationController.text.trim().isNotEmpty) {
+      ref.read(rideBookingProvider.notifier).setDestinationLocation(
+            _destinationController.text.trim(),
+            _destinationLocation!,
+          );
+    }
+    _openConfirmLocationPin(flow: ConfirmLocationFlow.rescue);
+  }
+
   Widget _buildBookRideButton() {
     return Material(
       color: const Color(0xFF2E2C2A),
       borderRadius: BorderRadius.circular(280),
       child: InkWell(
         borderRadius: BorderRadius.circular(280),
-        onTap: _onBookRideSlideComplete,
+        onTap: _needExtraDriver
+            ? _onSelectRescueServices
+            : _onBookRideSlideComplete,
         child: Container(
           width: double.infinity,
           constraints: const BoxConstraints(minHeight: 56),
@@ -4067,7 +4264,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             vertical: 18,
           ),
           child: Text(
-            'Book Now',
+            _needExtraDriver ? 'Select Rescue Services' : 'Book Now',
             textAlign: TextAlign.center,
             style: GoogleFonts.poppins(
               fontSize: 16.65,

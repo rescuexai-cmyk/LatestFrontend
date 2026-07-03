@@ -33,7 +33,7 @@ class SavedAccount {
       phone: json['phone'] as String,
       name: json['name'] as String,
       avatarUrl: json['avatarUrl'] as String?,
-      userType: _parseUserType(json['userType'] as String?),
+      userType: User.parseUserType(json['userType'] as String?),
       token: json['token'] as String,
       refreshToken: json['refreshToken'] as String?,
       savedAt: DateTime.tryParse(json['savedAt'] as String? ?? '') ?? DateTime.now(),
@@ -51,17 +51,6 @@ class SavedAccount {
       'refreshToken': refreshToken,
       'savedAt': savedAt.toIso8601String(),
     };
-  }
-
-  static UserType _parseUserType(String? type) {
-    switch (type) {
-      case 'driver':
-        return UserType.driver;
-      case 'both':
-        return UserType.both;
-      default:
-        return UserType.rider;
-    }
   }
 
   /// Create a SavedAccount from a User and tokens

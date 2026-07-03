@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../../core/models/user.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/router/user_landing.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -23,6 +24,7 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _isCheckingDriver = false;
+  bool _autoOpeningDriver = false;
 
   static const _designW = 390.0;
 
@@ -39,6 +41,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   static const _secondarySubtitle = Color(0xFF898989);
   static const _switchLink = Color(0xFF78572A);
   static const _footerText = Color(0xFF606060);
+
+  @override
+  void initState() {
+    super.initState();
+    // Driver-only accounts skip the dual-choice screen and open the driver app.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoRouteByRole());
+  }
+
+  Future<void> _maybeAutoRouteByRole() async {
+    final user = ref.read(currentUserProvider);
+    if (!shouldAutoOpenDriverApp(user)) return;
+    if (_autoOpeningDriver || _isCheckingDriver) return;
+
+    setState(() {
+      _autoOpeningDriver = true;
+      _isCheckingDriver = true;
+    });
+    await _openDriversApp();
+    if (mounted) setState(() => _autoOpeningDriver = false);
+  }
 
   Future<void> _openDriversApp() async {
     if (_isCheckingDriver) return;
@@ -147,6 +169,30 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final bottomSafe = mq.viewPadding.bottom;
     final s = w / _designW;
     final showRideBanner = _hasActiveRideBanner(context);
+    final userType = user?.userType ?? UserType.rider;
+
+    // Driver-only: show a minimal loading state while the gateway runs.
+    if (_autoOpeningDriver && userType == UserType.driver) {
+      return Scaffold(
+        backgroundColor: _cream,
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: _primaryBtn),
+              SizedBox(height: 16 * s),
+              Text(
+                'Opening Driver\'s App…',
+                style: GoogleFonts.poppins(
+                  fontSize: 14 * s,
+                  color: _subhead,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     double figma(double v) => _figma(w, v);
 
@@ -306,9 +352,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final initial = label.isNotEmpty ? label[0].toUpperCase() : 'U';
     final avatarUrl = user?.avatarUrl?.trim();
 
-    // Figma: Frame 1410081555 — 236×38, radius 14, border 0.361px #A89C8A
+    // Figma: Frame 1410081555 — radius 14, border 0.361px #A89C8A.
+    // Width hugs the email (dynamic) but is capped so very long emails ellipsize.
     return SizedBox(
-      width: 236 * s,
       height: 38 * s,
       child: DecoratedBox(
         decoration: BoxDecoration(
@@ -325,10 +371,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               padding: EdgeInsets.fromLTRB(
                 5.52279 * s,
                 0,
-                10 * s,
+                6 * s,
                 0,
               ),
               child: Row(
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   // Ellipse 299 — 24.3×24.3
@@ -358,13 +405,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           )
                         : null,
                   ),
-                  SizedBox(width: 11.05 * s),
-                  // Email — width 156, 12px / 18px line-height
-                  SizedBox(
-                    width: 156 * s,
+                  SizedBox(width: 8 * s),
+                  // Email hugs content; ellipsize only when truly long.
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: 200 * s),
                     child: Text(
                       trimmedEmail.isNotEmpty ? trimmedEmail : label,
                       maxLines: 1,
+                      softWrap: false,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.poppins(
                         fontSize: 12 * s,
@@ -374,8 +422,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                     ),
                   ),
-                  SizedBox(width: 11.05 * s),
-                  // icon_back — 6.63×12.15 chevron down
+                  SizedBox(width: 4 * s),
+                  // icon_back — chevron down, tight to ellipsis
                   Icon(
                     Icons.keyboard_arrow_down_rounded,
                     size: 12.15 * s,
@@ -412,17 +460,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return SizedBox(
       width: 20 * s,
       height: 20 * s,
-      child: Center(
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(width: 14 * s, height: 2 * s, color: color),
-            CustomPaint(
-              size: Size(6 * s, 10 * s),
-              painter: _ArrowHeadPainter(color: color),
-            ),
-          ],
-        ),
+      child: CustomPaint(
+        painter: _ChevronArrowPainter(color: color, strokeWidth: 1.8 * s),
       ),
     );
   }
@@ -592,28 +631,41 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 }
 
-class _ArrowHeadPainter extends CustomPainter {
-  _ArrowHeadPainter({required this.color});
+/// Thin right-arrow with an open V (chevron) head and rounded caps — matches the
+/// Figma "→" glyph used on the action cards.
+class _ChevronArrowPainter extends CustomPainter {
+  _ChevronArrowPainter({required this.color, required this.strokeWidth});
 
   final Color color;
+  final double strokeWidth;
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = color
-      ..strokeWidth = 2
+      ..strokeWidth = strokeWidth
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
 
-    final path = Path()
-      ..moveTo(0, 0)
-      ..lineTo(size.width, size.height / 2)
-      ..lineTo(0, size.height);
-    canvas.drawPath(path, paint);
+    final cy = size.height / 2;
+    // Keep the round caps inside the box so the tip isn't clipped.
+    final tipX = size.width - strokeWidth;
+    final startX = strokeWidth;
+    final headBackX = tipX - size.width * 0.34;
+    final headSpread = size.height * 0.26;
+
+    // Shaft.
+    canvas.drawLine(Offset(startX, cy), Offset(tipX, cy), paint);
+    // Open chevron head.
+    final head = Path()
+      ..moveTo(headBackX, cy - headSpread)
+      ..lineTo(tipX, cy)
+      ..lineTo(headBackX, cy + headSpread);
+    canvas.drawPath(head, paint);
   }
 
   @override
-  bool shouldRepaint(covariant _ArrowHeadPainter oldDelegate) =>
-      oldDelegate.color != color;
+  bool shouldRepaint(covariant _ChevronArrowPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.strokeWidth != strokeWidth;
 }

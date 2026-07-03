@@ -21,6 +21,8 @@ class AppRoutes {
   static const String rideChat = '/ride/:rideId/chat';
   static const String rideBooking = '/booking';
   static const String findTrip = '/booking/find-trip';
+  /// Pin exact pickup/drop on map — after vehicle selection.
+  static const String confirmLocationPin = '/booking/confirm-location';
   static const String ridePayment = '/booking/payment';
   static const String searchingDrivers = '/booking/searching';
   static const String scheduledRide = '/booking/scheduled';

@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/services/api_client.dart';
+import 'driver_onboarding_provider.dart'
+    show BackendOnboardingStatus, DocumentStatus;
 
 /// Onboarding for independent / personal-rescue drivers (no vehicle).
 /// Maps to the backend `independent_driver` category (service types
@@ -31,12 +33,24 @@ class PersonalDriverDocument {
     this.frontPath,
     this.backPath,
     this.status = PersonalDocStatus.notUploaded,
+    this.aiVerified,
+    this.aiConfidence,
+    this.verificationReason,
   });
 
   final String type;
   final String? frontPath;
   final String? backPath;
   final PersonalDocStatus status;
+
+  /// Backend AI/Cloud-Vision verdict for this document (null = not evaluated yet).
+  final bool? aiVerified;
+
+  /// Cloud-Vision confidence score (0–1), when the backend returns one.
+  final double? aiConfidence;
+
+  /// Human-readable reason a document was flagged/rejected by verification.
+  final String? verificationReason;
 
   bool get isComplete =>
       frontPath != null &&
@@ -47,12 +61,18 @@ class PersonalDriverDocument {
     String? frontPath,
     String? backPath,
     PersonalDocStatus? status,
+    bool? aiVerified,
+    double? aiConfidence,
+    String? verificationReason,
   }) {
     return PersonalDriverDocument(
       type: type,
       frontPath: frontPath ?? this.frontPath,
       backPath: backPath ?? this.backPath,
       status: status ?? this.status,
+      aiVerified: aiVerified ?? this.aiVerified,
+      aiConfidence: aiConfidence ?? this.aiConfidence,
+      verificationReason: verificationReason ?? this.verificationReason,
     );
   }
 
@@ -392,6 +412,11 @@ class PersonalDriverOnboardingNotifier
       await pn.saveToPrefs(prefs);
       await ph.saveToPrefs(prefs);
       await _persistStatus(PersonalDriverOnboardingStatus.documentsSubmitted);
+
+      // Pull the backend's Cloud-Vision/AI verification verdict so the UI can
+      // show verified/flagged results per ID document instead of a generic
+      // "in review" state. Best-effort: verification may still be processing.
+      await refreshVerificationStatus();
       return true;
     } catch (e) {
       state = state.copyWith(
@@ -399,6 +424,90 @@ class PersonalDriverOnboardingNotifier
         error: _friendlyError(e),
       );
       return false;
+    }
+  }
+
+  /// Fetch the backend onboarding status and fold the Cloud-Vision/AI
+  /// verification verdict into each ID document (LICENSE, AADHAAR, PAN) and the
+  /// profile photo. Safe to call repeatedly (e.g. on the status screen).
+  Future<void> refreshVerificationStatus() async {
+    try {
+      final resp = await apiClient.getDriverOnboardingStatus();
+      final backend = BackendOnboardingStatus.fromJson(resp);
+
+      final dl = _applyVerification(state.drivingLicense, backend, 'LICENSE');
+      final ad = _applyVerification(state.aadhaar, backend, 'AADHAAR_CARD');
+      final pn = _applyVerification(state.pan, backend, 'PAN_CARD');
+      final ph =
+          _applyVerification(state.profilePhoto, backend, 'PROFILE_PHOTO');
+
+      PersonalDriverOnboardingStatus overall;
+      if (backend.hasRejectedDocuments) {
+        overall = PersonalDriverOnboardingStatus.rejected;
+      } else if (backend.canStartRides || backend.documentsVerified) {
+        overall = PersonalDriverOnboardingStatus.verified;
+      } else {
+        overall = PersonalDriverOnboardingStatus.underReview;
+      }
+
+      state = state.copyWith(
+        drivingLicense: dl,
+        aadhaar: ad,
+        pan: pn,
+        profilePhoto: ph,
+        status: overall,
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      await dl.saveToPrefs(prefs);
+      await ad.saveToPrefs(prefs);
+      await pn.saveToPrefs(prefs);
+      await ph.saveToPrefs(prefs);
+      await _persistStatus(overall);
+    } catch (e) {
+      debugPrint('ℹ️ refreshVerificationStatus skipped: $e');
+    }
+  }
+
+  /// Merge a backend document detail (Cloud-Vision verdict) into a local doc.
+  PersonalDriverDocument _applyVerification(
+    PersonalDriverDocument doc,
+    BackendOnboardingStatus backend,
+    String backendType,
+  ) {
+    bool? aiVerified;
+    double? aiConfidence;
+    for (final detail in backend.documentDetails) {
+      if (detail.type.toUpperCase() == backendType) {
+        aiVerified = detail.aiVerified;
+        aiConfidence = detail.aiConfidence;
+        break;
+      }
+    }
+    return PersonalDriverDocument(
+      type: doc.type,
+      frontPath: doc.frontPath,
+      backPath: doc.backPath,
+      status: _mapBackendDocStatus(backend.getDocumentStatus(backendType)),
+      aiVerified: aiVerified,
+      aiConfidence: aiConfidence,
+      verificationReason: backend.getRejectionReason(backendType),
+    );
+  }
+
+  PersonalDocStatus _mapBackendDocStatus(DocumentStatus s) {
+    switch (s) {
+      case DocumentStatus.verified:
+        return PersonalDocStatus.verified;
+      case DocumentStatus.rejected:
+        return PersonalDocStatus.rejected;
+      case DocumentStatus.inReview:
+        return PersonalDocStatus.inReview;
+      case DocumentStatus.uploaded:
+      case DocumentStatus.uploading:
+        return PersonalDocStatus.uploaded;
+      case DocumentStatus.notUploaded:
+        return PersonalDocStatus.notUploaded;
     }
   }
 

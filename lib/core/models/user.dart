@@ -32,7 +32,11 @@ class User extends Equatable {
       phone: json['phone'] as String?,
       name: json['name'] as String,
       avatarUrl: json['avatar_url'] as String?,
-      userType: _parseUserType(json['user_type'] as String?),
+      userType: json['user_type'] != null ||
+              json['userType'] != null ||
+              json['role'] != null
+          ? userTypeFromJson(json)
+          : UserType.both,
       createdAt: DateTime.parse(json['created_at'] as String),
       updatedAt: DateTime.parse(json['updated_at'] as String),
       userMetadata: json['user_metadata'] as Map<String, dynamic>?,
@@ -53,15 +57,38 @@ class User extends Equatable {
     };
   }
 
-  static UserType _parseUserType(String? type) {
-    switch (type) {
+  /// Parse backend role — supports snake_case, camelCase, and uppercase variants
+  /// until the API contract is finalised (e.g. `user_type`, `userType`, `role`).
+  static UserType parseUserType(String? type) {
+    switch (type?.trim().toLowerCase()) {
       case 'driver':
+      case 'drivers':
         return UserType.driver;
       case 'both':
+      case 'rider_driver':
+      case 'rider_and_driver':
         return UserType.both;
+      case 'rider':
+      case 'riders':
+      case 'passenger':
       default:
         return UserType.rider;
     }
+  }
+
+  /// Extract role from a backend user JSON map (multiple key aliases).
+  /// When the field is absent the user is treated as [UserType.both] so the
+  /// dual-choice screen keeps showing until the backend starts sending roles.
+  static UserType userTypeFromJson(Map<String, dynamic> json) {
+    final raw = json['user_type'] ??
+        json['userType'] ??
+        json['role'] ??
+        json['account_type'] ??
+        json['accountType'];
+    if (raw == null) return UserType.both;
+    if (raw is String && raw.trim().isEmpty) return UserType.both;
+    if (raw is String) return parseUserType(raw);
+    return UserType.both;
   }
 
   User copyWith({

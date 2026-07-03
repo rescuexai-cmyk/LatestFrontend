@@ -25,17 +25,15 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   String _selectedPaymentMethod = 'cash';
   bool _isLoading = false;
   String? _appliedVoucher;
-  /// Full promo details for the applied code (when it comes from the active
-  /// list) — used only to preview the discount. Null for manually-typed codes
-  /// not in the list; those are validated by the backend at booking time.
   Promo? _appliedPromo;
-  /// Backend-computed discount for the applied code (from POST /api/promo/apply).
-  /// This is authoritative for the preview — we never compute it client-side.
-  double? _serverDiscount;
-  /// True while a promo code is being validated against the backend.
+  /// Backend-computed preview from POST /api/promo/apply (authoritative).
+  PromoPreview? _promoPreview;
   bool _isApplyingVoucher = false;
-  /// Active promos fetched from the backend for this trip's vehicle type.
   List<Promo> _availablePromos = [];
+  /// Tracks fare + vehicle used for the last successful promo preview.
+  (double, String)? _promoAppliedFor;
+  /// Stops promo re-validation once ride booking starts (avoids stale errors on later screens).
+  bool _suppressPromoReapply = false;
   // Linked UPI accounts - will be displayed in payment methods section
   final List<Map<String, dynamic>> _linkedUpiAccounts = [];
 
@@ -48,10 +46,11 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   /// Loads server-owned promo codes for the current vehicle type. Failures are
   /// swallowed (empty list) so the payment screen never breaks over promos.
   Future<void> _loadAvailablePromos() async {
-    final vehicleType = ref.read(rideBookingProvider).selectedCabTypeId;
-    final raw = await ref
-        .read(apiClientProvider)
-        .getActivePromos(vehicleType: vehicleType);
+    final booking = ref.read(rideBookingProvider);
+    final raw = await ref.read(apiClientProvider).getActivePromos(
+          vehicleType: booking.selectedCabTypeId,
+          city: inferPromoCity(booking.pickupAddress),
+        );
     if (!mounted) return;
     setState(() {
       _availablePromos = raw
@@ -59,6 +58,125 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           .where((p) => p.code.isNotEmpty)
           .toList();
     });
+  }
+
+  String? _promoCity() =>
+      inferPromoCity(ref.read(rideBookingProvider).pickupAddress);
+
+  double _estimateFare() {
+    final booking = ref.read(rideBookingProvider);
+    if (booking.fare > 0) return booking.fare;
+    if (booking.originalFare > 0) return booking.originalFare;
+    return 0;
+  }
+
+  double _displayOriginalFare() {
+    final preview = _promoPreview;
+    if (preview != null && preview.originalFare > 0) return preview.originalFare;
+    return _estimateFare();
+  }
+
+  double _payableAmount() {
+    final preview = _promoPreview;
+    if (preview != null) return preview.payableNow;
+    return _estimateFare();
+  }
+
+  double _discountAmount() {
+    final preview = _promoPreview;
+    if (preview != null && !preview.isCashback) return preview.discountAmount;
+    return 0;
+  }
+
+  double? _cashbackAmount() {
+    final preview = _promoPreview;
+    if (preview == null) return null;
+    if (preview.isCashback) {
+      return preview.cashbackAmount ?? preview.discountAmount;
+    }
+    return null;
+  }
+
+  void _clearPromo({bool notify = false}) {
+    setState(() {
+      _appliedVoucher = null;
+      _appliedPromo = null;
+      _promoPreview = null;
+      _promoAppliedFor = null;
+    });
+    if (notify && mounted) {
+      _showStatusSnackBar('Voucher removed');
+    }
+  }
+
+  PromoPreview? _parsePromoPreview(Map<String, dynamic> res) {
+    final data = res['data'];
+    if (data is! Map) return null;
+    return PromoPreview.fromJson(Map<String, dynamic>.from(data));
+  }
+
+  bool _isPromoInvalidResponse(Map<String, dynamic> res) =>
+      res['code']?.toString() == 'PROMO_INVALID';
+
+  List<String> _promoConditionLines(Promo promo) {
+    final lines = <String>[];
+    if (promo.minFare != null) {
+      lines.add('Valid on fares ₹${_trimNum(promo.minFare!)}+');
+    }
+    if (promo.maxDiscount != null) {
+      lines.add('Max discount ₹${_trimNum(promo.maxDiscount!)}');
+    }
+    return lines;
+  }
+
+  String? _promoIneligibilityNote(Promo promo, double fare) {
+    if (fare <= 0 || promo.minFare == null) return null;
+    if (promo.meetsMinFare(fare)) return null;
+    final needed = promo.minFare! - fare;
+    return 'Your fare is ₹${_trimNum(fare)} · need ₹${_trimNum(promo.minFare!)}+ '
+        '(add ₹${_trimNum(needed)} more)';
+  }
+
+  Widget _buildVoucherSheetBanner({
+    required String message,
+    bool isError = true,
+  }) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: isError ? const Color(0xFFFFEBEE) : const Color(0xFFE8F5E9),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isError
+              ? const Color(0xFFE57373)
+              : const Color(0xFF81C784),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            isError ? Icons.error_outline : Icons.check_circle_outline,
+            size: 20,
+            color: isError ? const Color(0xFFC62828) : const Color(0xFF2E7D32),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: isError ? const Color(0xFFC62828) : const Color(0xFF2E7D32),
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Promo? _findPromoByCode(String code) {
@@ -69,71 +187,87 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     return null;
   }
 
-  /// Upfront discount preview for the applied promo.
-  ///
-  /// Authoritative source is the backend value from POST /api/promo/apply
-  /// ([_serverDiscount]). The client-side [Promo.computeDiscount] is only a
-  /// fallback for a code picked from the active list if the server preview is
-  /// unavailable.
-  double _discountAmount(double baseAmount) {
-    if (_appliedVoucher == null) return 0;
-    final server = _serverDiscount;
-    if (server != null) {
-      return server > baseAmount ? baseAmount : server;
-    }
-    final promo = _appliedPromo;
-    if (promo == null) return 0;
-    if (!promo.meetsMinFare(baseAmount)) return 0;
-    return promo.computeDiscount(baseAmount);
-  }
-
-  /// Base fare used for promo validation/preview (pre-discount).
-  double _baseFareForPromo() {
-    final fare = ref.read(rideBookingProvider).fare;
-    return fare > 0 ? fare : 0;
-  }
-
-  /// Validates a code against the backend and applies it only if the backend
-  /// accepts it. Invalid/expired/ineligible codes surface the backend message
-  /// and are NOT applied. [known] is the promo card details when picked from the
-  /// active list (used as a display fallback).
   Future<void> _applyVoucherCode(String raw, {Promo? known}) async {
     final code = raw.trim().toUpperCase();
-    if (code.isEmpty) {
-      AppMessenger.showErrorBanner(context, 'Please enter a voucher code');
-      return;
-    }
-    if (_isApplyingVoucher) return;
+    if (code.isEmpty || _isApplyingVoucher) return;
+
+    final fare = _estimateFare();
+    if (fare <= 0) return;
+
     setState(() => _isApplyingVoucher = true);
 
-    final fare = _baseFareForPromo();
+    final booking = ref.read(rideBookingProvider);
+    final client = ref.read(apiClientProvider);
+    final city = _promoCity();
+
+    final res = await client.applyPromoPreview(
+      code: code,
+      fare: fare,
+      vehicleType: booking.selectedCabTypeId,
+      city: city,
+    );
+    if (!mounted) return;
+
+    if (res['success'] == true) {
+      final preview = _parsePromoPreview(res);
+      if (preview == null) {
+        setState(() => _isApplyingVoucher = false);
+        return;
+      }
+      setState(() {
+        _appliedVoucher = preview.code;
+        _appliedPromo = known ?? _findPromoByCode(preview.code);
+        _promoPreview = preview;
+        _promoAppliedFor = (fare, booking.selectedCabTypeId);
+        _isApplyingVoucher = false;
+      });
+      if (Navigator.canPop(context)) Navigator.pop(context);
+      final savings = preview.isCashback
+          ? '₹${_trimNum(preview.cashbackAmount ?? preview.discountAmount)} cashback after ride'
+          : 'You save ₹${_trimNum(preview.discountAmount)}';
+      _showStatusSnackBar('$code applied · $savings');
+    } else {
+      setState(() => _isApplyingVoucher = false);
+    }
+  }
+
+  /// Re-call apply when vehicle type or fare changes while a code is applied.
+  Future<void> _reapplyPromoIfNeeded() async {
+    if (_suppressPromoReapply || _isLoading) return;
+
+    final code = _appliedVoucher;
+    if (code == null || _isApplyingVoucher) return;
+
+    final fare = _estimateFare();
     final vehicleType = ref.read(rideBookingProvider).selectedCabTypeId;
+    if (fare <= 0) {
+      _clearPromo();
+      return;
+    }
+
+    final key = (fare, vehicleType);
+    if (_promoAppliedFor == key) return;
+
     final res = await ref.read(apiClientProvider).applyPromoPreview(
           code: code,
           fare: fare,
           vehicleType: vehicleType,
+          city: _promoCity(),
         );
     if (!mounted) return;
 
-    final ok = res['success'] == true;
-    if (ok) {
-      final data = res['data'];
-      double? serverDiscount;
-      if (data is Map) {
-        serverDiscount = (data['discountAmount'] as num?)?.toDouble();
+    if (res['success'] == true) {
+      final preview = _parsePromoPreview(res);
+      if (preview == null) {
+        _clearPromo();
+        return;
       }
       setState(() {
-        _appliedVoucher = code;
-        _appliedPromo = known ?? _findPromoByCode(code);
-        _serverDiscount = serverDiscount;
-        _isApplyingVoucher = false;
+        _promoPreview = preview;
+        _promoAppliedFor = key;
       });
-      if (Navigator.canPop(context)) Navigator.pop(context);
-      _showStatusSnackBar('Voucher $code applied!');
     } else {
-      setState(() => _isApplyingVoucher = false);
-      final msg = (res['message'] ?? 'This voucher code is not valid.').toString();
-      AppMessenger.showErrorBanner(context, msg);
+      _clearPromo();
     }
   }
 
@@ -147,6 +281,10 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       if (data is Map && data['code'] == 'PROMO_INVALID') return true;
     }
     return false;
+  }
+
+  void _handlePromoInvalidAtBooking() {
+    _clearPromo();
   }
 
   /// Maps UI payment selection to backend enum: CASH | CARD | UPI | WALLET | SCAN_TO_PAY.
@@ -287,11 +425,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   ];
   /// Launch UPI payment intent with the specified app
   Future<void> _launchDirectUpiPayment(Map<String, dynamic> app) async {
-    final rideBookingState = ref.read(rideBookingProvider);
-    final baseAmount =
-        rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
-    final discountAmount = _discountAmount(baseAmount);
-    final totalAmount = (baseAmount - discountAmount).toStringAsFixed(2);
+    final totalAmount = _payableAmount().toStringAsFixed(2);
     final transactionNote = 'Raahi Ride Payment';
     final payeeVpa = 'raahi@upi'; // This should come from merchant config
     final payeeName = 'Raahi';
@@ -337,6 +471,19 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   }
   @override
   Widget build(BuildContext context) {
+    ref.listen(
+      rideBookingProvider.select((s) => (s.fare, s.selectedCabTypeId)),
+      (prev, next) {
+        if (prev != null &&
+            prev != next &&
+            _appliedVoucher != null &&
+            !_suppressPromoReapply &&
+            !_isLoading) {
+          _reapplyPromoIfNeeded();
+        }
+      },
+    );
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
@@ -472,11 +619,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     );
   }
   Widget _buildDirectUpiPaymentSection() {
-    final rideBookingState = ref.watch(rideBookingProvider);
-    final baseAmount =
-        rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
-    final discountAmount = _discountAmount(baseAmount);
-    final totalAmount = baseAmount - discountAmount;
+    final discountAmount = _discountAmount();
+    final totalAmount = _payableAmount();
+    final cashback = _cashbackAmount();
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -543,6 +688,27 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
               ),
             ],
           ),
+          if (cashback != null && cashback > 0) ...[
+            const SizedBox(height: 8),
+            Text(
+              '₹${_trimNum(cashback)} cashback after ride',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF4CAF50),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ] else if (discountAmount > 0) ...[
+            const SizedBox(height: 8),
+            Text(
+              'You save ₹${_trimNum(discountAmount)}',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF4CAF50),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           // UPI App Grid
           Row(
@@ -731,6 +897,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     );
   }
   Widget _buildVouchersAddSection() {
+    final discountAmount = _discountAmount();
+    final cashback = _cashbackAmount();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -742,11 +911,51 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
             color: Color(0xFF1A1A1A),
           ),
         ),
+        if (_appliedVoucher != null) ...[
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5E9),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFF4CAF50).withValues(alpha: 0.35)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Color(0xFF4CAF50), size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    cashback != null && cashback > 0
+                        ? '$_appliedVoucher applied · ₹${_trimNum(cashback)} cashback after ride'
+                        : '$_appliedVoucher applied · You save ₹${_trimNum(discountAmount)}',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF2E7D32),
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => _clearPromo(notify: true),
+                  child: const Text(
+                    'Remove',
+                    style: TextStyle(
+                      color: Color(0xFF2E7D32),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 16),
         _buildPaymentOption(
           icon: Icons.confirmation_number_outlined,
           title: _appliedVoucher != null
-              ? 'Voucher: $_appliedVoucher'
+              ? 'Change voucher'
               : 'Add voucher',
           isSelected: _appliedVoucher != null,
           onTap: _showVoucherSheet,
@@ -1264,133 +1473,283 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     );
   }
   void _showVoucherSheet() {
-    final voucherController = TextEditingController();
+    final voucherController = TextEditingController(
+      text: _appliedVoucher ?? '',
+    );
+    final currentFare = _estimateFare();
+    String? sheetError;
+    String? sheetErrorCode;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          padding: const EdgeInsets.all(20),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Handle bar
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFE0E0E0),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const Text(
-                  'Apply Voucher',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF1A1A1A),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Enter your voucher code to get discount',
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Color(0xFF888888),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                // Voucher input
-                TextField(
-                  controller: voucherController,
-                  textCapitalization: TextCapitalization.characters,
-                  decoration: InputDecoration(
-                    hintText: 'Enter voucher code',
-                    prefixIcon: const Icon(Icons.confirmation_number_outlined),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFFE8E8E8)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFFD4956A)),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // Available vouchers (server-owned; may be empty)
-                if (_availablePromos.isNotEmpty) ...[
-                  const Text(
-                    'Available Vouchers',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1A1A1A),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  ..._availablePromos.map(
-                    (p) => Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
-                      child: _buildVoucherCard(p),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                // Apply button
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () => _applyTypedVoucher(voucherController.text),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD4956A),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          void clearSheetError() {
+            if (sheetError == null) return;
+            setSheetState(() {
+              sheetError = null;
+              sheetErrorCode = null;
+            });
+          }
+
+          Future<void> applyFromSheet(String raw, {Promo? known}) async {
+            final code = raw.trim().toUpperCase();
+            if (code.isEmpty) {
+              setSheetState(() {
+                sheetError = 'Please enter a voucher code';
+                sheetErrorCode = null;
+              });
+              return;
+            }
+            if (_isApplyingVoucher) return;
+
+            final fare = _estimateFare();
+            if (fare <= 0) {
+              setSheetState(() {
+                sheetError =
+                    'Trip fare is not ready yet. Please go back and select a vehicle.';
+                sheetErrorCode = code;
+              });
+              return;
+            }
+
+            if (known != null && !known.meetsMinFare(fare)) {
+              setSheetState(() {
+                sheetError = _promoIneligibilityNote(known, fare) ??
+                    'This voucher needs a higher fare to apply.';
+                sheetErrorCode = code;
+              });
+              return;
+            }
+
+            setSheetState(() {
+              _isApplyingVoucher = true;
+              sheetError = null;
+              sheetErrorCode = null;
+            });
+
+            final booking = ref.read(rideBookingProvider);
+            final res = await ref.read(apiClientProvider).applyPromoPreview(
+                  code: code,
+                  fare: fare,
+                  vehicleType: booking.selectedCabTypeId,
+                  city: _promoCity(),
+                );
+            if (!mounted) return;
+
+            if (res['success'] == true) {
+              final preview = _parsePromoPreview(res);
+              if (preview == null) {
+                setSheetState(() {
+                  _isApplyingVoucher = false;
+                  sheetError =
+                      'Could not read discount from server. Please try again.';
+                  sheetErrorCode = code;
+                });
+                return;
+              }
+              setState(() {
+                _appliedVoucher = preview.code;
+                _appliedPromo = known ?? _findPromoByCode(preview.code);
+                _promoPreview = preview;
+                _promoAppliedFor = (fare, booking.selectedCabTypeId);
+                _isApplyingVoucher = false;
+              });
+              if (Navigator.canPop(sheetContext)) Navigator.pop(sheetContext);
+              final savings = preview.isCashback
+                  ? '₹${_trimNum(preview.cashbackAmount ?? preview.discountAmount)} cashback after ride'
+                  : 'You save ₹${_trimNum(preview.discountAmount)}';
+              _showStatusSnackBar('${preview.code} applied · $savings');
+            } else {
+              setSheetState(() {
+                _isApplyingVoucher = false;
+                sheetError =
+                    (res['message'] ?? 'This voucher code is not valid.')
+                        .toString();
+                sheetErrorCode = code;
+              });
+            }
+          }
+
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              padding: const EdgeInsets.all(20),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE0E0E0),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
                       ),
                     ),
-                    child: const Text(
+                    const SizedBox(height: 20),
+                    const Text(
                       'Apply Voucher',
                       style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1A1A1A),
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Enter your voucher code to get discount',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Color(0xFF888888),
+                      ),
+                    ),
+                    if (sheetError != null) ...[
+                      const SizedBox(height: 16),
+                      _buildVoucherSheetBanner(message: sheetError!),
+                    ],
+                    const SizedBox(height: 24),
+                    TextField(
+                      controller: voucherController,
+                      textCapitalization: TextCapitalization.characters,
+                      enabled: !_isApplyingVoucher,
+                      onChanged: (_) => clearSheetError(),
+                      decoration: InputDecoration(
+                        hintText: 'Enter voucher code',
+                        errorText: sheetError != null && sheetErrorCode == null
+                            ? sheetError
+                            : null,
+                        prefixIcon: const Icon(Icons.confirmation_number_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: sheetError != null
+                                ? const Color(0xFFE57373)
+                                : const Color(0xFFE8E8E8),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: sheetError != null
+                                ? const Color(0xFFC62828)
+                                : const Color(0xFFD4956A),
+                          ),
+                        ),
+                        errorBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Color(0xFFC62828)),
+                        ),
+                      ),
+                    ),
+                    if (currentFare > 0) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'Current trip fare: ₹${_trimNum(currentFare)}',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF888888),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    if (_availablePromos.isNotEmpty) ...[
+                      const Text(
+                        'Available Vouchers',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1A1A1A),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      ..._availablePromos.map(
+                        (p) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _buildVoucherCard(
+                            p,
+                            fare: currentFare,
+                            highlightError: sheetErrorCode == p.code,
+                            errorMessage:
+                                sheetErrorCode == p.code ? sheetError : null,
+                            onApply: p.meetsMinFare(currentFare) || currentFare <= 0
+                                ? () => applyFromSheet(p.code, known: p)
+                                : null,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _isApplyingVoucher
+                            ? null
+                            : () => applyFromSheet(voucherController.text),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFD4956A),
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: _isApplyingVoucher
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text(
+                                'Apply Voucher',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                      ),
+                    ),
+                    if (_appliedVoucher != null) ...[
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: TextButton(
+                          onPressed: _isApplyingVoucher
+                              ? null
+                              : () {
+                                  _clearPromo(notify: true);
+                                  if (Navigator.canPop(sheetContext)) {
+                                    Navigator.pop(sheetContext);
+                                  }
+                                },
+                          child: const Text(
+                            'Remove Applied Voucher',
+                            style: TextStyle(color: Colors.red),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 20),
+                  ],
                 ),
-                // Remove voucher button if applied
-                if (_appliedVoucher != null) ...[
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: TextButton(
-                      onPressed: _removeAppliedVoucher,
-                      child: const Text(
-                        'Remove Applied Voucher',
-                        style: TextStyle(color: Colors.red),
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 20),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
@@ -1400,101 +1759,215 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     _applyVoucherCode(promo.code, known: promo);
   }
 
-  /// Applies a manually-typed code (backend-validated before applying).
-  void _applyTypedVoucher(String raw) {
-    _applyVoucherCode(raw);
-  }
-
-  void _removeAppliedVoucher() {
-    setState(() {
-      _appliedVoucher = null;
-      _appliedPromo = null;
-      _serverDiscount = null;
-    });
-    Navigator.pop(context);
-    AppMessenger.showErrorBanner(context, 'Voucher removed');
-  }
-
-  Widget _buildVoucherCard(Promo promo) {
+  Widget _buildVoucherCard(
+    Promo promo, {
+    required double fare,
+    VoidCallback? onApply,
+    bool highlightError = false,
+    String? errorMessage,
+  }) {
     final isApplied = _appliedVoucher == promo.code;
+    final isEligible = fare <= 0 || promo.meetsMinFare(fare);
+    final ineligibilityNote = _promoIneligibilityNote(promo, fare);
+    final conditionLines = _promoConditionLines(promo);
     final discountLabel = promo.type == PromoType.percent
         ? '${_trimNum(promo.value)}%'
         : '₹${_trimNum(promo.value)}';
-    final String? capLabel = promo.maxDiscount != null
-        ? 'Max discount: ₹${_trimNum(promo.maxDiscount!)}'
-        : (promo.minFare != null
-            ? 'Min fare: ₹${_trimNum(promo.minFare!)}'
-            : null);
+
+    Color cardBg;
+    Color borderColor;
+    if (isApplied) {
+      cardBg = const Color(0xFFF5F0EA);
+      borderColor = const Color(0xFFD4956A);
+    } else if (highlightError) {
+      cardBg = const Color(0xFFFFEBEE);
+      borderColor = const Color(0xFFE57373);
+    } else if (!isEligible) {
+      cardBg = const Color(0xFFFAFAFA);
+      borderColor = const Color(0xFFE0E0E0);
+    } else {
+      cardBg = const Color(0xFFF5F5F5);
+      borderColor = Colors.transparent;
+    }
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: isApplied ? const Color(0xFFF5F0EA) : const Color(0xFFF5F5F5),
+        color: cardBg,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: isApplied ? const Color(0xFFD4956A) : Colors.transparent,
-        ),
+        border: Border.all(color: borderColor),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFD4956A),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              discountLabel,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                fontSize: 16,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  promo.code,
+          Row(
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: isEligible
+                      ? const Color(0xFFD4956A)
+                      : const Color(0xFFBDBDBD),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  discountLabel,
                   style: const TextStyle(
+                    color: Colors.white,
                     fontWeight: FontWeight.w700,
-                    fontSize: 14,
+                    fontSize: 16,
                   ),
                 ),
-                if (promo.description.isNotEmpty)
-                  Text(
-                    promo.description,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF888888),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      promo.code,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                        color: isEligible
+                            ? const Color(0xFF1A1A1A)
+                            : const Color(0xFF757575),
+                      ),
+                    ),
+                    if (promo.description.isNotEmpty)
+                      Text(
+                        promo.description,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: isEligible
+                              ? const Color(0xFF888888)
+                              : const Color(0xFF9E9E9E),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (isApplied)
+                const Icon(Icons.check_circle, color: Color(0xFF4CAF50))
+              else if (onApply != null)
+                TextButton(
+                  onPressed: onApply,
+                  child: const Text(
+                    'APPLY',
+                    style: TextStyle(
+                      color: Color(0xFFD4956A),
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                if (capLabel != null)
-                  Text(
-                    capLabel,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xFF888888),
-                    ),
+                )
+              else
+                Text(
+                  'Not eligible',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey.shade600,
                   ),
+                ),
+            ],
+          ),
+          if (conditionLines.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: conditionLines
+                  .map(
+                    (line) => Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: isEligible
+                            ? const Color(0xFFFBF2E8)
+                            : const Color(0xFFF5F5F5),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: isEligible
+                              ? const Color(0xFFD4956A).withValues(alpha: 0.35)
+                              : const Color(0xFFE0E0E0),
+                        ),
+                      ),
+                      child: Text(
+                        line,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: isEligible
+                              ? const Color(0xFF8B5E34)
+                              : const Color(0xFF757575),
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+          if (isEligible && fare > 0 && promo.minFare != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(
+                  Icons.check_circle_outline,
+                  size: 14,
+                  color: Colors.green.shade600,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  'Eligible for your ₹${_trimNum(fare)} fare',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.green.shade700,
+                  ),
+                ),
               ],
             ),
-          ),
-          if (isApplied)
-            const Icon(Icons.check_circle, color: Color(0xFF4CAF50))
-          else
-            TextButton(
-              onPressed: () => _applyPromo(promo),
-              child: const Text(
-                'APPLY',
-                style: TextStyle(
-                  color: Color(0xFFD4956A),
-                  fontWeight: FontWeight.w600,
+          ],
+          if (!isEligible && ineligibilityNote != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.info_outline,
+                  size: 14,
+                  color: Colors.orange.shade800,
                 ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    ineligibilityNote,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.orange.shade900,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (highlightError && errorMessage != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              errorMessage,
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFFC62828),
+                height: 1.3,
               ),
             ),
+          ],
         ],
       ),
     );
@@ -1548,11 +2021,11 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     );
   }
   Widget _buildSelectedPayment() {
-    final rideBookingState = ref.watch(rideBookingProvider);
-    final baseAmount =
-        rideBookingState.fare > 0 ? rideBookingState.fare : 193.20;
-    final discountAmount = _discountAmount(baseAmount);
-    final totalAmount = baseAmount - discountAmount;
+    ref.watch(rideBookingProvider);
+    final baseAmount = _displayOriginalFare();
+    final discountAmount = _discountAmount();
+    final totalAmount = _payableAmount();
+    final cashback = _cashbackAmount();
     // Get selected payment method details
     String paymentName = 'Cash';
     String paymentSubtitle = 'Pay on delivery';
@@ -1731,6 +2204,17 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                           height: 1.1,
                         ),
                       ),
+                    ] else if (cashback != null && cashback > 0) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        '₹${_trimNum(cashback)} cashback',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF4CAF50),
+                          fontWeight: FontWeight.w600,
+                          height: 1.1,
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -1791,7 +2275,10 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       }
       return;
     }
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _suppressPromoReapply = true;
+    });
     final client = ref.read(apiClientProvider);
     final user = ref.read(currentUserProvider);
     try {
@@ -1828,11 +2315,20 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       if (responseData['success'] == true) {
         final rideData = responseData['data'];
         if (rideData != null && rideData is Map) {
-          final rideId = rideData['id']?.toString();
-          // Backend generates OTP during ride creation and returns it in rideOtp field.
-          // This OTP is stored in the database and will be verified when driver starts the ride.
+          final rideMap = Map<String, dynamic>.from(rideData);
+          final rideId = rideMap['id']?.toString();
           final rideOtp =
-              rideData['rideOtp']?.toString() ?? rideData['otp']?.toString();
+              rideMap['rideOtp']?.toString() ?? rideMap['otp']?.toString();
+
+          // Authoritative fare after promo applied at booking time.
+          _clearPromo();
+          final totalFareRaw = rideMap['totalFare'] ?? rideMap['total_fare'];
+          if (totalFareRaw is num) {
+            ref.read(rideBookingProvider.notifier).updateRouteInfo(
+                  fare: totalFareRaw.toDouble(),
+                );
+          }
+
           if (rideOtp == null || rideOtp.isEmpty) {
             debugPrint(
                 '⚠️ No OTP received from backend - this may cause issues');
@@ -1840,7 +2336,6 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           debugPrint('✅ Ride created: $rideId');
           debugPrint(
               '🔐 Ride OTP from backend: $rideOtp - Share this with your driver!');
-          // Store the ride ID and PIN
           ref.read(rideBookingProvider.notifier).setRideDetails(
                 rideId: rideId,
                 otp: rideOtp,
@@ -1856,21 +2351,23 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         }
       } else {
         if (mounted) {
-          AppMessenger.showErrorBanner(context, responseData['error']?.toString() ?? 'Failed to create ride');
+          if (_isPromoInvalidResponse(responseData)) {
+            _handlePromoInvalidAtBooking();
+          } else {
+            AppMessenger.showErrorBanner(
+              context,
+              responseData['message']?.toString() ??
+                  responseData['error']?.toString() ??
+                  'Failed to create ride',
+            );
+          }
         }
       }
     } catch (e) {
       debugPrint('❌ Error creating ride: $e');
       if (mounted) {
         if (_isPromoInvalidError(e)) {
-          // Backend rejected the coupon; the ride was NOT created. Clear the
-          // code so the next slide books cleanly, and tell the user why.
-          setState(() {
-            _appliedVoucher = null;
-            _appliedPromo = null;
-            _serverDiscount = null;
-          });
-          AppMessenger.showErrorBanner(context, _rideCreationErrorMessage(e));
+          _handlePromoInvalidAtBooking();
         } else {
           AppMessenger.showErrorBanner(context, _rideCreationErrorMessage(e));
         }

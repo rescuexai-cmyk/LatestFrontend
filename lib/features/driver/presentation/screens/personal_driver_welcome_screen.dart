@@ -7,19 +7,46 @@ import '../../../../core/router/app_routes.dart';
 import '../../providers/personal_driver_onboarding_provider.dart';
 
 /// Status screen after personal driver submits documents.
-class PersonalDriverWelcomeScreen extends ConsumerWidget {
+class PersonalDriverWelcomeScreen extends ConsumerStatefulWidget {
   const PersonalDriverWelcomeScreen({super.key});
 
+  @override
+  ConsumerState<PersonalDriverWelcomeScreen> createState() =>
+      _PersonalDriverWelcomeScreenState();
+}
+
+class _PersonalDriverWelcomeScreenState
+    extends ConsumerState<PersonalDriverWelcomeScreen> {
   static const _beige = Color(0xFFF6EFE4);
   static const _accent = Color(0xFFD4956A);
   static const _textPrimary = Color(0xFF1A1A1A);
   static const _textSecondary = Color(0xFF888888);
   static const _success = Color(0xFF4CAF50);
+  static const _danger = Color(0xFFE53935);
+
+  bool _isRefreshing = false;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void initState() {
+    super.initState();
+    // Pull the latest Cloud-Vision verification verdict from the backend.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
+  }
+
+  Future<void> _refresh() async {
+    if (_isRefreshing) return;
+    setState(() => _isRefreshing = true);
+    await ref
+        .read(personalDriverOnboardingProvider.notifier)
+        .refreshVerificationStatus();
+    if (mounted) setState(() => _isRefreshing = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final pd = ref.watch(personalDriverOnboardingProvider);
     final canGoOnline = pd.canStartRescueJobs;
+    final hasRejected = pd.status == PersonalDriverOnboardingStatus.rejected;
 
     return Scaffold(
       backgroundColor: _beige,
@@ -31,15 +58,23 @@ class PersonalDriverWelcomeScreen extends ConsumerWidget {
             children: [
               const SizedBox(height: 24),
               Icon(
-                canGoOnline ? Icons.verified_outlined : Icons.hourglass_top,
+                hasRejected
+                    ? Icons.error_outline
+                    : (canGoOnline
+                        ? Icons.verified_outlined
+                        : Icons.hourglass_top),
                 size: 72,
-                color: canGoOnline ? _success : _accent,
+                color: hasRejected
+                    ? _danger
+                    : (canGoOnline ? _success : _accent),
               ),
               const SizedBox(height: 20),
               Text(
-                canGoOnline
-                    ? 'You\'re ready for rescue jobs'
-                    : 'Verification in progress',
+                hasRejected
+                    ? 'Some documents need attention'
+                    : (canGoOnline
+                        ? 'You\'re ready for rescue jobs'
+                        : 'Verification in progress'),
                 textAlign: TextAlign.center,
                 style: GoogleFonts.poppins(
                   fontSize: 22,
@@ -49,9 +84,11 @@ class PersonalDriverWelcomeScreen extends ConsumerWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                canGoOnline
-                    ? 'Go online to receive rescue requests. You\'ll get the same accept/decline popup when a rider needs a personal driver.'
-                    : 'We\'re reviewing your Aadhaar and Driving License. This usually takes 24–48 hours.',
+                hasRejected
+                    ? 'Our document check flagged one or more of your documents. Please review the details below and re-upload.'
+                    : (canGoOnline
+                        ? 'Go online to receive rescue requests. You\'ll get the same accept/decline popup when a rider needs a personal driver.'
+                        : 'We\'re verifying your documents. This usually takes 24–48 hours.'),
                 textAlign: TextAlign.center,
                 style: GoogleFonts.poppins(
                   fontSize: 14,
@@ -60,17 +97,16 @@ class PersonalDriverWelcomeScreen extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 28),
-              _docRow(
-                'Driving License',
-                pd.drivingLicense.status.name,
-                pd.drivingLicense.isComplete,
+              Expanded(
+                child: ListView(
+                  children: [
+                    _docRow('Driving License', pd.drivingLicense),
+                    _docRow('Aadhaar Card', pd.aadhaar),
+                    _docRow('PAN Card', pd.pan),
+                  ],
+                ),
               ),
-              _docRow(
-                'Aadhaar Card',
-                pd.aadhaar.status.name,
-                pd.aadhaar.isComplete,
-              ),
-              const Spacer(),
+              const SizedBox(height: 8),
               if (canGoOnline)
                 SizedBox(
                   height: 56,
@@ -95,12 +131,34 @@ class PersonalDriverWelcomeScreen extends ConsumerWidget {
                   ),
                 )
               else
-                Text(
-                  'Backend verification will sync automatically once available.',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.poppins(
-                    fontSize: 12,
-                    color: _textSecondary,
+                SizedBox(
+                  height: 56,
+                  child: OutlinedButton.icon(
+                    onPressed: _isRefreshing ? null : _refresh,
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: _accent),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: _isRefreshing
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(_accent),
+                            ),
+                          )
+                        : const Icon(Icons.refresh, color: _accent),
+                    label: Text(
+                      _isRefreshing ? 'Checking…' : 'Refresh status',
+                      style: GoogleFonts.poppins(
+                        color: _accent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
                 ),
               const SizedBox(height: 12),
@@ -115,42 +173,96 @@ class PersonalDriverWelcomeScreen extends ConsumerWidget {
     );
   }
 
-  Widget _docRow(String title, String status, bool uploaded) {
+  Widget _docRow(String title, PersonalDriverDocument doc) {
+    final _Verdict verdict = _verdictFor(doc);
+
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE8E0D4)),
+        border: Border.all(
+          color: verdict.color.withValues(alpha: 0.5),
+        ),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            uploaded ? Icons.check_circle : Icons.pending_outlined,
-            color: uploaded ? _success : _accent,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
+          Row(
+            children: [
+              Icon(verdict.icon, color: verdict.color),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
                   title,
                   style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
                 ),
-                Text(
-                  status.replaceAll('_', ' '),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: verdict.color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  verdict.label,
                   style: GoogleFonts.poppins(
-                    fontSize: 12,
-                    color: _textSecondary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: verdict.color,
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
+          if (doc.aiConfidence != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Document check confidence: ${(doc.aiConfidence! * 100).round()}%',
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: _textSecondary,
+              ),
+            ),
+          ],
+          if (doc.verificationReason != null &&
+              doc.verificationReason!.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              doc.verificationReason!,
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: _danger,
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
+
+  _Verdict _verdictFor(PersonalDriverDocument doc) {
+    switch (doc.status) {
+      case PersonalDocStatus.verified:
+        return const _Verdict('Verified', Icons.verified, _success);
+      case PersonalDocStatus.rejected:
+        return const _Verdict('Flagged', Icons.error_outline, _danger);
+      case PersonalDocStatus.inReview:
+        return const _Verdict('In review', Icons.hourglass_top, _accent);
+      case PersonalDocStatus.uploaded:
+        return const _Verdict('Uploaded', Icons.check_circle_outline, _accent);
+      case PersonalDocStatus.notUploaded:
+        return const _Verdict(
+            'Not uploaded', Icons.pending_outlined, _textSecondary);
+    }
+  }
+}
+
+class _Verdict {
+  const _Verdict(this.label, this.icon, this.color);
+  final String label;
+  final IconData icon;
+  final Color color;
 }

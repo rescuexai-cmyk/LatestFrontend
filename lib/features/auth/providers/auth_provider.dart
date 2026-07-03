@@ -340,25 +340,13 @@ class AuthNotifier extends StateNotifier<AuthState> {
         phone: map['phone'] as String?,
         name: map['name'] as String? ?? 'User',
         avatarUrl: map['avatarUrl'] as String?,
-        userType: _parseUserType(map['userType'] as String?),
+        userType: User.parseUserType(map['userType'] as String?),
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
       );
     } catch (e) {
       debugPrint('Failed to decode cached user: $e');
       return null;
-    }
-  }
-  
-  /// Parse user type from string
-  UserType _parseUserType(String? type) {
-    switch (type) {
-      case 'driver':
-        return UserType.driver;
-      case 'both':
-        return UserType.both;
-      default:
-        return UserType.rider;
     }
   }
   
@@ -1056,7 +1044,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       phone: json['phone'] as String?,
       name: fullName.isNotEmpty ? fullName : 'User',
       avatarUrl: json['profileImage'] as String? ?? json['profile_image'] as String?,
-      userType: UserType.rider, // Default; backend doesn't have user_type field yet
+      userType: User.userTypeFromJson(json),
       createdAt: json['createdAt'] != null
           ? (json['createdAt'] is String
               ? DateTime.tryParse(json['createdAt'] as String) ?? DateTime.now()

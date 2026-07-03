@@ -428,22 +428,22 @@ class _FigmaRescueToggleThumb extends StatelessWidget {
               ),
             ),
           ),
-          Positioned(
-            left: FigmaRescueExtraDriverToggle.rMarkLeft,
-            top: FigmaRescueExtraDriverToggle.rMarkTop,
-            width: FigmaRescueExtraDriverToggle.rMarkW,
-            height: FigmaRescueExtraDriverToggle.rMarkH,
-            child: Image.asset(
-              'assets/icons/rescue_toggle_r.png',
-              fit: BoxFit.contain,
-              filterQuality: FilterQuality.high,
-              errorBuilder: (_, __, ___) => CustomPaint(
-                size: const Size(
-                  FigmaRescueExtraDriverToggle.rMarkW,
-                  FigmaRescueExtraDriverToggle.rMarkH,
-                ),
-                painter: _RaahiToggleRMarkPainter(
-                  color: FigmaRescueExtraDriverToggle.trackOnColor,
+          Center(
+            child: SizedBox(
+              width: FigmaRescueExtraDriverToggle.rMarkW,
+              height: FigmaRescueExtraDriverToggle.rMarkH,
+              child: Image.asset(
+                'assets/icons/rescue_toggle_r.png',
+                fit: BoxFit.contain,
+                filterQuality: FilterQuality.high,
+                errorBuilder: (_, __, ___) => CustomPaint(
+                  size: const Size(
+                    FigmaRescueExtraDriverToggle.rMarkW,
+                    FigmaRescueExtraDriverToggle.rMarkH,
+                  ),
+                  painter: _RaahiToggleRMarkPainter(
+                    color: FigmaRescueExtraDriverToggle.trackOnColor,
+                  ),
                 ),
               ),
             ),

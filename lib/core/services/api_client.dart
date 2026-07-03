@@ -927,25 +927,40 @@ class ApiClient {
     }
   }
 
-  /// Validate a promo code + preview its discount for a given fare.
-  /// Backend: POST /api/promo/apply
+  /// Quick validation before preview (optional — POST /api/promo/validate).
+  Future<Map<String, dynamic>> validatePromo({
+    required String code,
+    required double fare,
+    String? vehicleType,
+    String? city,
+  }) async {
+    return _postPromoEndpoint('/api/promo/validate', code, fare, vehicleType, city);
+  }
+
+  /// Preview discount for UI (POST /api/promo/apply).
   /// 200 → { success:true, data:{ promoId, code, discountAmount, discountType,
   ///          originalFare, discountedFare, cashbackAmount? } }
   /// 400 → { success:false, message } — invalid / expired / limit-reached, etc.
-  ///
-  /// This is the authoritative check used to decide whether a code can be
-  /// applied on the payment screen. The discount shown must come from here,
-  /// never computed client-side.
   Future<Map<String, dynamic>> applyPromoPreview({
     required String code,
     required double fare,
     String? vehicleType,
     String? city,
   }) async {
+    return _postPromoEndpoint('/api/promo/apply', code, fare, vehicleType, city);
+  }
+
+  Future<Map<String, dynamic>> _postPromoEndpoint(
+    String path,
+    String code,
+    double fare,
+    String? vehicleType,
+    String? city,
+  ) async {
     try {
-      final response = await _dio.post('/api/promo/apply', data: {
+      final response = await _dio.post(path, data: {
         'code': code.trim(),
-        'fare': fare,
+        if (fare > 0) 'fare': fare,
         if (vehicleType != null && vehicleType.trim().isNotEmpty)
           'vehicleType': vehicleType.trim(),
         if (city != null && city.trim().isNotEmpty) 'city': city.trim(),

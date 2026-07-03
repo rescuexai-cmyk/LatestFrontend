@@ -22,7 +22,6 @@ import 'features/ride/providers/ride_booking_provider.dart';
 import 'features/ride/providers/ride_provider.dart';
 import 'core/models/ride.dart';
 import 'core/services/api_client.dart';
-import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 // supportedLanguages is already exported from settings_provider.dart
 
 /// Handle background messages (must be top-level function)
@@ -92,6 +91,7 @@ class _AppInitializer extends ConsumerStatefulWidget {
 class _AppInitializerState extends ConsumerState<_AppInitializer> {
   String? _initError;
   bool _ready = false;
+  String? _splashStatusMessage;
 
   @override
   void initState() {
@@ -168,14 +168,14 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
   }
 
   Future<void> _runInitWithTimeout() async {
-    const timeout = Duration(seconds: 12);
+    const timeout = Duration(seconds: 60);
     final startTime = DateTime.now();
     // Start persisted-session read in parallel with Firebase / push / server checks.
     ref.read(authStateProvider);
     try {
       await _doInit().timeout(timeout);
     } on TimeoutException {
-      debugPrint('⚠️ Init timed out after 12s, showing app anyway');
+      debugPrint('⚠️ Init timed out after 60s, showing app anyway');
     }
 
     // Ensure splash + logo animation completes (1.5s + slack)
@@ -242,14 +242,40 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
       debugPrint('⚠️ Push init failed: $e');
     }
 
-    // Server config (health check can block if backend unreachable)
+    // Server config + automatic backend retries while splash is visible.
     try {
+      if (mounted) {
+        setState(() => _splashStatusMessage = 'Connecting to server…');
+      }
       await ServerConfigService.init().timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => debugPrint('⚠️ Server config timed out'),
+        const Duration(seconds: 10),
+        onTimeout: () => debugPrint('⚠️ Server config init timed out'),
       );
+      if (!ServerConfigService.isHealthy) {
+        final connected = await ServerConfigService.waitUntilHealthy(
+          maxWait: const Duration(seconds: 45),
+          retryDelay: const Duration(seconds: 2),
+        );
+        if (!connected && mounted) {
+          setState(() {
+            _splashStatusMessage =
+                'Could not reach server. Check your internet connection.';
+          });
+          await Future.delayed(const Duration(milliseconds: 1800));
+        }
+      }
+      if (mounted && ServerConfigService.isHealthy) {
+        setState(() => _splashStatusMessage = null);
+      }
     } catch (e) {
       debugPrint('⚠️ Server config failed: $e');
+      if (mounted) {
+        setState(() {
+          _splashStatusMessage =
+              'Connection issue. Check your internet and try again.';
+        });
+        await Future.delayed(const Duration(milliseconds: 1200));
+      }
     }
 
     await SystemChrome.setPreferredOrientations([
@@ -261,7 +287,7 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
   @override
   Widget build(BuildContext context) {
     if (!_ready) {
-      return const _SplashScreen();
+      return _SplashScreen(statusMessage: _splashStatusMessage);
     }
     if (_initError != null) {
       return _InitErrorScreen(error: _initError!);
@@ -272,7 +298,9 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
 
 /// Splash screen shown during initialization.
 class _SplashScreen extends StatefulWidget {
-  const _SplashScreen();
+  const _SplashScreen({this.statusMessage});
+
+  final String? statusMessage;
 
   @override
   State<_SplashScreen> createState() => _SplashScreenState();
@@ -332,8 +360,6 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
             AnimatedBuilder(
               animation: _typingAnimation,
               builder: (context, child) {
-                // To keep the layout stable while typing, we can either use a fixed size box 
-                // or just let it type out centered. A fixed height helps avoid jumping.
                 return SizedBox(
                   height: 30,
                   child: Text(
@@ -354,6 +380,31 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
                 );
               },
             ),
+            if (widget.statusMessage != null) ...[
+              const SizedBox(height: 28),
+              const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Color(0xFFFDF1DF),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  widget.statusMessage!,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.poppins(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: const Color(0xFFFDF1DF).withValues(alpha: 0.85),
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -410,12 +461,25 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
   @override
   void initState() {
     super.initState();
-    // Set up notification tap handler
     _setupNotificationHandler();
+    if (!ServerConfigService.isHealthy) {
+      unawaited(_retryBackendInBackground());
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _replayPendingRideAcceptActions();
       _restorePersistedRiderBooking();
     });
+  }
+
+  Future<void> _retryBackendInBackground() async {
+    for (var i = 0; i < 15; i++) {
+      await Future<void>.delayed(const Duration(seconds: 3));
+      if (!mounted) return;
+      if (await ServerConfigService.revalidate()) {
+        debugPrint('✅ Backend connected in background');
+        return;
+      }
+    }
   }
 
   double _parseFare(dynamic value) {
@@ -728,23 +792,7 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
       ),
     );
 
-    // If backend is unreachable, show a connection error screen
-    if (!ServerConfigService.isHealthy) {
-      return MaterialApp(
-        title: 'Raahi',
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.lightTheme,
-        locale: const Locale('en', 'IN'),
-        supportedLocales: supportedLanguages.map((l) => l.locale),
-        localizationsDelegates: const [
-          GlobalMaterialLocalizations.delegate,
-          GlobalWidgetsLocalizations.delegate,
-          GlobalCupertinoLocalizations.delegate,
-        ],
-        home: const _ConnectionErrorScreen(),
-      );
-    }
-
+    // Always enter the app — backend retries happen on splash / in background.
     // Find the locale from settings
     final locale = supportedLanguages
             .where((l) => l.code == settings.languageCode)
@@ -766,142 +814,6 @@ class _RideHailingAppState extends ConsumerState<RideHailingApp> {
         GlobalCupertinoLocalizations.delegate,
       ],
       routerConfig: router,
-    );
-  }
-}
-
-/// Shown when the backend is unreachable on app startup.
-class _ConnectionErrorScreen extends StatefulWidget {
-  const _ConnectionErrorScreen();
-
-  @override
-  State<_ConnectionErrorScreen> createState() => _ConnectionErrorScreenState();
-}
-
-class _ConnectionErrorScreenState extends State<_ConnectionErrorScreen> {
-  bool _retrying = false;
-  final _urlController =
-      TextEditingController(text: ServerConfigService.apiUrl);
-
-  @override
-  void dispose() {
-    _urlController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _retry() async {
-    setState(() => _retrying = true);
-    final ok = await ServerConfigService.revalidate();
-    if (ok && mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const RideHailingApp()),
-        (_) => false,
-      );
-    } else if (mounted) {
-      setState(() => _retrying = false);
-      AppMessenger.showErrorBanner(context, 'Still unreachable: ${ServerConfigService.apiUrl}');
-    }
-  }
-
-  Future<void> _saveAndRetry() async {
-    final url = _urlController.text.trim();
-    if (url.isEmpty) return;
-    setState(() => _retrying = true);
-    await ServerConfigService.save(
-      apiUrl: url,
-      wsUrl: ServerConfigService.deriveWsUrl(url),
-    );
-    final ok = await ServerConfigService.revalidate();
-    if (ok && mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const RideHailingApp()),
-        (_) => false,
-      );
-    } else if (mounted) {
-      setState(() => _retrying = false);
-      AppMessenger.showErrorBanner(context, 'Cannot reach this server. Check IP and port.');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.cloud_off_rounded,
-                  size: 80, color: Color(0xFFD4956A)),
-              const SizedBox(height: 24),
-              const Text(
-                'Cannot reach server',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'The app could not connect to the backend.\nMake sure your device and server are on the same network.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 32),
-              // Editable URL field
-              TextField(
-                controller: _urlController,
-                decoration: InputDecoration(
-                  labelText: 'API URL',
-                  hintText: 'http://192.168.x.x:3000/api',
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  prefixIcon: const Icon(Icons.link),
-                ),
-                keyboardType: TextInputType.url,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Build default: ${ServerConfigService.buildDefault}',
-                style: TextStyle(fontSize: 11, color: Colors.grey[400]),
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: _retrying ? null : _retry,
-                      child: const Text('Retry'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    flex: 2,
-                    child: SizedBox(
-                      height: 48,
-                      child: ElevatedButton.icon(
-                        onPressed: _retrying ? null : _saveAndRetry,
-                        icon: _retrying
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white))
-                            : const Icon(Icons.refresh),
-                        label: Text(_retrying ? 'Connecting...' : 'Connect'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFD4956A),
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

@@ -234,10 +234,35 @@ class ServerConfigService {
     _isConfigured = false;
   }
 
-  /// Re-run health check (callable from UI retry buttons).
+  /// Re-run health check (callable from startup retry loop).
   static Future<bool> revalidate() async {
     _isHealthy = await _checkHealth(apiUrl);
     return _isHealthy;
+  }
+
+  /// Retry health checks until the backend responds or [maxWait] elapses.
+  /// Used on splash so the user never sees a manual "Connect" screen.
+  static Future<bool> waitUntilHealthy({
+    Duration maxWait = const Duration(seconds: 45),
+    Duration retryDelay = const Duration(seconds: 2),
+  }) async {
+    if (_isHealthy) return true;
+
+    final deadline = DateTime.now().add(maxWait);
+    var attempt = 0;
+    while (DateTime.now().isBefore(deadline)) {
+      attempt++;
+      debugPrint('🔌 Backend health retry #$attempt…');
+      if (await _checkHealth(apiUrl)) {
+        _isHealthy = true;
+        debugPrint('✅ Backend reachable after $attempt attempt(s)');
+        return true;
+      }
+      if (DateTime.now().add(retryDelay).isAfter(deadline)) break;
+      await Future.delayed(retryDelay);
+    }
+    debugPrint('⚠️ Backend still unreachable after splash wait — continuing anyway');
+    return false;
   }
 
   /// HTTP URL for the realtime service (same as wsUrl since Socket.io uses HTTP).

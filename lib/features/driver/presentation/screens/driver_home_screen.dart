@@ -1187,7 +1187,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             TextButton(
               onPressed: () {
                 Navigator.of(ctx).pop(false);
-                context.push(AppRoutes.serverConfig);
+                context.push('${AppRoutes.serverConfig}?initial=false');
               },
               child: Text(ref.tr('edit_server'),
                   style: const TextStyle(color: Color(0xFF4285F4))),
@@ -1334,7 +1334,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           TextButton(
             onPressed: () {
               Navigator.of(ctx).pop(false);
-              context.push(AppRoutes.serverConfig);
+              context.push('${AppRoutes.serverConfig}?initial=false');
             },
             child: Text(ref.tr('edit_server'),
                 style: const TextStyle(color: Color(0xFF4285F4))),

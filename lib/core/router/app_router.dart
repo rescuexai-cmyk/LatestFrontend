@@ -17,6 +17,7 @@ import '../../features/ride/presentation/screens/ride_details_screen.dart';
 import '../../features/ride/presentation/screens/ride_tracking_screen.dart';
 import '../../features/chat/presentation/screens/ride_chat_screen.dart';
 import '../../features/ride/presentation/screens/find_trip_screen.dart';
+import '../../features/ride/presentation/screens/confirm_location_on_map_screen.dart';
 import '../../features/ride/presentation/screens/payment_screen.dart';
 import '../../features/ride/presentation/screens/searching_drivers_screen.dart';
 import '../../features/ride/presentation/screens/scheduled_ride_screen.dart';
@@ -43,8 +44,8 @@ import '../../features/rescue/presentation/screens/rescue_journey_hub_screen.dar
 import '../../features/rescue/presentation/screens/rescue_delivery_screen.dart';
 import '../../features/rescue/presentation/screens/rescue_complete_screen.dart';
 import '../../features/settings/presentation/screens/server_config_screen.dart';
-import '../services/server_config_service.dart';
 import 'app_routes.dart';
+import 'user_landing.dart';
 
 final appRouterProvider = Provider<GoRouter>((ref) {
   // Narrow watches: full authState changes during OTP send (loading, session id,
@@ -57,10 +58,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       ref.watch(authStateProvider.select((s) => s.pendingPhoneLink));
   final hasSeenWelcome = ref.watch(welcomeOnboardingProvider);
   
-  // Determine initial location based on server config state
-  final initialLocation = ServerConfigService.isConfigured
-      ? (hasSeenWelcome ? AppRoutes.login : AppRoutes.welcomeOnboarding)
-      : AppRoutes.serverConfig;
+  // Always start at welcome/login — backend URL is build-default; no setup gate.
+  final initialLocation =
+      hasSeenWelcome ? AppRoutes.login : AppRoutes.welcomeOnboarding;
 
   return GoRouter(
     initialLocation: initialLocation,
@@ -68,8 +68,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) {
       final currentLocation = state.matchedLocation;
       
-      // Always allow access to the server config screen
+      // Server config is dev/settings only — never block normal app launch.
       if (currentLocation == AppRoutes.serverConfig) {
+        final isDevSettings =
+            state.uri.queryParameters['initial'] == 'false';
+        if (!isDevSettings) {
+          return hasSeenWelcome ? AppRoutes.login : AppRoutes.welcomeOnboarding;
+        }
         return null;
       }
 
@@ -143,8 +148,17 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           debugPrint('🔀 Redirecting to name entry (new user onboarding)');
           return AppRoutes.nameEntry;
         }
-        debugPrint('🔀 Redirecting to home (already authenticated)');
-        return AppRoutes.home;
+        final landing = landingRouteForUser(user);
+        debugPrint('🔀 Redirecting to $landing (userType=${user.userType.name})');
+        return landing;
+      }
+
+      // Role-based landing: rider-only users skip the dual-choice home screen.
+      if (isAuthenticated &&
+          currentLocation == AppRoutes.home &&
+          shouldSkipHomeSelection(user)) {
+        debugPrint('🔀 Skipping home selection → services (rider-only)');
+        return AppRoutes.services;
       }
 
       return null;
@@ -382,6 +396,21 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         },
       ),
       GoRoute(
+        path: AppRoutes.confirmLocationPin,
+        name: 'confirmLocationPin',
+        builder: (context, state) {
+          final flow = ConfirmLocationOnMapScreen.flowFromQuery(
+            state.uri.queryParameters['flow'],
+          );
+          final vehicleWithYou =
+              state.uri.queryParameters['vehicleWithYou'] != 'false';
+          return ConfirmLocationOnMapScreen(
+            flow: flow,
+            vehicleWithYou: vehicleWithYou,
+          );
+        },
+      ),
+      GoRoute(
         path: AppRoutes.ridePayment,
         name: 'ridePayment',
         builder: (context, state) => const PaymentScreen(),
@@ -489,8 +518,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: AppRoutes.serverConfig,
         name: 'serverConfig',
         builder: (context, state) {
-          final isInitial = state.uri.queryParameters['initial'] != 'false';
-          return ServerConfigScreen(isInitialSetup: isInitial);
+          return const ServerConfigScreen(isInitialSetup: false);
         },
       ),
     ],
