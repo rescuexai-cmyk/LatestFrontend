@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/router/app_routes.dart';
+import '../../../../core/theme/primary_cta_styles.dart';
 import '../../../../core/services/firebase_phone_auth_service.dart';
 import '../../../../core/widgets/otp_input_field.dart';
 import '../../providers/auth_provider.dart';
@@ -876,18 +877,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         if (!_otpStepVisible)
                           SizedBox(
                             width: double.infinity,
-                            height: 54,
+                            height: PrimaryCtaStyles.height,
                             child: FilledButton(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: _brandGold,
-                                foregroundColor: Colors.white,
-                                disabledBackgroundColor:
-                                    Colors.grey.shade300,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                elevation: 0,
-                              ),
+                              style: PrimaryCtaStyles.filled(),
                               onPressed:
                                   !_canPressGetOtp ? null : _handleGetOtp,
                               child: _isOtpLoading

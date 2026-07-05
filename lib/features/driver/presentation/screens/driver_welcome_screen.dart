@@ -217,7 +217,10 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
   Widget build(BuildContext context) {
     final user = ref.watch(currentUserProvider);
     final onboardingState = ref.watch(driverOnboardingProvider);
-    final displayName = user?.name ?? 'Driver';
+    final rawName = user?.name?.trim();
+    final firstName = (rawName != null && rawName.isNotEmpty)
+        ? rawName.split(RegExp(r'\s+')).first
+        : 'Driver';
     final backendStatus = onboardingState.backendStatus;
     final hasRejections = backendStatus.hasRejectedDocuments;
     final progress = (onboardingState.verificationProgress * 100).toInt();
@@ -236,9 +239,9 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
               children: [
                 _buildHeader(context),
                 const SizedBox(height: 24),
-                // Welcome message
+                // Welcome message — kept below the nav header, not in the top bar.
                 Text(
-                  'Welcome, $displayName',
+                  'Welcome, $firstName',
                   style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: _textPrimary),
                 ),
                 const SizedBox(height: 16),
@@ -387,31 +390,41 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
     );
   }
   Widget _buildHeader(BuildContext context) {
-    return Row(
-      children: [
-        FigmaSquareBackButton(onPressed: () => context.pop()),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return SizedBox(
+      height: 56,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Row(
+            children: [
+              FigmaSquareBackButton(onPressed: () => context.pop()),
+              const Spacer(),
+              IconButton(
+                onPressed: _refreshStatus,
+                icon: const Icon(Icons.refresh_rounded, color: _textSecondary),
+                tooltip: 'Refresh status',
+              ),
+            ],
+          ),
+          Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Image.asset('assets/images/raahi_logo.png', height: 28),
               const SizedBox(height: 4),
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(ref.tr('support'), style: const TextStyle(fontSize: 12, color: _textSecondary)),
+                  Text(
+                    ref.tr('support'),
+                    style: const TextStyle(fontSize: 12, color: _textSecondary),
+                  ),
                   Icon(Icons.keyboard_arrow_down, size: 16, color: _textSecondary),
                 ],
               ),
             ],
           ),
-        ),
-        IconButton(
-          onPressed: _refreshStatus,
-          icon: const Icon(Icons.refresh_rounded, color: _textSecondary),
-          tooltip: 'Refresh status',
-        ),
-      ],
+        ],
+      ),
     );
   }
   Widget _buildProgressSection(int progressPercent, double progressValue) {

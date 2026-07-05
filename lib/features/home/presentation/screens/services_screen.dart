@@ -63,13 +63,15 @@ class ServicesScreen extends ConsumerStatefulWidget {
         'auto',
         Icons.electric_rickshaw,
         const Color(0xFF4CAF50),
-        imagePath: 'assets/vehicles/auto.png'),
+        imagePath: 'assets/vehicles/auto.png',
+        imageScale: 1.32),
     _Svc(
         'bike_taxi',
         'bike_taxi',
         Icons.two_wheeler,
         _accent,
-        imagePath: 'assets/vehicles/bike_taxi.png'),
+        imagePath: 'assets/vehicles/bike_taxi.png',
+        imageScale: 1.32),
     _Svc(
         'bike_rescue',
         'rescue',
@@ -1132,8 +1134,12 @@ class _Svc {
   final String badge;
   final String? imagePath;
   final bool showNewBadge;
+  final double imageScale;
   const _Svc(this.id, this.titleKey, this.icon, this.color,
-      {this.badge = '', this.imagePath, this.showNewBadge = false});
+      {this.badge = '',
+      this.imagePath,
+      this.showNewBadge = false,
+      this.imageScale = 1.0});
 }
 
 // ── Action card ──
@@ -1178,13 +1184,16 @@ class _ServiceCard extends StatelessWidget {
                   child: Padding(
                     padding: const EdgeInsets.all(6),
                     child: svc.imagePath != null
-                        ? Image.asset(
-                            svc.imagePath!,
-                            fit: BoxFit.contain,
-                            width: double.infinity,
-                            height: double.infinity,
-                            errorBuilder: (context, error, stackTrace) =>
-                                Icon(svc.icon, color: svc.color, size: 48),
+                        ? Transform.scale(
+                            scale: svc.imageScale,
+                            child: Image.asset(
+                              svc.imagePath!,
+                              fit: BoxFit.contain,
+                              width: double.infinity,
+                              height: double.infinity,
+                              errorBuilder: (context, error, stackTrace) =>
+                                  Icon(svc.icon, color: svc.color, size: 48),
+                            ),
                           )
                         : Icon(svc.icon, color: svc.color, size: 48),
                   ),

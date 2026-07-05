@@ -1156,7 +1156,7 @@ class _FigmaSlideThumbIcon extends StatelessWidget {
   }
 }
 
-/// Figma Frame 1410081852 — ~60px pill, 7px inset, thumb fills inner height (centered).
+/// Figma Frame 1410081852 — 60px pill, 7px inset, 45×45 rounded-square thumb.
 class FigmaSlideToBookButton extends StatefulWidget {
   const FigmaSlideToBookButton({
     super.key,
@@ -1175,7 +1175,8 @@ class FigmaSlideToBookButton extends StatefulWidget {
   static const double trackHeight = PrimaryCtaStyles.height;
   static const double trackRadius = PrimaryCtaStyles.radius;
   static const double trackPadding = 7;
-  static const double thumbSize = trackHeight - (2 * trackPadding);
+  static const double thumbSize = 45;
+  static const double thumbRadius = 10;
 
   @override
   State<FigmaSlideToBookButton> createState() => _FigmaSlideToBookButtonState();
@@ -1326,9 +1327,10 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
                     ),
                     Positioned(
                       left: _dragPosition,
-                      width: thumb,
-                      height: thumb,
-                      child: Center(
+                      top: 0,
+                      bottom: 0,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onPanStart: _onPanStart,
@@ -1339,14 +1341,9 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
                             height: thumb,
                             decoration: BoxDecoration(
                               color: Colors.white,
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.102),
-                                  offset: const Offset(0, 5.2028),
-                                  blurRadius: 10.4056,
-                                ),
-                              ],
+                              borderRadius: BorderRadius.circular(
+                                FigmaSlideToBookButton.thumbRadius,
+                              ),
                             ),
                             child: Center(
                               child: _FigmaSlideThumbIcon(
