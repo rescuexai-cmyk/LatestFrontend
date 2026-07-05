@@ -64,14 +64,14 @@ class ServicesScreen extends ConsumerStatefulWidget {
         Icons.electric_rickshaw,
         const Color(0xFF4CAF50),
         imagePath: 'assets/vehicles/auto.png',
-        imageScale: 1.32),
+        imagePadding: 2),
     _Svc(
         'bike_taxi',
         'bike_taxi',
         Icons.two_wheeler,
         _accent,
         imagePath: 'assets/vehicles/bike_taxi.png',
-        imageScale: 1.32),
+        imagePadding: 2),
     _Svc(
         'bike_rescue',
         'rescue',
@@ -1134,12 +1134,12 @@ class _Svc {
   final String badge;
   final String? imagePath;
   final bool showNewBadge;
-  final double imageScale;
+  final double imagePadding;
   const _Svc(this.id, this.titleKey, this.icon, this.color,
       {this.badge = '',
       this.imagePath,
       this.showNewBadge = false,
-      this.imageScale = 1.0});
+      this.imagePadding = 6});
 }
 
 // ── Action card ──
@@ -1169,6 +1169,7 @@ class _ServiceCard extends StatelessWidget {
       onTap: onTap,
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           AspectRatio(
             aspectRatio: _tileAspectRatio,
@@ -1181,21 +1182,21 @@ class _ServiceCard extends StatelessWidget {
                     color: ServicesScreen._surfaceCard,
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(6),
-                    child: svc.imagePath != null
-                        ? Transform.scale(
-                            scale: svc.imageScale,
-                            child: Image.asset(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Padding(
+                      padding: EdgeInsets.all(svc.imagePadding),
+                      child: svc.imagePath != null
+                          ? Image.asset(
                               svc.imagePath!,
                               fit: BoxFit.contain,
                               width: double.infinity,
                               height: double.infinity,
                               errorBuilder: (context, error, stackTrace) =>
                                   Icon(svc.icon, color: svc.color, size: 48),
-                            ),
-                          )
-                        : Icon(svc.icon, color: svc.color, size: 48),
+                            )
+                          : Icon(svc.icon, color: svc.color, size: 48),
+                    ),
                   ),
                 ),
                 if (svc.showNewBadge)
