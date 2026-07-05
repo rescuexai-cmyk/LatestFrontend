@@ -167,10 +167,45 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen>
     }
   }
 
+  Future<void> _loginWithExistingPhoneFromPhoneLink(String phone) async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
+    try {
+      final authNotifier = ref.read(authStateProvider.notifier);
+      authNotifier.abandonPhoneLinkForPhoneLogin();
+
+      if (!firebasePhoneAuth.hasValidSession) {
+        final otpResult = await authNotifier.requestOTP(phone);
+        if (!otpResult.success && !firebasePhoneAuth.hasValidSession) {
+          if (mounted) {
+            AppMessenger.showErrorBanner(
+              context,
+              otpResult.error ?? 'Failed to send OTP. Please try again.',
+            );
+          }
+          return;
+        }
+      }
+
+      if (!mounted) return;
+      context.go(
+          '${AppRoutes.otpVerification}?phone=$phone&isNewUser=false&loginExisting=true');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   void _handlePhoneRegistrationConflict(String phone) {
     showPhoneAlreadyRegisteredDialog(
       context: context,
-      onLoginWithPhone: () => _exitPhoneLinkFlow(phoneForLogin: phone),
+      onLoginWithPhone: () {
+        if (widget.isPhoneLinkMode) {
+          _loginWithExistingPhoneFromPhoneLink(phone);
+        } else {
+          context.go('${AppRoutes.login}?phone=$phone');
+        }
+      },
       onUseDifferentNumber: () {
         _phoneController.clear();
         setState(() {});

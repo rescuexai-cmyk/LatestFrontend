@@ -92,10 +92,48 @@ class _OTPVerificationScreenState extends ConsumerState<OTPVerificationScreen> {
     context.go('${AppRoutes.login}?phone=${_cleanPhone}');
   }
 
+  Future<void> _loginWithExistingPhone() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
+    try {
+      final authNotifier = ref.read(authStateProvider.notifier);
+      final phoneForApi = _cleanPhone;
+      final otp = _otp.length == 6 ? _otp : null;
+      final result =
+          await authNotifier.loginWithExistingPhoneAccount(otp: otp);
+
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+
+      if (result.success) {
+        if (result.isNewUser) {
+          context.go('${AppRoutes.nameEntry}?phone=$phoneForApi');
+        } else {
+          context.go(AppRoutes.home);
+        }
+        return;
+      }
+
+      AppMessenger.showErrorBanner(
+        context,
+        result.error ?? 'Could not log in with this number',
+      );
+      await _exitToLoginWithPhone();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        AppMessenger.showErrorBanner(context, 'Error: $e');
+      }
+    }
+  }
+
   void _handlePhoneRegistrationConflict() {
     showPhoneAlreadyRegisteredDialog(
       context: context,
-      onLoginWithPhone: _exitToLoginWithPhone,
+      onLoginWithPhone: widget.isPhoneLinkMode
+          ? _loginWithExistingPhone
+          : _exitToLoginWithPhone,
       onUseDifferentNumber: _handleOtpExit,
     );
   }

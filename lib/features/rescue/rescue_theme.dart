@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../core/theme/primary_cta_styles.dart';
 import '../ride/presentation/widgets/figma_ride_selection_widgets.dart';
 
 /// Shared rescue flow colors — matches Figma / app gold palette.
@@ -68,11 +69,5 @@ abstract final class RescueTheme {
         ),
       );
 
-  static ButtonStyle primaryButton = FilledButton.styleFrom(
-    backgroundColor: accent,
-    foregroundColor: Colors.white,
-    minimumSize: const Size(double.infinity, 54),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-    textStyle: GoogleFonts.poppins(fontSize: 16, fontWeight: FontWeight.w600),
-  );
+  static ButtonStyle primaryButton = PrimaryCtaStyles.filled();
 }

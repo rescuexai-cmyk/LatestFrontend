@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../../../../core/router/app_routes.dart';
 import '../../providers/personal_driver_onboarding_provider.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 
 /// Status screen after personal driver submits documents.
 class PersonalDriverWelcomeScreen extends ConsumerStatefulWidget {
@@ -109,14 +110,9 @@ class _PersonalDriverWelcomeScreenState
               const SizedBox(height: 8),
               if (canGoOnline)
                 SizedBox(
-                  height: 56,
+                  height: PrimaryCtaStyles.height,
                   child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF1A1A1A),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
+                    style: PrimaryCtaStyles.filled(),
                     onPressed: () async {
                       await ref
                           .read(personalDriverOnboardingProvider.notifier)

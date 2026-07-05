@@ -91,7 +91,6 @@ class _AppInitializer extends ConsumerStatefulWidget {
 class _AppInitializerState extends ConsumerState<_AppInitializer> {
   String? _initError;
   bool _ready = false;
-  String? _splashStatusMessage;
 
   @override
   void initState() {
@@ -242,40 +241,20 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
       debugPrint('⚠️ Push init failed: $e');
     }
 
-    // Server config + automatic backend retries while splash is visible.
+    // Server config + automatic backend retries while splash is visible (no status UI).
     try {
-      if (mounted) {
-        setState(() => _splashStatusMessage = 'Connecting to server…');
-      }
       await ServerConfigService.init().timeout(
         const Duration(seconds: 10),
         onTimeout: () => debugPrint('⚠️ Server config init timed out'),
       );
       if (!ServerConfigService.isHealthy) {
-        final connected = await ServerConfigService.waitUntilHealthy(
+        await ServerConfigService.waitUntilHealthy(
           maxWait: const Duration(seconds: 45),
           retryDelay: const Duration(seconds: 2),
         );
-        if (!connected && mounted) {
-          setState(() {
-            _splashStatusMessage =
-                'Could not reach server. Check your internet connection.';
-          });
-          await Future.delayed(const Duration(milliseconds: 1800));
-        }
-      }
-      if (mounted && ServerConfigService.isHealthy) {
-        setState(() => _splashStatusMessage = null);
       }
     } catch (e) {
       debugPrint('⚠️ Server config failed: $e');
-      if (mounted) {
-        setState(() {
-          _splashStatusMessage =
-              'Connection issue. Check your internet and try again.';
-        });
-        await Future.delayed(const Duration(milliseconds: 1200));
-      }
     }
 
     await SystemChrome.setPreferredOrientations([
@@ -287,7 +266,7 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
   @override
   Widget build(BuildContext context) {
     if (!_ready) {
-      return _SplashScreen(statusMessage: _splashStatusMessage);
+      return const _SplashScreen();
     }
     if (_initError != null) {
       return _InitErrorScreen(error: _initError!);
@@ -298,9 +277,7 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
 
 /// Splash screen shown during initialization.
 class _SplashScreen extends StatefulWidget {
-  const _SplashScreen({this.statusMessage});
-
-  final String? statusMessage;
+  const _SplashScreen();
 
   @override
   State<_SplashScreen> createState() => _SplashScreenState();
@@ -380,31 +357,6 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
                 );
               },
             ),
-            if (widget.statusMessage != null) ...[
-              const SizedBox(height: 28),
-              const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Color(0xFFFDF1DF),
-                ),
-              ),
-              const SizedBox(height: 14),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Text(
-                  widget.statusMessage!,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.poppins(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: const Color(0xFFFDF1DF).withValues(alpha: 0.85),
-                    height: 1.4,
-                  ),
-                ),
-              ),
-            ],
           ],
         ),
       ),

@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:vibration/vibration.dart';
 
+import '../../../../core/theme/primary_cta_styles.dart';
+
 /// Figma accent / selection border (#CF923D).
 const Color figmaRideAccent = Color(0xFFCF923D);
 
@@ -1169,8 +1171,9 @@ class FigmaSlideToBookButton extends StatefulWidget {
   /// Center label on the dark track (fades slightly while dragging).
   final String trackLabel;
 
-  static const Color trackColor = Color(0xFF2E2C2A);
-  static const double trackHeight = 60;
+  static const Color trackColor = PrimaryCtaStyles.background;
+  static const double trackHeight = PrimaryCtaStyles.height;
+  static const double trackRadius = PrimaryCtaStyles.radius;
   static const double trackPadding = 7;
   static const double thumbSize = trackHeight - (2 * trackPadding);
 
@@ -1297,7 +1300,7 @@ class _FigmaSlideToBookButtonState extends State<FigmaSlideToBookButton>
                     ? FigmaSlideToBookButton.trackColor
                     : FigmaSlideToBookButton.trackColor.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(
-                  FigmaSlideToBookButton.trackHeight / 2,
+                  FigmaSlideToBookButton.trackRadius,
                 ),
               ),
               child: Padding(

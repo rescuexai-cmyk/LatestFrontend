@@ -33,6 +33,7 @@ import '../../providers/driver_penalty_provider.dart';
 import '../ride_stack/ride_stack_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
+import '../../../../core/theme/primary_cta_styles.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
   const DriverHomeScreen({super.key});
@@ -6571,13 +6572,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                             });
                           }
                         },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFD4956A),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
+                  style: PrimaryCtaStyles.elevated(),
                   child: isAdding
                       ? const UberShimmer(
                           baseColor: Color(0x88FFFFFF),
@@ -6787,13 +6782,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                               });
                             }
                           },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD4956A),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
+                    style: PrimaryCtaStyles.elevated(),
                     child: isAdding
                         ? const UberShimmer(
                             baseColor: Color(0x88FFFFFF),
@@ -7730,8 +7719,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                 Navigator.pop(context);
                 AppMessenger.showDriverErrorBanner(context, trIssueReported);
               },
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFD4956A)),
+              style: PrimaryCtaStyles.elevated(),
               child:
                   Text(trSubmit, style: const TextStyle(color: Colors.white)),
             ),
@@ -7798,8 +7786,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                 Navigator.pop(context);
                 AppMessenger.showDriverErrorBanner(context, trFeedbackThanks);
               },
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFD4956A)),
+              style: PrimaryCtaStyles.elevated(),
               child:
                   Text(trSubmit, style: const TextStyle(color: Colors.white)),
             ),

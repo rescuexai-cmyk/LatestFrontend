@@ -14,6 +14,7 @@ import '../../providers/ride_provider.dart';
 import 'scheduled_ride_screen.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 class PaymentScreen extends ConsumerStatefulWidget {
   const PaymentScreen({super.key});
   @override
@@ -1160,11 +1161,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                 });
                 _showStatusSnackBar('$upiMethod linked: $upiId');
               },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFD4956A),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
+              style: PrimaryCtaStyles.elevated(
+                minimumSize: const Size(0, PrimaryCtaStyles.height),
               ),
               child:
                   const Text('Link UPI', style: TextStyle(color: Colors.white)),
@@ -1697,13 +1695,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                         onPressed: _isApplyingVoucher
                             ? null
                             : () => applyFromSheet(voucherController.text),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFD4956A),
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
+                        style: PrimaryCtaStyles.elevated(),
                         child: _isApplyingVoucher
                             ? const SizedBox(
                                 width: 22,
@@ -2390,7 +2382,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                 decoration: BoxDecoration(
                   color: const Color(0xFFE0E0E0),
                   borderRadius: BorderRadius.circular(
-                    FigmaSlideToBookButton.trackHeight / 2,
+                    FigmaSlideToBookButton.trackRadius,
                   ),
                 ),
                 child: const UberShimmer(

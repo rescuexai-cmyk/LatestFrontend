@@ -23,6 +23,7 @@ import '../../../../core/widgets/active_ride_banner.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/schedule_ride_sheet.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
+import '../../../../core/theme/primary_cta_styles.dart';
 import '../widgets/figma_ride_selection_widgets.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
@@ -726,6 +727,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     switch (cabTypeId) {
       case 'bike_rescue':
         return 'assets/vehicles/bike_rescue.png';
+      case 'bike_taxi':
+        return 'assets/vehicles/bike_taxi.png';
       case 'auto':
         return 'assets/vehicles/auto.png';
       case 'cab_mini':
@@ -733,7 +736,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       case 'cab_xl':
         return 'assets/vehicles/cab_xl.png';
       case 'cab_premium':
-        return 'assets/vehicles/captain.png';
+        return 'assets/vehicles/cab_premium.png';
       case 'personal_driver':
         return 'assets/vehicles/cab_premium.png';
       default:
@@ -1642,9 +1645,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 1.0)
             .toDouble();
         setState(() {
-          _cabTypes = options;
-          _ensureValidSelectedCab(options);
           _cabFares = fares;
+          _cabTypes = _prepareCabTypesForDisplay(options, fares);
           _isSurgeActive = isSurge;
           _surgeMultiplier = surgeMultiplier;
           _distanceKmFromBackend =
@@ -1739,6 +1741,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
 
   /// Preferred display order; unknown keys are appended alphabetically after.
   static const List<String> _vehicleTypeOrder = [
+    'bike_taxi',
     'bike_rescue',
     'auto',
     'cab_mini',
@@ -1748,6 +1751,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     'eco_pickup',
   ];
   static const Map<String, String> _vehicleNames = {
+    'bike_taxi': 'Bike Taxi',
     'bike_rescue': 'Bike Rescue',
     'auto': 'Auto',
     'cab_mini': 'Cab Mini',
@@ -1757,6 +1761,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     'eco_pickup': 'Eco Pickup',
   };
   static const Map<String, String> _vehicleDescriptions = {
+    'bike_taxi': 'Quick and affordable bike rides',
     'bike_rescue': 'Quick bike rescue',
     'auto': 'Auto rickshaw',
     'cab_mini': 'Compact car',
@@ -1766,6 +1771,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     'eco_pickup': 'Walk a little, save more',
   };
   static const Map<String, int> _vehicleCapacities = {
+    'bike_taxi': 1,
     'bike_rescue': 1,
     'auto': 3,
     'cab_mini': 4,
@@ -1839,15 +1845,55 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   void _ensureValidSelectedCab(List<CabType> options) {
     if (options.isEmpty) return;
     if (options.any((c) => c.id == _selectedCabType)) return;
+
+    final homePick = widget.initialServiceType;
+    if (homePick != null &&
+        homePick.isNotEmpty &&
+        options.any((c) => c.id == homePick)) {
+      _selectedCabType = homePick;
+      return;
+    }
+
     final preferred =
         options.firstWhere((c) => c.isPopular, orElse: () => options.first);
     _selectedCabType = preferred.id;
+  }
+
+  /// Puts the user's chosen vehicle first (home-screen tap or current selection).
+  List<CabType> _orderCabTypesWithSelectedFirst(List<CabType> options) {
+    if (options.length <= 1) return options;
+    final idx = options.indexWhere((c) => c.id == _selectedCabType);
+    if (idx <= 0) return options;
+    final ordered = List<CabType>.from(options);
+    final selected = ordered.removeAt(idx);
+    ordered.insert(0, selected);
+    return ordered;
+  }
+
+  List<CabType> _prepareCabTypesForDisplay(
+    List<CabType> options,
+    Map<String, double> fares,
+  ) {
+    _ensureValidSelectedCab(options);
+    final ordered = _orderCabTypesWithSelectedFirst(options);
+    final selected = ordered.firstWhere(
+      (c) => c.id == _selectedCabType,
+      orElse: () => ordered.first,
+    );
+    _selectedCabType = selected.id;
+    ref.read(rideBookingProvider.notifier).setCabType(
+          id: selected.id,
+          name: selected.name,
+          fare: fares[selected.id] ?? selected.fare,
+        );
+    return ordered;
   }
 
   /// Get icon name for vehicle type
   String _getIconName(String vehicleType) {
     switch (vehicleType.toLowerCase()) {
       case 'bike':
+      case 'bike_taxi':
       case 'bike_rescue':
         return 'two_wheeler';
       case 'auto':
@@ -1886,6 +1932,16 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         'capacity': 1,
         'badge': 'Rescue',
         'is_popular': true
+      },
+      {
+        'id': 'bike_taxi',
+        'name': 'Bike Taxi',
+        'description': 'Quick and affordable bike rides',
+        'icon': 'two_wheeler',
+        'base_fare': 15,
+        'per_km_rate': 5,
+        'per_min_rate': 0.8,
+        'capacity': 1,
       },
       {
         'id': 'auto',
@@ -1957,9 +2013,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       fares[cab.id] = cab.fare;
     }
     setState(() {
-      _cabTypes = options;
-      _ensureValidSelectedCab(options);
       _cabFares = fares;
+      _cabTypes = _prepareCabTypesForDisplay(options, fares);
       _isLoadingPricing = false;
     });
     debugPrint('⚠️ Using fallback pricing');
@@ -2856,8 +2911,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                 ),
               );
             },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFD4956A),
+            style: PrimaryCtaStyles.elevated(
+              minimumSize: const Size(0, PrimaryCtaStyles.height),
             ),
             child:
                 const Text('Link UPI', style: TextStyle(color: Colors.white)),
@@ -3981,6 +4036,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       fallbackIcon: cab.icon,
       onTap: () {
         setState(() => _selectedCabType = cab.id);
+        ref.read(rideBookingProvider.notifier).setCabType(
+              id: cab.id,
+              name: cab.name,
+              fare: _cabFares[cab.id] ?? cab.fare,
+            );
         _updateDriverMarkers();
       },
     );

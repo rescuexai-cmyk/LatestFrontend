@@ -209,6 +209,8 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
     switch (cabTypeId) {
       case 'bike_rescue':
         return 'assets/vehicles/bike_rescue.png';
+      case 'bike_taxi':
+        return 'assets/vehicles/bike_taxi.png';
       case 'auto':
         return 'assets/vehicles/auto.png';
       case 'cab_mini':

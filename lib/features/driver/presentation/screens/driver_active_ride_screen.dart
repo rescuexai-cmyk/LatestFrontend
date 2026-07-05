@@ -2715,7 +2715,6 @@ class _DriverActiveRideScreenState
       return SlideToActionButton(
         text: 'Slide to Complete Ride',
         icon: Icons.check_circle,
-        backgroundColor: const Color(0xFF4CAF50),
         onSlideComplete: _completeRide,
       );
     } else if (canConfirmPickup) {
@@ -2723,7 +2722,6 @@ class _DriverActiveRideScreenState
       return SlideToActionButton(
         text: 'Slide to Confirm Pickup',
         icon: Icons.person_pin_circle,
-        backgroundColor: const Color(0xFF4CAF50),
         onSlideComplete: _confirmPickup,
       );
     } else if (showArrivedButton) {
@@ -2731,7 +2729,6 @@ class _DriverActiveRideScreenState
       return SlideToActionButton(
         text: "Slide when Arrived",
         icon: Icons.location_on,
-        backgroundColor: const Color(0xFF2196F3),
         onSlideComplete: _markArrivedAtPickup,
       );
     } else {
@@ -2739,7 +2736,6 @@ class _DriverActiveRideScreenState
       return SlideToActionButton(
         text: 'Slide to Enter Ride PIN',
         icon: Icons.lock_open,
-        backgroundColor: const Color(0xFFFF9800),
         onSlideComplete: _showOtpEntryDialog,
       );
     }

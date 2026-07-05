@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/config/app_config.dart';
 import '../../providers/driver_subscription_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 
 class DriverSubscriptionPaymentScreen extends ConsumerStatefulWidget {
   const DriverSubscriptionPaymentScreen({super.key});
@@ -210,28 +211,8 @@ class _DriverSubscriptionPaymentScreenState
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: () => context.pop(false),
-            child: Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(10),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.06),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: const Icon(
-                Icons.chevron_left_rounded,
-                color: Color(0xFF2E2C2A),
-                size: 24,
-              ),
-            ),
+          FigmaSquareBackButton(
+            onPressed: () => context.pop(false),
           ),
           const SizedBox(width: 14),
           const Text(

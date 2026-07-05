@@ -9,6 +9,7 @@ import '../../../../core/theme/app_colors.dart';
 import '../../../../core/widgets/fare_breakdown_widget.dart';
 import '../widgets/lost_and_found_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 
 class RideDetailsScreen extends ConsumerStatefulWidget {
   final String rideId;
@@ -54,6 +55,9 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
+        leading: FigmaSquareBackButton(
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
         title: const Text('Ride Details'),
       ),
       body: _buildBody(),

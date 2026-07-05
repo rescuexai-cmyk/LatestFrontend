@@ -9,6 +9,7 @@ import '../../../../core/services/api_client.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
@@ -246,9 +247,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
       child: Scaffold(
         backgroundColor: Colors.white,
         appBar: AppBar(
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+          leading: FigmaSquareBackButton(
             onPressed: () => _exitHistory(context),
           ),
           title: Text(tr('ride_history')),

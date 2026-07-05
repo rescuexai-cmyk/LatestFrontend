@@ -12,6 +12,7 @@ import '../../../../core/widgets/slide_to_action_button.dart';
 import '../../../rescue/rescue_theme.dart';
 import '../../providers/driver_rides_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 
 /// Pre-OTP rescue job flow for drivers (accept → partner → en route → OTP).
 ///
@@ -230,8 +231,7 @@ class _DriverRescueJobScreenState extends ConsumerState<DriverRescueJobScreen> {
       appBar: AppBar(
         backgroundColor: RescueTheme.screenBg,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: RescueTheme.textPrimary),
+        leading: FigmaSquareBackButton(
           onPressed: () => context.go(AppRoutes.driverHome),
         ),
         title: Text(
@@ -360,7 +360,6 @@ class _DriverRescueJobScreenState extends ConsumerState<DriverRescueJobScreen> {
         SlideToActionButton(
           text: 'Slide to mark arrived at pickup',
           icon: Icons.location_on,
-          backgroundColor: RescueTheme.accent,
           enabled: !_busy,
           onSlideComplete: _markArrived,
         ),
@@ -378,7 +377,6 @@ class _DriverRescueJobScreenState extends ConsumerState<DriverRescueJobScreen> {
           SlideToActionButton(
             text: 'Slide — picked up partner, en route',
             icon: Icons.navigation,
-            backgroundColor: RescueTheme.accent,
             enabled: !_busy,
             onSlideComplete: _markEnRoute,
           ),
@@ -396,7 +394,6 @@ class _DriverRescueJobScreenState extends ConsumerState<DriverRescueJobScreen> {
         SlideToActionButton(
           text: 'Slide to mark arrived at pickup',
           icon: Icons.location_on,
-          backgroundColor: RescueTheme.accent,
           enabled: !_busy,
           onSlideComplete: _markArrived,
         ),

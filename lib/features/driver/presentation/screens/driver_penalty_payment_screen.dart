@@ -7,6 +7,7 @@ import '../../../../core/config/app_config.dart';
 import '../../../../core/widgets/upi_app_icon.dart';
 import '../../providers/driver_penalty_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 
 class DriverPenaltyPaymentScreen extends ConsumerStatefulWidget {
   const DriverPenaltyPaymentScreen({super.key});
@@ -216,8 +217,7 @@ class _DriverPenaltyPaymentScreenState
       ),
       child: Row(
         children: [
-          IconButton(
-            icon: const Icon(Icons.close),
+          FigmaSquareBackButton(
             onPressed: () => context.pop(false),
           ),
           const SizedBox(width: 8),

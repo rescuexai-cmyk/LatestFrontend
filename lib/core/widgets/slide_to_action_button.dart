@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
 
+import '../theme/primary_cta_styles.dart';
+
 class SlideToActionButton extends StatefulWidget {
   final String text;
   final IconData icon;
@@ -17,10 +19,10 @@ class SlideToActionButton extends StatefulWidget {
     required this.text,
     required this.icon,
     required this.onSlideComplete,
-    this.backgroundColor = const Color(0xFF2196F3),
+    this.backgroundColor = PrimaryCtaStyles.background,
     this.sliderColor = Colors.white,
     this.enabled = true,
-    this.height = 60,
+    this.height = PrimaryCtaStyles.height,
     this.margin = const EdgeInsets.symmetric(horizontal: 24),
   });
 
@@ -155,7 +157,7 @@ class _SlideToActionButtonState extends State<SlideToActionButton>
         color: widget.enabled
             ? widget.backgroundColor
             : widget.backgroundColor.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(widget.height / 2),
+        borderRadius: BorderRadius.circular(PrimaryCtaStyles.radius),
         boxShadow: [
           BoxShadow(
             color: widget.backgroundColor.withOpacity(0.3),

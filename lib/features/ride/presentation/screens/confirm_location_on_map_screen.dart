@@ -13,6 +13,8 @@ import '../../../../core/services/directions_service.dart';
 import '../../../rescue/providers/rescue_booking_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../widgets/figma_ride_selection_widgets.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 
 /// Post-vehicle-selection flow: pinpoint exact pickup on the map.
 enum ConfirmLocationFlow { payment, rescue }
@@ -307,10 +309,14 @@ class _ConfirmLocationOnMapScreenState
                 padding: const EdgeInsets.fromLTRB(8, 8, 16, 0),
                 child: Row(
                   children: [
-                    IconButton(
-                      onPressed: _isFinishing ? null : _onBack,
-                      icon: const Icon(Icons.arrow_back_ios_new_rounded),
-                      color: _textPrimary,
+                    IgnorePointer(
+                      ignoring: _isFinishing,
+                      child: Opacity(
+                        opacity: _isFinishing ? 0.4 : 1,
+                        child: FigmaSquareBackButton(
+                          onPressed: _onBack,
+                        ),
+                      ),
                     ),
                     Expanded(
                       child: Text(
@@ -411,19 +417,12 @@ class _ConfirmLocationOnMapScreenState
                     ),
                     const SizedBox(height: 16),
                     SizedBox(
-                      height: 52,
+                      height: PrimaryCtaStyles.height,
                       child: FilledButton(
                         onPressed: (_isFinishing || _isGeocoding)
                             ? null
                             : _confirmStep,
-                        style: FilledButton.styleFrom(
-                          backgroundColor: FigmaSlideToBookButton.trackColor,
-                          disabledBackgroundColor: FigmaSlideToBookButton.trackColor
-                              .withValues(alpha: 0.45),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(26),
-                          ),
-                        ),
+                        style: PrimaryCtaStyles.filled(),
                         child: _isFinishing
                             ? const SizedBox(
                                 width: 22,

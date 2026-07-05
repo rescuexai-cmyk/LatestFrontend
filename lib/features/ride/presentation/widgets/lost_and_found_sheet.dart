@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/models/ride.dart';
 import '../../../../core/theme/app_colors.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 
 class _ItemCategory {
   final String id;
@@ -329,16 +330,10 @@ class _LostAndFoundSheetState extends State<LostAndFoundSheet> {
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
             child: SizedBox(
               width: double.infinity,
-              height: 54,
+              height: PrimaryCtaStyles.height,
               child: ElevatedButton(
                 onPressed: _canSubmit ? _submitReport : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _accent,
-                  disabledBackgroundColor: _accent.withOpacity(0.3),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  elevation: 0,
-                ),
+                style: PrimaryCtaStyles.elevated(),
                 child: _submitting
                     ? const SizedBox(
                         width: 22, height: 22,
@@ -408,16 +403,11 @@ class _LostAndFoundSheetState extends State<LostAndFoundSheet> {
           if (hasDriver) const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
-            height: 50,
+            height: PrimaryCtaStyles.height,
             child: ElevatedButton(
               onPressed: () => Navigator.pop(context),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _accent,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                elevation: 0,
-              ),
-              child: const Text('Done', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              style: PrimaryCtaStyles.elevated(),
+              child: const Text('Done'),
             ),
           ),
         ],

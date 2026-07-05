@@ -713,6 +713,69 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
+  /// Abandon an in-progress Google→phone link without signing out.
+  /// Used when the user chooses to log in with an already-registered number.
+  void abandonPhoneLinkForPhoneLogin() {
+    state = state.copyWith(
+      pendingPhoneLink: false,
+      onboardingAfterPhoneLink: false,
+      pendingOnboarding: false,
+    );
+  }
+
+  /// Log into the existing Raahi account for a verified phone number.
+  ///
+  /// After [verifyOtpForPhoneLink] fails because the number is already
+  /// registered, Firebase phone auth has usually succeeded — reuse that
+  /// session and authenticate via `/auth/firebase-phone` instead of
+  /// `/auth/add-phone`.
+  Future<VerifyOTPResult> loginWithExistingPhoneAccount({String? otp}) async {
+    state = state.copyWith(isLoading: true, error: null);
+    try {
+      String? idToken =
+          await firebasePhoneAuth.getIdToken(forceRefresh: true);
+
+      if ((idToken == null || idToken.isEmpty) &&
+          otp != null &&
+          otp.length == 6) {
+        final firebaseVerify = await firebasePhoneAuth.verifyOTP(otp);
+        if (!firebaseVerify.success ||
+            firebaseVerify.idToken == null ||
+            firebaseVerify.idToken!.isEmpty) {
+          final msg = firebaseVerify.error ?? 'OTP verification failed';
+          state = state.copyWith(isLoading: false, error: msg);
+          return VerifyOTPResult(success: false, error: msg);
+        }
+        idToken = firebaseVerify.idToken;
+      }
+
+      if (idToken == null || idToken.isEmpty) {
+        state = state.copyWith(isLoading: false);
+        return const VerifyOTPResult(
+          success: false,
+          error: 'Please enter the OTP sent to your phone and try again.',
+        );
+      }
+
+      debugPrint(
+          '🔐 Logging into existing phone account via /auth/firebase-phone');
+      final backendResponse =
+          await apiClient.authenticateWithFirebase(idToken);
+      final result = await _handleBackendAuthResponse(backendResponse);
+
+      if (result.success) {
+        firebasePhoneAuth.clearVerification();
+        abandonPhoneLinkForPhoneLogin();
+      }
+
+      return result;
+    } catch (e) {
+      debugPrint('🔐 loginWithExistingPhoneAccount error: $e');
+      state = state.copyWith(isLoading: false, error: e.toString());
+      return VerifyOTPResult(success: false, error: e.toString());
+    }
+  }
+
   Future<SocialSignInResult> _handleSocialAuthResponse(
       Map<String, dynamic> response) async {
     final success = response['success'] as bool? ?? false;

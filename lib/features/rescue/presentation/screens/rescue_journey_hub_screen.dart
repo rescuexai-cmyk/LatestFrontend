@@ -11,7 +11,7 @@ import '../../models/rescue_models.dart';
 import '../../providers/rescue_booking_provider.dart';
 import '../../rescue_theme.dart';
 import '../widgets/rescue_flow_widgets.dart';
-import '../widgets/rescue_widgets.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 
 /// Figma screen 9 — Journey Hub with Journey / Vehicle / Support / Timeline tabs.
 class RescueJourneyHubScreen extends ConsumerStatefulWidget {
@@ -180,8 +180,7 @@ class _RescueJourneyHubScreenState extends ConsumerState<RescueJourneyHubScreen>
         backgroundColor: RescueTheme.screenBg,
         elevation: 0,
         foregroundColor: RescueTheme.textPrimary,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+        leading: FigmaSquareBackButton(
           onPressed: () {
             if (Navigator.of(context).canPop()) {
               Navigator.of(context).pop();

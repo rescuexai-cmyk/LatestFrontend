@@ -8,8 +8,12 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:ionicons/ionicons.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/marketing_banner_carousel.dart';
+import '../../../../core/providers/marketing_banners_provider.dart';
+import '../../../../core/models/marketing_banner.dart';
 import '../../../../core/widgets/schedule_ride_sheet.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
@@ -61,29 +65,29 @@ class ServicesScreen extends ConsumerStatefulWidget {
         const Color(0xFF4CAF50),
         imagePath: 'assets/vehicles/auto.png'),
     _Svc(
+        'bike_taxi',
+        'bike_taxi',
+        Icons.two_wheeler,
+        _accent,
+        imagePath: 'assets/vehicles/bike_taxi.png'),
+    _Svc(
+        'bike_rescue',
+        'rescue',
+        Icons.two_wheeler,
+        _accent,
+        imagePath: 'assets/vehicles/bike_rescue.png',
+        showNewBadge: true),
+    _Svc(
         'cab_xl',
         'cab_xl',
         Icons.airport_shuttle,
         const Color(0xFF7B1FA2),
         imagePath: 'assets/vehicles/cab_xl.png'),
     _Svc(
-        'bike_rescue',
-        'rescue',
-        Icons.two_wheeler,
-        _accent,
-        imagePath: 'assets/vehicles/bike_rescue.png'),
-    // Swapped artwork for Premium and Driver Rental to match final design
-    _Svc(
         'cab_premium',
         'premium',
         Icons.diamond,
         const Color(0xFFFF9800),
-        imagePath: 'assets/vehicles/captain.png'),
-    _Svc(
-        'personal_driver',
-        'driver_rental',
-        Icons.person,
-        const Color(0xFF455A64),
         imagePath: 'assets/vehicles/cab_premium.png'),
   ];
 
@@ -270,6 +274,18 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
       route += '&scheduledTime=${_scheduledTime!.toIso8601String()}';
     }
     context.push(route);
+  }
+
+  Future<void> _onMarketingBannerTap(MarketingBanner banner) async {
+    final link = banner.linkUrl?.trim();
+    if (link != null && link.isNotEmpty) {
+      final uri = Uri.tryParse(link);
+      if (uri != null && await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+        return;
+      }
+    }
+    _navigateToFindTrip();
   }
 
   void _showComingSoonDialog(String serviceType) {
@@ -607,7 +623,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                           crossAxisCount: 3,
                           mainAxisSpacing: 12,
                           crossAxisSpacing: 12,
-                          childAspectRatio: 0.85,
+                          childAspectRatio: 0.92,
                         ),
                         itemCount: ServicesScreen._services.length,
                         itemBuilder: (ctx, i) {
@@ -623,66 +639,38 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                     ),
                     const SizedBox(height: 20),
 
-                    // ── Promotional banner (asset keeps aspect ratio; cap height to avoid stretch) ──
+                    // ── Marketing banners (backend carousel, 320×120 slot) ──
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 20),
-                      child: GestureDetector(
-                        onTap: () => _navigateToFindTrip(),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(24),
-                          child: SizedBox(
-                            height: 112,
-                            width: double.infinity,
-                            child: Image.asset(
-                              'assets/images/cashback_banner.png',
-                              width: double.infinity,
-                              height: 112,
-                              fit: BoxFit.cover,
-                              alignment: Alignment.center,
-                              errorBuilder: (context, error, stackTrace) {
-                                return Container(
-                                  width: double.infinity,
-                                  height: 112,
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFF1A1A1A),
+                      child: Consumer(
+                        builder: (context, ref, _) {
+                          final bannersAsync =
+                              ref.watch(homeMarketingBannersProvider);
+                          return bannersAsync.when(
+                            data: (banners) {
+                              if (banners.isEmpty) {
+                                return const SizedBox.shrink();
+                              }
+                              return MarketingBannerCarousel(
+                                banners: banners,
+                                onBannerTap: _onMarketingBannerTap,
+                              );
+                            },
+                            loading: () => const SizedBox(
+                              height: kMarketingBannerHeight,
+                              child: Center(
+                                child: SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
                                   ),
-                                  alignment: Alignment.center,
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 16),
-                                    child: Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        Text(
-                                          ref.tr('cashback'),
-                                          style: const TextStyle(
-                                            fontFamily: 'Poppins',
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.w700,
-                                            color: Colors.white,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          ref.tr('book_now'),
-                                          style: TextStyle(
-                                            fontFamily: 'Poppins',
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600,
-                                            color: ServicesScreen._accent,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              },
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
+                            error: (_, __) => const SizedBox.shrink(),
+                          );
+                        },
                       ),
                     ),
                     const SizedBox(height: 24),
@@ -1143,8 +1131,9 @@ class _Svc {
   final Color color;
   final String badge;
   final String? imagePath;
+  final bool showNewBadge;
   const _Svc(this.id, this.titleKey, this.icon, this.color,
-      {this.badge = '', this.imagePath});
+      {this.badge = '', this.imagePath, this.showNewBadge = false});
 }
 
 // ── Action card ──
@@ -1159,6 +1148,9 @@ class _ActionCard {
 
 // ── Service card (grid item) ──
 class _ServiceCard extends StatelessWidget {
+  /// Figma service tile image frame (~108×90).
+  static const _tileAspectRatio = 108.63 / 90.08;
+
   final String title;
   final _Svc svc;
   final VoidCallback onTap;
@@ -1170,24 +1162,40 @@ class _ServiceCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: ServicesScreen._surfaceCard,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              padding: const EdgeInsets.all(4),
-              child: svc.imagePath != null
-                  ? Image.asset(
-                      svc.imagePath!,
-                      fit: BoxFit.contain,
-                      errorBuilder: (context, error, stackTrace) =>
-                          Icon(svc.icon, color: svc.color, size: 70),
-                    )
-                  : Icon(svc.icon, color: svc.color, size: 70),
+          AspectRatio(
+            aspectRatio: _tileAspectRatio,
+            child: Stack(
+              clipBehavior: Clip.hardEdge,
+              fit: StackFit.expand,
+              children: [
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: ServicesScreen._surfaceCard,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: svc.imagePath != null
+                        ? Image.asset(
+                            svc.imagePath!,
+                            fit: BoxFit.contain,
+                            width: double.infinity,
+                            height: double.infinity,
+                            errorBuilder: (context, error, stackTrace) =>
+                                Icon(svc.icon, color: svc.color, size: 48),
+                          )
+                        : Icon(svc.icon, color: svc.color, size: 48),
+                  ),
+                ),
+                if (svc.showNewBadge)
+                  const Positioned(
+                    top: 6.89,
+                    right: 5.6,
+                    child: _ServiceNewBadge(),
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: 6),
@@ -1204,6 +1212,35 @@ class _ServiceCard extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Figma Frame 1410081702 — red "NEW!" pill on Rescue tile.
+class _ServiceNewBadge extends StatelessWidget {
+  const _ServiceNewBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 31.21,
+      height: 13.15,
+      padding: const EdgeInsets.symmetric(horizontal: 5.60348, vertical: 1.07531),
+      decoration: BoxDecoration(
+        color: const Color(0xFFB72F2F),
+        borderRadius: BorderRadius.circular(11.7968),
+      ),
+      alignment: Alignment.center,
+      child: const Text(
+        'NEW!',
+        style: TextStyle(
+          fontFamily: 'Poppins',
+          fontWeight: FontWeight.w500,
+          fontSize: 7.41848,
+          height: 11 / 7.41848,
+          color: Colors.white,
+        ),
       ),
     );
   }

@@ -645,6 +645,7 @@ class AppStrings {
       // Services
       'cab_mini': 'Cab Mini',
       'compact_cars': 'Compact cars',
+      'bike_taxi': 'Bike Taxi',
       'auto': 'Auto',
       'budget_friendly': 'Budget-friendly',
       'cab_xl': 'Cab XL',
@@ -1278,6 +1279,7 @@ class AppStrings {
       // Services (hub)
       'cab_mini': 'कैब मिनी',
       'compact_cars': 'कॉम्पैक्ट कारें',
+      'bike_taxi': 'बाइक टैक्सी',
       'auto': 'ऑटो',
       'budget_friendly': 'बजेट अनुकूल',
       'cab_xl': 'कैब XL',

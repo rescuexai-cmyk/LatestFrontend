@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 
 class IncomingRideData {
   final String rideId;
@@ -206,15 +207,10 @@ class _IncomingRideFullscreenState extends State<IncomingRideFullscreen> {
                 const Spacer(),
                 SizedBox(
                   width: double.infinity,
-                  height: 56,
+                  height: PrimaryCtaStyles.height,
                   child: ElevatedButton(
                     onPressed: _busy ? null : _handleAccept,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD4956A),
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
+                    style: PrimaryCtaStyles.elevated(),
                     child: _busy
                         ? const SizedBox(
                             width: 22,

@@ -9,6 +9,7 @@ import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 /// Welcome screen shown after driver completes onboarding.
 /// Shows verification status, document checklist, rejection reasons,
 /// and allows re-uploading rejected documents.
@@ -654,12 +655,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
                         _isSavingDetails ? 'Saving...' : 'Save Details',
                         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                       ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _accent,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: _accent.withOpacity(0.5),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        elevation: 0,
+                      style: PrimaryCtaStyles.elevated(
+                        minimumSize: const Size(0, PrimaryCtaStyles.height),
                       ),
                     ),
                   ),
@@ -1192,13 +1189,7 @@ class _EditDetailsSheetState extends ConsumerState<_EditDetailsSheet> {
                   _isSubmitting ? 'Saving...' : 'Save Details',
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFD4956A),
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: const Color(0xFFD4956A).withOpacity(0.6),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  elevation: 0,
-                ),
+                style: PrimaryCtaStyles.elevated(),
               ),
             ),
           ],

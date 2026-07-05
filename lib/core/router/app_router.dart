@@ -85,6 +85,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           currentLocation.startsWith(AppRoutes.otpVerification) &&
               (state.uri.queryParameters['mode'] == 'linkPhone' ||
                   pendingPhoneLink);
+      final isExistingPhoneLoginRoute =
+          currentLocation.startsWith(AppRoutes.otpVerification) &&
+              state.uri.queryParameters['loginExisting'] == 'true';
       final isPhoneLinkRoute = currentLocation == AppRoutes.phoneNumber ||
           (currentLocation == AppRoutes.signup &&
               state.uri.queryParameters['mode'] == 'linkPhone') ||
@@ -139,7 +142,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // If authenticated and on a login route, decide where to go:
       // - New user with pending onboarding → name entry
       // - Returning user → home
-      if (isAuthenticated && isLoginRoute && !isPhoneLinkRoute) {
+      if (isAuthenticated &&
+          isLoginRoute &&
+          !isPhoneLinkRoute &&
+          !isExistingPhoneLoginRoute) {
         if (pendingPhoneLink) {
           debugPrint('🔀 Redirecting to phone link screen');
           return '${AppRoutes.phoneNumber}?mode=linkPhone';

@@ -7,6 +7,8 @@ import '../../../../core/services/api_client.dart';
 import '../../../../core/services/server_config_service.dart';
 import '../../../../core/services/websocket_service.dart';
 import '../../../../core/theme/app_colors.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
+import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 
 class ServerConfigScreen extends ConsumerStatefulWidget {
   /// If true, user can skip and go to login (used on first-launch).
@@ -176,6 +178,9 @@ class _ServerConfigScreenState extends ConsumerState<ServerConfigScreen> {
       appBar: widget.isInitialSetup
           ? null
           : AppBar(
+              leading: FigmaSquareBackButton(
+                onPressed: () => context.pop(),
+              ),
               title: const Text('Server Configuration'),
               backgroundColor: AppColors.primary,
               foregroundColor: Colors.white,
@@ -394,19 +399,11 @@ class _ServerConfigScreenState extends ConsumerState<ServerConfigScreen> {
                 // --- Save button ---
                 SizedBox(
                   width: double.infinity,
-                  height: 52,
+                  height: PrimaryCtaStyles.height,
                   child: ElevatedButton(
                     onPressed: _saveConfig,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.primary,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                      elevation: 0,
-                    ),
-                    child: const Text(
-                      'Save & Continue',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                    ),
+                    style: PrimaryCtaStyles.elevated(),
+                    child: const Text('Save & Continue'),
                   ),
                 ),
 

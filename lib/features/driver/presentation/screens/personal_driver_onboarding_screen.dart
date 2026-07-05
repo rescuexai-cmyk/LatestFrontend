@@ -11,6 +11,7 @@ import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../providers/personal_driver_onboarding_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 
 /// Personal Rescue Driver onboarding — Aadhaar + Driving License only.
 class PersonalDriverOnboardingScreen extends ConsumerStatefulWidget {
@@ -300,14 +301,9 @@ class _IntroPage extends StatelessWidget {
           _bullet(Icons.verified_user_outlined, 'License, PAN, Aadhaar & photo'),
           const Spacer(),
           SizedBox(
-            height: 56,
+            height: PrimaryCtaStyles.height,
             child: FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF1A1A1A),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
+              style: PrimaryCtaStyles.filled(),
               onPressed: onContinue,
               child: const Text('Get Started'),
             ),
@@ -463,15 +459,9 @@ class _PersonalInfoPageState extends State<_PersonalInfoPage> {
           ),
           const Spacer(),
           SizedBox(
-            height: 56,
+            height: PrimaryCtaStyles.height,
             child: FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF1A1A1A),
-                disabledBackgroundColor: Colors.grey.shade300,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
+              style: PrimaryCtaStyles.filled(),
               onPressed: _canContinue ? _handleContinue : null,
               child: const Text('Continue'),
             ),
@@ -622,16 +612,9 @@ class _DocumentsPage extends StatelessWidget {
         ),
         const SizedBox(height: 24),
         SizedBox(
-          height: 56,
+          height: PrimaryCtaStyles.height,
           child: FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: ready
-                  ? const Color(0xFF1A1A1A)
-                  : Colors.grey.shade400,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
+            style: PrimaryCtaStyles.filled(),
             onPressed: ready && !isLoading ? onSubmit : null,
             child: isLoading
                 ? const SizedBox(

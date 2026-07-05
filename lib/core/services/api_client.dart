@@ -873,6 +873,49 @@ class ApiClient {
     return response.data as Map<String, dynamic>;
   }
 
+  /// Active marketing banners for in-app carousels.
+  /// Backend: GET /api/banners/active?placement=HOME&city=
+  Future<List<Map<String, dynamic>>> getActiveBanners({
+    String placement = 'HOME',
+    String? city,
+  }) async {
+    try {
+      final response = await _dio.get('/api/banners/active', queryParameters: {
+        'placement': placement.trim().toUpperCase(),
+        if (city != null && city.trim().isNotEmpty) 'city': city.trim(),
+      });
+      final data = response.data;
+      List? list;
+      if (data is List) {
+        list = data;
+      } else if (data is Map) {
+        final d = data['data'];
+        if (d is List) {
+          list = d;
+        } else if (d is Map && d['banners'] is List) {
+          list = d['banners'] as List;
+        } else if (data['banners'] is List) {
+          list = data['banners'] as List;
+        }
+      }
+      list ??= const [];
+      final banners = list
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      debugPrint('getActiveBanners: ${banners.length} banner(s) '
+          '(placement=$placement, city=$city)');
+      return banners;
+    } on DioException catch (e) {
+      debugPrint('getActiveBanners error: ${e.response?.statusCode} '
+          '${e.response?.data}');
+      return [];
+    } catch (e) {
+      debugPrint('getActiveBanners unexpected error: $e');
+      return [];
+    }
+  }
+
   /// Get active promo/coupon codes available to the current user.
   /// Backend: GET /api/promo/active?vehicleType=&city=
   /// Returns a list of { code, description, type, value, maxDiscount?, minFare? }.

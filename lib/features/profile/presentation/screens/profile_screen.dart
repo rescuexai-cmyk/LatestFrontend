@@ -20,6 +20,7 @@ import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
@@ -189,6 +190,16 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
+        automaticallyImplyLeading: false,
+        leading: FigmaSquareBackButton(
+          onPressed: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go(AppRoutes.home);
+            }
+          },
+        ),
         title: Text(ref.tr('profile')),
         actions: [
           Padding(
@@ -806,9 +817,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                 openAppSettings();
               }
             },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFD4956A),
-            ),
+            style: PrimaryCtaStyles.elevated(),
             child: Text(ref.tr('open_settings'),
                 style: TextStyle(color: Colors.white)),
           ),

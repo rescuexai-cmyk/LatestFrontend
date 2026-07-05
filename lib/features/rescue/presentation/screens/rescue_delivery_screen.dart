@@ -9,6 +9,7 @@ import '../../models/rescue_models.dart';
 import '../../providers/rescue_booking_provider.dart';
 import '../../rescue_theme.dart';
 import '../widgets/rescue_flow_widgets.dart';
+import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
 import '../widgets/rescue_widgets.dart';
 
 /// Figma screen 10 — Vehicle delivery verification.
@@ -103,11 +104,7 @@ class _RescueDeliveryScreenState extends ConsumerState<RescueDeliveryScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: RescueTheme.success,
-                minimumSize: const Size(double.infinity, 52),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-              ),
+              style: PrimaryCtaStyles.filled(),
               onPressed: _accept,
               child: const Text('Looks good, Accept'),
             ),
