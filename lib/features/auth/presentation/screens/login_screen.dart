@@ -612,6 +612,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     setState(() => _isSocialLoading = false);
 
     if (!result.success) {
+      if (result.cancelled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            content: const Text(
+              'Google sign-in was cancelled. You can try again whenever you\'re ready.',
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+        return;
+      }
       final raw = result.error ?? 'Google login failed';
       final message = raw.contains('GOOGLE_SERVER_CLIENT_ID')
           ? 'Google login not configured. Please set GOOGLE_SERVER_CLIENT_ID (Web client ID) in build settings.'

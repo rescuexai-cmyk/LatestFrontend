@@ -3,11 +3,13 @@ import '../config/app_config.dart';
 
 class GoogleAuthResult {
   final bool success;
+  final bool cancelled;
   final String? idToken;
   final String? error;
 
   const GoogleAuthResult({
     required this.success,
+    this.cancelled = false,
     this.idToken,
     this.error,
   });
@@ -47,11 +49,30 @@ class GoogleAuthService {
       }
 
       return GoogleAuthResult(success: true, idToken: idToken);
-    } catch (e) {
-      return GoogleAuthResult(
+    } on GoogleSignInException catch (e) {
+      if (e.code == GoogleSignInExceptionCode.canceled) {
+        return const GoogleAuthResult(success: false, cancelled: true);
+      }
+      return const GoogleAuthResult(
         success: false,
-        error: e.toString(),
+        error: 'Unable to sign in with Google. Please try again.',
+      );
+    } catch (e) {
+      final raw = e.toString();
+      if (_isUserCancelled(raw)) {
+        return const GoogleAuthResult(success: false, cancelled: true);
+      }
+      return const GoogleAuthResult(
+        success: false,
+        error: 'Unable to sign in with Google. Please try again.',
       );
     }
+  }
+
+  static bool _isUserCancelled(String raw) {
+    return raw.contains('GoogleSignInExceptionCode.canceled') ||
+        raw.contains('Cancelled by user') ||
+        raw.contains('sign_in_canceled') ||
+        raw.contains('SignInCanceledException');
   }
 }

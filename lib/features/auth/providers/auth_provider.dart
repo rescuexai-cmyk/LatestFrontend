@@ -95,12 +95,14 @@ class SocialSignInResult {
   final bool success;
   final bool requiresPhone;
   final bool isNewUser;
+  final bool cancelled;
   final String? error;
 
   const SocialSignInResult({
     required this.success,
     this.requiresPhone = false,
     this.isNewUser = false,
+    this.cancelled = false,
     this.error,
   });
 }
@@ -603,6 +605,10 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(isLoading: true, error: null);
     try {
       final googleResult = await GoogleAuthService.signIn();
+      if (googleResult.cancelled) {
+        state = state.copyWith(isLoading: false);
+        return const SocialSignInResult(success: false, cancelled: true);
+      }
       if (!googleResult.success || googleResult.idToken == null) {
         state = state.copyWith(isLoading: false);
         return SocialSignInResult(
