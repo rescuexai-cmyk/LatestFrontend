@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../../../core/models/ride.dart';
 import '../../../core/models/ride_stop.dart';
+import '../../../core/services/api_client.dart';
 import '../data/pending_ride_storage.dart';
 
 export '../../../core/models/ride_stop.dart';
@@ -287,24 +289,92 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
     state = state.copyWith(rideOtp: otp);
   }
 
-  void setRideDetails({String? rideId, String? otp}) {
+  Future<void> setRideDetails({String? rideId, String? otp}) async {
     state = state.copyWith(rideId: rideId, rideOtp: otp);
-    unawaited(_persistIfNeeded());
+    await _persistIfNeeded();
   }
 
-  void setScheduledTime(DateTime? scheduledTime) {
+  Future<RideBookingState?> peekStashedScheduledRide() =>
+      PendingRideStorage.loadStash();
+
+  /// When true, the immediate booking reused the stashed scheduled ride id —
+  /// cancel API must not be called or the later ride is killed on the backend.
+  Future<bool> shouldPreserveStashedRideOnCancel(String? rideId) async {
+    if (rideId == null || rideId.isEmpty) return false;
+    final stashed = await PendingRideStorage.loadStash();
+    return stashed?.rideId == rideId;
+  }
+
+  /// Sets pickup time for the current booking flow.
+  ///
+  /// When clearing to immediate (`null`) while a scheduled ride is active, the
+  /// scheduled ride is stashed so it can be restored if the user cancels the
+  /// immediate booking.
+  Future<void> setScheduledTime(DateTime? scheduledTime) async {
+    if (scheduledTime == null && state.isScheduledRide) {
+      await stashScheduledAndReleaseSlot();
+      return;
+    }
     state = state.copyWith(
       scheduledTime: scheduledTime,
       clearScheduledTime: scheduledTime == null,
     );
   }
 
+  /// Same scheduled ride entering driver search — keep [rideId], drop label only.
+  void clearScheduledLabelForHandoff() {
+    state = state.copyWith(clearScheduledTime: true);
+    unawaited(_persistIfNeeded());
+  }
+
+  /// Saves the active scheduled ride aside and frees the booking slot for "now".
+  Future<bool> stashScheduledAndReleaseSlot() async {
+    if (!state.isScheduledRide) return false;
+
+    await PendingRideStorage.saveStash(state);
+    state = state.copyWith(
+      rideId: null,
+      rideOtp: null,
+      clearScheduledTime: true,
+    );
+    await PendingRideStorage.clear();
+    return true;
+  }
+
+  /// Brings back a stashed scheduled ride after an immediate ride ends/cancels.
+  Future<bool> restoreStashedScheduledRide() async {
+    final stashed = await PendingRideStorage.loadStash();
+    if (stashed == null || !stashed.hasActiveRideId) return false;
+
+    final rideId = stashed.rideId!;
+    try {
+      final response = await apiClient.getRide(rideId);
+      final ride = Ride.fromJson(Ride.unwrapRidePayload(response));
+      if (ride.status == RideStatus.cancelled ||
+          ride.status == RideStatus.completed) {
+        await PendingRideStorage.clearStash();
+        return false;
+      }
+    } catch (_) {
+      // Offline — fall back to local stash.
+    }
+
+    state = stashed;
+    await PendingRideStorage.save(state);
+    await PendingRideStorage.clearStash();
+    return true;
+  }
+
+  Future<bool> hasStashedScheduledRide() => PendingRideStorage.hasStash();
+
   /// Restore booking from disk after cold start (scheduled / in-progress rides).
   Future<bool> restorePersistedBooking() async {
     final saved = await PendingRideStorage.load();
-    if (saved == null) return false;
-    state = saved;
-    return true;
+    if (saved != null) {
+      state = saved;
+      return true;
+    }
+    return restoreStashedScheduledRide();
   }
 
   Future<void> _persistIfNeeded() async {
@@ -313,9 +383,21 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
     }
   }
 
-  void reset() {
+  void reset({bool clearScheduledStash = true}) {
     state = const RideBookingState();
     unawaited(PendingRideStorage.clear());
+    if (clearScheduledStash) {
+      unawaited(PendingRideStorage.clearStash());
+    }
+  }
+
+  /// Clears the immediate ride and restores a stashed scheduled ride when present.
+  Future<bool> finishImmediateRideCancellation({String? cancelledRideId}) async {
+    final restored = await restoreStashedScheduledRide();
+    if (!restored) {
+      reset(clearScheduledStash: false);
+    }
+    return restored;
   }
 
   /// Clear ride ID and OTP only — keep pickup, drop, fare, cab type for a new search.

@@ -6,7 +6,7 @@ import '../../../../core/models/user.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/router/user_landing.dart';
 import '../../../../core/providers/settings_provider.dart';
-import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../auth/presentation/widgets/switch_account_sheet.dart';
 import '../../../driver/providers/driver_onboarding_provider.dart';
@@ -288,11 +288,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ),
 
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(child: ActiveRideBanner()),
+          const Positioned.fill(
+            child: DraggableActiveRideBanner(wrapSafeArea: true),
           ),
         ],
       ),

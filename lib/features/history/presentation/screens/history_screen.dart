@@ -8,7 +8,7 @@ import '../../../../core/models/ride.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/router/app_routes.dart';
-import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -285,11 +285,8 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
                 _buildRescueTab(),
               ],
             ),
-            const Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: ActiveRideBanner(),
+            const Positioned.fill(
+              child: DraggableActiveRideBanner(),
             ),
           ],
         ),

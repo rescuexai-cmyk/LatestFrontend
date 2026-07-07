@@ -72,7 +72,7 @@ class _ScheduledRideScreenState extends ConsumerState<ScheduledRideScreen> {
           status == RideStatus.driverArriving ||
           status == RideStatus.inProgress) {
         ref.read(activeRideProvider.notifier).setActiveRide(ride);
-        ref.read(rideBookingProvider.notifier).setScheduledTime(null);
+        ref.read(rideBookingProvider.notifier).clearScheduledLabelForHandoff();
         await PendingRideStorage.save(
           ref.read(rideBookingProvider).copyWith(clearScheduledTime: true),
         );
@@ -83,7 +83,7 @@ class _ScheduledRideScreenState extends ConsumerState<ScheduledRideScreen> {
 
       // Backend started matching — hand off to searching screen.
       if (_shouldHandOffToSearching(ride)) {
-        ref.read(rideBookingProvider.notifier).setScheduledTime(null);
+        ref.read(rideBookingProvider.notifier).clearScheduledLabelForHandoff();
         await PendingRideStorage.save(
           ref.read(rideBookingProvider).copyWith(clearScheduledTime: true),
         );

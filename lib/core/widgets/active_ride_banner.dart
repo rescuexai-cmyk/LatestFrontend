@@ -6,6 +6,82 @@ import '../../features/ride/providers/ride_provider.dart';
 import '../models/ride.dart';
 import '../router/app_routes.dart';
 
+/// Whether the active ride banner should render on the current route.
+bool activeRideBannerShouldShow(BuildContext context, WidgetRef ref) {
+  final booking = ref.watch(rideBookingProvider);
+  final rideState = ref.watch(activeRideProvider);
+
+  final hasRideId = booking.rideId != null && booking.rideId!.isNotEmpty;
+  if (!hasRideId) return false;
+
+  if (rideState.activeRide != null) {
+    final status = rideState.activeRide!.status;
+    if (status == RideStatus.completed || status == RideStatus.cancelled) {
+      return false;
+    }
+  }
+
+  final currentRoute = GoRouterState.of(context).matchedLocation;
+  if (currentRoute == AppRoutes.searchingDrivers ||
+      currentRoute == AppRoutes.scheduledRide ||
+      currentRoute == AppRoutes.driverAssigned ||
+      currentRoute.startsWith('/ride/')) {
+    return false;
+  }
+
+  return true;
+}
+
+/// Opens the ride screen that matches the current banner phase.
+void activeRideBannerHandleTap(BuildContext context, WidgetRef ref) {
+  final booking = ref.read(rideBookingProvider);
+  final rideState = ref.read(activeRideProvider);
+  final rideId = booking.rideId;
+  if (rideId == null || rideId.isEmpty) return;
+
+  final _BannerPhase phase;
+  if (booking.isScheduledRide) {
+    phase = _BannerPhase.scheduled;
+  } else if (rideState.activeRide != null) {
+    phase = _phaseFromRideStatus(rideState.activeRide!.status);
+  } else {
+    phase = _BannerPhase.searching;
+  }
+
+  _navigateActiveRideBanner(context, phase);
+}
+
+void _navigateActiveRideBanner(BuildContext context, _BannerPhase phase) {
+  switch (phase) {
+    case _BannerPhase.scheduled:
+      context.push(AppRoutes.scheduledRide);
+      break;
+    case _BannerPhase.searching:
+      context.push(AppRoutes.searchingDrivers);
+      break;
+    case _BannerPhase.driverArriving:
+    case _BannerPhase.inProgress:
+      context.push(AppRoutes.driverAssigned);
+      break;
+  }
+}
+
+_BannerPhase _phaseFromRideStatus(RideStatus status) {
+  switch (status) {
+    case RideStatus.requested:
+      return _BannerPhase.searching;
+    case RideStatus.accepted:
+    case RideStatus.arriving:
+    case RideStatus.driverArriving:
+      return _BannerPhase.driverArriving;
+    case RideStatus.inProgress:
+      return _BannerPhase.inProgress;
+    case RideStatus.completed:
+    case RideStatus.cancelled:
+      return _BannerPhase.searching;
+  }
+}
+
 /// A persistent bottom banner that shows active ride info.
 ///
 /// Shows during the entire ride lifecycle:
@@ -16,7 +92,17 @@ import '../router/app_routes.dart';
 ///
 /// Tapping navigates to the correct screen for the current phase.
 class ActiveRideBanner extends ConsumerWidget {
-  const ActiveRideBanner({super.key});
+  const ActiveRideBanner({
+    super.key,
+    this.handleOwnTap = true,
+    this.omitSideMargin = false,
+  });
+
+  /// When false, tap navigation is handled by a parent (e.g. drag wrapper).
+  final bool handleOwnTap;
+
+  /// When true, horizontal margin is omitted so a parent can position the pill.
+  final bool omitSideMargin;
 
   static const _accent = Color(0xFFD4956A);
   static const _dark = Color(0xFF1A1A1A);
@@ -40,7 +126,7 @@ class ActiveRideBanner extends ConsumerWidget {
         // Ride is done — hide the banner
         return const SizedBox.shrink();
       }
-      phase = _phaseFromStatus(status);
+      phase = _phaseFromRideStatus(status);
     } else {
       // No activeRide set yet — we're still searching for a driver
       phase = _BannerPhase.searching;
@@ -55,6 +141,22 @@ class ActiveRideBanner extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
+    return _buildBannerBody(
+      context,
+      ref,
+      phase: phase,
+      booking: booking,
+      rideState: rideState,
+    );
+  }
+
+  Widget _buildBannerBody(
+    BuildContext context,
+    WidgetRef ref, {
+    required _BannerPhase phase,
+    required RideBookingState booking,
+    required ActiveRideState rideState,
+  }) {
     final pickup = booking.pickupAddress ?? 'Pickup';
     final destination = booking.destinationAddress ?? 'Destination';
     final otp = booking.rideOtp ?? '----';
@@ -64,20 +166,20 @@ class ActiveRideBanner extends ConsumerWidget {
 
     // OTP only before ride start (driver arriving); hide once OTP verified / in progress
     final showOtp = phase == _BannerPhase.driverArriving;
-    
+
     // Get driver info if available
     final driver = rideState.activeRide?.driver;
     final driverName = driver?.name;
     final vehicleInfo = driver?.vehicleInfo;
-    final vehicleText = vehicleInfo != null 
+    final vehicleText = vehicleInfo != null
         ? '${vehicleInfo.displayName} • ${vehicleInfo.plateNumber}'.trim()
         : null;
 
-    return GestureDetector(
-      onTap: () => _navigate(context, phase, booking.rideId!),
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+    final banner = Container(
+      margin: omitSideMargin
+          ? const EdgeInsets.only(bottom: 16)
+          : const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
           color: _dark,
           borderRadius: BorderRadius.circular(18),
@@ -158,7 +260,7 @@ class ActiveRideBanner extends ConsumerWidget {
                       )
                     else
                       Text(
-                        _shorten(destination, 30),
+                        _shortenBannerText(destination, 30),
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 14,
@@ -170,8 +272,8 @@ class ActiveRideBanner extends ConsumerWidget {
                     const SizedBox(height: 2),
                     Text(
                       phase == _BannerPhase.scheduled
-                          ? 'To: ${_shorten(destination, 28)}'
-                          : 'From: ${_shorten(pickup, 28)}',
+                          ? 'To: ${_shortenBannerText(destination, 28)}'
+                          : 'From: ${_shortenBannerText(pickup, 28)}',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.55),
                         fontSize: 11,
@@ -288,67 +390,41 @@ class ActiveRideBanner extends ConsumerWidget {
             ),
           ],
         ),
-      ),
+      );
+
+    if (!handleOwnTap) return banner;
+
+    return GestureDetector(
+      onTap: () => activeRideBannerHandleTap(context, ref),
+      child: banner,
     );
   }
+}
 
-  /// Navigate to the correct screen based on ride phase.
-  void _navigate(BuildContext context, _BannerPhase phase, String rideId) {
-    switch (phase) {
-      case _BannerPhase.scheduled:
-        context.push(AppRoutes.scheduledRide);
-        break;
-      case _BannerPhase.searching:
-        context.push(AppRoutes.searchingDrivers);
-        break;
-      case _BannerPhase.driverArriving:
-      case _BannerPhase.inProgress:
-        context.push(AppRoutes.driverAssigned);
-        break;
-    }
+String _shortenBannerText(String text, int max) {
+  if (text.length <= max) return text;
+  return '${text.substring(0, max)}...';
+}
+
+String _formatScheduledTime(DateTime scheduled) {
+  final now = DateTime.now();
+  final tomorrow = DateTime(now.year, now.month, now.day + 1);
+  final timeStr =
+      '${scheduled.hour > 12 ? scheduled.hour - 12 : (scheduled.hour == 0 ? 12 : scheduled.hour)}:'
+      '${scheduled.minute.toString().padLeft(2, '0')} '
+      '${scheduled.hour >= 12 ? 'PM' : 'AM'}';
+
+  if (scheduled.year == now.year &&
+      scheduled.month == now.month &&
+      scheduled.day == now.day) {
+    return 'Today, $timeStr';
   }
-
-  _BannerPhase _phaseFromStatus(RideStatus status) {
-    switch (status) {
-      case RideStatus.requested:
-        return _BannerPhase.searching;
-      case RideStatus.accepted:
-      case RideStatus.arriving:
-      case RideStatus.driverArriving:
-        return _BannerPhase.driverArriving;
-      case RideStatus.inProgress:
-        return _BannerPhase.inProgress;
-      case RideStatus.completed:
-      case RideStatus.cancelled:
-        return _BannerPhase.searching; // Won't reach here (filtered above)
-    }
+  if (scheduled.year == tomorrow.year &&
+      scheduled.month == tomorrow.month &&
+      scheduled.day == tomorrow.day) {
+    return 'Tomorrow, $timeStr';
   }
-
-  String _shorten(String text, int max) {
-    if (text.length <= max) return text;
-    return '${text.substring(0, max)}...';
-  }
-
-  String _formatScheduledTime(DateTime scheduled) {
-    final now = DateTime.now();
-    final tomorrow = DateTime(now.year, now.month, now.day + 1);
-    final timeStr =
-        '${scheduled.hour > 12 ? scheduled.hour - 12 : (scheduled.hour == 0 ? 12 : scheduled.hour)}:'
-        '${scheduled.minute.toString().padLeft(2, '0')} '
-        '${scheduled.hour >= 12 ? 'PM' : 'AM'}';
-
-    if (scheduled.year == now.year &&
-        scheduled.month == now.month &&
-        scheduled.day == now.day) {
-      return 'Today, $timeStr';
-    }
-    if (scheduled.year == tomorrow.year &&
-        scheduled.month == tomorrow.month &&
-        scheduled.day == tomorrow.day) {
-      return 'Tomorrow, $timeStr';
-    }
-    return '${scheduled.day}/${scheduled.month}/${scheduled.year}, $timeStr';
-  }
+  return '${scheduled.day}/${scheduled.month}/${scheduled.year}, $timeStr';
 }
 
 /// Internal ride phase for the banner.

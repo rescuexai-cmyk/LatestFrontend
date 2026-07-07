@@ -19,7 +19,7 @@ import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/places_service.dart';
-import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/schedule_ride_sheet.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
@@ -2435,11 +2435,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               child: _buildBottomSheet(scrollController),
             ),
           ),
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: ActiveRideBanner(),
+          const Positioned.fill(
+            child: DraggableActiveRideBanner(),
           ),
         ],
       ),
@@ -4159,7 +4156,8 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   static const double _intercityThresholdKm = 50;
 
   /// After cab + fare selected: persist selection then pin exact locations.
-  void _pushRidePaymentWithSelectedCab(CabType selectedCab, double fare) {
+  Future<void> _pushRidePaymentWithSelectedCab(
+      CabType selectedCab, double fare) async {
     if (!mounted) return;
     final isEcoPickup = selectedCab.id == 'eco_pickup';
     ref.read(rideBookingProvider.notifier).setCabType(
@@ -4184,7 +4182,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     ref.read(rideBookingProvider.notifier).setDriverCount(
           _selectedCabType == 'bike_rescue' && _needExtraDriver ? 2 : 1,
         );
-    ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
+    await ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
     _openConfirmLocationPin(flow: ConfirmLocationFlow.payment);
   }
 
@@ -4198,7 +4196,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
 
   /// Starts rescue flow after map pin confirmation (locations prefilled from Find Trip).
-  void _startRescueBookingFlow(CabType selectedCab, double fare) {
+  Future<void> _startRescueBookingFlow(CabType selectedCab, double fare) async {
     if (!mounted) return;
     final isEcoPickup = selectedCab.id == 'eco_pickup';
     ref.read(rideBookingProvider.notifier).setCabType(
@@ -4223,7 +4221,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     ref.read(rideBookingProvider.notifier).setDriverCount(
           _selectedCabType == 'bike_rescue' && _needExtraDriver ? 2 : 1,
         );
-    ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
+    await ref.read(rideBookingProvider.notifier).setScheduledTime(_scheduledTime);
     _openConfirmLocationPin(flow: ConfirmLocationFlow.rescue);
   }
 

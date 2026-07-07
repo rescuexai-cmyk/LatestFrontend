@@ -11,6 +11,7 @@ class PendingRideStorage {
   PendingRideStorage._();
 
   static const _key = 'pending_ride_booking_v1';
+  static const _stashKey = 'pending_scheduled_ride_stash_v1';
 
   static Future<void> save(RideBookingState state) async {
     if (state.rideId == null || state.rideId!.isEmpty) {
@@ -19,7 +20,39 @@ class PendingRideStorage {
     }
 
     final prefs = await SharedPreferences.getInstance();
-    final payload = <String, dynamic>{
+    await prefs.setString(_key, jsonEncode(_encode(state)));
+  }
+
+  /// Keeps a scheduled ride snapshot while the user books/cancels an immediate ride.
+  static Future<void> saveStash(RideBookingState state) async {
+    if (!state.isScheduledRide) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_stashKey, jsonEncode(_encode(state)));
+  }
+
+  static Future<RideBookingState?> load() => _loadFromKey(_key);
+
+  static Future<RideBookingState?> loadStash() => _loadFromKey(_stashKey);
+
+  static Future<bool> hasStash() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_stashKey);
+    return raw != null && raw.isNotEmpty;
+  }
+
+  static Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_key);
+  }
+
+  static Future<void> clearStash() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_stashKey);
+  }
+
+  static Map<String, dynamic> _encode(RideBookingState state) {
+    return <String, dynamic>{
       'rideId': state.rideId,
       'rideOtp': state.rideOtp,
       'pickupAddress': state.pickupAddress,
@@ -46,12 +79,11 @@ class PendingRideStorage {
           )
           .toList(),
     };
-    await prefs.setString(_key, jsonEncode(payload));
   }
 
-  static Future<RideBookingState?> load() async {
+  static Future<RideBookingState?> _loadFromKey(String key) async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
+    final raw = prefs.getString(key);
     if (raw == null || raw.isEmpty) return null;
 
     try {
@@ -102,11 +134,6 @@ class PendingRideStorage {
     } catch (_) {
       return null;
     }
-  }
-
-  static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key);
   }
 
   static double? _toDouble(dynamic value) {

@@ -13,7 +13,7 @@ import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/services/places_service.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/router/app_routes.dart';
-import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
@@ -483,11 +483,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
             ),
           ),
           // Active ride banner at bottom
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: ActiveRideBanner(),
+          const Positioned.fill(
+            child: DraggableActiveRideBanner(),
           ),
         ],
       ),

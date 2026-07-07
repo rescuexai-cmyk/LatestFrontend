@@ -508,10 +508,12 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     return earthRadius * c;
   }
 
-  void _handleRideCancelled(Map<String, dynamic> data) {
-    // Clear all ride state so the banner disappears
+  void _handleRideCancelled(Map<String, dynamic> data) async {
     ref.read(activeRideProvider.notifier).clearActiveRide();
-    ref.read(rideBookingProvider.notifier).reset();
+    await ref.read(rideBookingProvider.notifier).finishImmediateRideCancellation(
+          cancelledRideId: widget.rideId,
+        );
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -560,18 +562,16 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
           final nav = GoRouter.of(context);
           Navigator.pop(context);
           await _submitRating(rating, feedback);
-          // Clear ride state so banner disappears
           ref.read(activeRideProvider.notifier).clearActiveRide();
-          ref.read(rideBookingProvider.notifier).reset();
+          await ref.read(rideBookingProvider.notifier).finishImmediateRideCancellation();
           _ratingSheetOpen = false;
           nav.go(AppRoutes.home);
         },
-        onSkip: () {
+        onSkip: () async {
           final nav = GoRouter.of(context);
           Navigator.pop(context);
-          // Clear ride state so banner disappears
           ref.read(activeRideProvider.notifier).clearActiveRide();
-          ref.read(rideBookingProvider.notifier).reset();
+          await ref.read(rideBookingProvider.notifier).finishImmediateRideCancellation();
           _ratingSheetOpen = false;
           nav.go(AppRoutes.home);
         },
@@ -711,12 +711,19 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
 
     if (confirmed == true) {
       try {
-        // Notify driver via real-time service
-        realtimeService.cancelRide(widget.rideId, reason: 'Cancelled by rider');
-        // Cancel via REST API (this also triggers server-side events to driver)
-        await apiClient.cancelRide(widget.rideId, reason: 'Cancelled by rider');
+        final bookingNotifier = ref.read(rideBookingProvider.notifier);
+        final preserveStashed = await bookingNotifier
+            .shouldPreserveStashedRideOnCancel(widget.rideId);
+        if (!preserveStashed) {
+          realtimeService.cancelRide(widget.rideId, reason: 'Cancelled by rider');
+          await apiClient.cancelRide(widget.rideId, reason: 'Cancelled by rider');
+        }
+        ref.read(activeRideProvider.notifier).clearActiveRide();
+        await bookingNotifier.finishImmediateRideCancellation(
+          cancelledRideId: widget.rideId,
+        );
         if (mounted) {
-          context.go(AppRoutes.findTrip);
+          context.go(AppRoutes.services);
         }
       } catch (e) {
         debugPrint('Error cancelling ride: $e');

@@ -716,7 +716,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     } catch (_) {}
   }
 
-  void _handleRideCancelled(Map<String, dynamic> data) {
+  void _handleRideCancelled(Map<String, dynamic> data) async {
     if (!mounted) return;
 
     // CRITICAL: Clear ride state immediately when cancelled
@@ -733,8 +733,10 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       ref.read(rideBookingProvider.notifier).clearRideOnly();
       _createRideAndSearchAgain();
     } else {
-      // Rider cancelled or ride cancelled after OTP — clear all, go home
-      ref.read(rideBookingProvider.notifier).reset();
+      // Rider cancelled or ride cancelled after OTP — restore stashed later ride if any.
+      await ref.read(rideBookingProvider.notifier).finishImmediateRideCancellation(
+            cancelledRideId: ref.read(rideBookingProvider).rideId ?? _rideId,
+          );
       _showGenericCancelledDialog(
           data['reason'] as String? ?? 'Your ride has been cancelled.');
     }
@@ -1582,9 +1584,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   }
 
   /// Clear all ride-related state and navigate to the rider home screen.
-  void _clearRideStateAndNavigate() {
+  Future<void> _clearRideStateAndNavigate() async {
     ref.read(activeRideProvider.notifier).clearActiveRide();
-    ref.read(rideBookingProvider.notifier).reset();
+    await ref.read(rideBookingProvider.notifier).finishImmediateRideCancellation(
+          cancelledRideId: _rideId,
+        );
     if (!mounted) return;
     context.go(AppRoutes.home);
   }
@@ -1820,14 +1824,19 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
   }
 
-  void _cancelRide() {
+  void _cancelRide() async {
+    final bookingNotifier = ref.read(rideBookingProvider.notifier);
     if (_rideId != null) {
-      realtimeService.cancelRide(_rideId!, reason: 'Cancelled by rider');
-      apiClient
-          .cancelRide(_rideId!, reason: 'Cancelled by rider')
-          .catchError((_) => <String, dynamic>{});
+      final preserveStashed =
+          await bookingNotifier.shouldPreserveStashedRideOnCancel(_rideId);
+      if (!preserveStashed) {
+        realtimeService.cancelRide(_rideId!, reason: 'Cancelled by rider');
+        apiClient
+            .cancelRide(_rideId!, reason: 'Cancelled by rider')
+            .catchError((_) => <String, dynamic>{});
+      }
     }
-    _clearRideStateAndNavigate();
+    await _clearRideStateAndNavigate();
   }
 
   // ─── Build ───────────────────────────────────────────────────

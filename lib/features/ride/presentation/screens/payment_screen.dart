@@ -2252,11 +2252,18 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       return;
     }
     // ── Guard 1: ride already created for this booking (idempotency) ──
-    final existingRideId = ref.read(rideBookingProvider).rideId;
+    final existingBooking = ref.read(rideBookingProvider);
+    final existingRideId = existingBooking.rideId;
     if (existingRideId != null && existingRideId.isNotEmpty) {
-      debugPrint('⚠️ Ride already created ($existingRideId) — resuming');
-      if (mounted) resumePendingRideNavigation(context, ref);
-      return;
+      if (existingBooking.isScheduledRide) {
+        await ref
+            .read(rideBookingProvider.notifier)
+            .stashScheduledAndReleaseSlot();
+      } else {
+        debugPrint('⚠️ Ride already created ($existingRideId) — resuming');
+        if (mounted) resumePendingRideNavigation(context, ref);
+        return;
+      }
     }
     // ── Guard 2: user already has an active ride in provider ──
     final hasActive = ref.read(hasActiveRideProvider);
@@ -2328,7 +2335,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           debugPrint('✅ Ride created: $rideId');
           debugPrint(
               '🔐 Ride OTP from backend: $rideOtp - Share this with your driver!');
-          ref.read(rideBookingProvider.notifier).setRideDetails(
+          await ref.read(rideBookingProvider.notifier).setRideDetails(
                 rideId: rideId,
                 otp: rideOtp,
               );

@@ -10,7 +10,7 @@ import 'package:intl/intl.dart';
 import 'package:ionicons/ionicons.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/router/app_routes.dart';
-import '../../../../core/widgets/active_ride_banner.dart';
+import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import '../../../../core/widgets/marketing_banner_carousel.dart';
 import '../../../../core/providers/marketing_banners_provider.dart';
 import '../../../../core/models/marketing_banner.dart';
@@ -22,7 +22,6 @@ import '../../../../core/providers/settings_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../rescue/providers/rescue_booking_provider.dart';
 import '../../../ride/providers/ride_booking_provider.dart';
-import '../../../ride/providers/ride_provider.dart';
 
 class ServicesScreen extends ConsumerStatefulWidget {
   const ServicesScreen({super.key});
@@ -249,24 +248,6 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   void _navigateToFindTrip({String serviceType = 'cab_mini'}) {
     if (_comingSoonServices.contains(serviceType)) {
       _showComingSoonDialog(serviceType);
-      return;
-    }
-
-    // Check if there's an active ride - redirect to appropriate screen
-    final activeRideState = ref.read(activeRideProvider);
-    final bookingState = ref.read(rideBookingProvider);
-
-    if (activeRideState.hasActiveRide) {
-      context.push(AppRoutes.driverAssigned);
-      return;
-    }
-
-    if (bookingState.rideId != null && bookingState.rideId!.isNotEmpty) {
-      if (bookingState.isScheduledRide) {
-        context.push(AppRoutes.scheduledRide);
-      } else {
-        context.push(AppRoutes.searchingDrivers);
-      }
       return;
     }
 
@@ -1109,11 +1090,8 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                 ),
               ),
             ),
-            const Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: ActiveRideBanner(),
+            const Positioned.fill(
+              child: DraggableActiveRideBanner(),
             ),
           ],
         ),

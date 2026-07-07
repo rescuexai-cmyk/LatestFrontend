@@ -392,11 +392,14 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
     if (!mounted) return;
     context.pushReplacement(AppRoutes.driverAssigned);
   }
-  void _onRideCancelled(String? reason) {
+  void _onRideCancelled(String? reason) async {
     if (!mounted) return;
-    // Clear ride state so the banner disappears
+    final rideToCancel = ref.read(rideBookingProvider).rideId ?? _rideId;
     ref.read(activeRideProvider.notifier).clearActiveRide();
-    ref.read(rideBookingProvider.notifier).reset();
+    final restored = await ref
+        .read(rideBookingProvider.notifier)
+        .finishImmediateRideCancellation(cancelledRideId: rideToCancel);
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -409,7 +412,7 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(ctx);
-              context.go(AppRoutes.findTrip);
+              context.go(restored ? AppRoutes.services : AppRoutes.findTrip);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF252525),
@@ -729,20 +732,29 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
             child: Text(ref.tr('no_continue')),
           ),
           TextButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(ctx);
-              // Cancel via real-time service + API if we have a ride ID
-              if (_rideId != null) {
-                realtimeService.cancelRide(_rideId!,
+              final bookingNotifier =
+                  ref.read(rideBookingProvider.notifier);
+              final rideToCancel =
+                  ref.read(rideBookingProvider).rideId ?? _rideId;
+              final preserveStashed = rideToCancel != null &&
+                  await bookingNotifier
+                      .shouldPreserveStashedRideOnCancel(rideToCancel);
+              if (rideToCancel != null &&
+                  rideToCancel.isNotEmpty &&
+                  !preserveStashed) {
+                realtimeService.cancelRide(rideToCancel,
                     reason: 'Cancelled by rider');
                 apiClient
-                    .cancelRide(_rideId!, reason: 'Cancelled by rider')
+                    .cancelRide(rideToCancel, reason: 'Cancelled by rider')
                     .catchError((_) => <String, dynamic>{});
               }
-              // Clear ride state so banner disappears
               ref.read(activeRideProvider.notifier).clearActiveRide();
-              ref.read(rideBookingProvider.notifier).reset();
-              // Navigate directly to home page
+              await bookingNotifier.finishImmediateRideCancellation(
+                cancelledRideId: rideToCancel,
+              );
+              if (!context.mounted) return;
               context.go(AppRoutes.services);
             },
             child: const Text(
