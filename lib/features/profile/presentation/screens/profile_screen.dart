@@ -191,19 +191,23 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
       backgroundColor: Colors.white,
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        leading: FigmaSquareBackButton(
-          onPressed: () {
-            if (context.canPop()) {
-              context.pop();
-            } else {
-              context.go(AppRoutes.home);
-            }
-          },
+        leadingWidth: 56,
+        leading: Padding(
+          padding: const EdgeInsets.only(left: 20),
+          child: FigmaSquareBackButton(
+            onPressed: () {
+              if (context.canPop()) {
+                context.pop();
+              } else {
+                context.go(AppRoutes.home);
+              }
+            },
+          ),
         ),
         title: Text(ref.tr('profile')),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 12),
+            padding: const EdgeInsets.only(right: 20),
             child: _ProfileHelpIconButton(
               onTap: () => _openHelpOptions(context),
             ),
