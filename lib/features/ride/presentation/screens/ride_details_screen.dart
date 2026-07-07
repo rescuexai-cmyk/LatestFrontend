@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/models/ride.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/theme/app_colors.dart';
@@ -478,8 +479,8 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
   }
 
   Future<void> _openSupportOptions() async {
-    const supportNumber = '+18001234567';
-    const supportEmail = 'support@raahi.app';
+    const supportNumber = AppConfig.supportPhone;
+    const supportEmail = AppConfig.supportEmail;
 
     await showModalBottomSheet(
       context: context,
@@ -524,9 +525,15 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
   }
 
   Future<void> _launchUri(Uri uri) async {
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    } else {
+    // canLaunchUrl() can false-negative for mailto/tel on some devices, so
+    // attempt the launch directly and only report failure if it throws.
+    try {
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched && mounted) {
+        AppMessenger.showErrorBanner(context, 'Cannot open link');
+      }
+    } catch (_) {
       if (mounted) {
         AppMessenger.showErrorBanner(context, 'Cannot open link');
       }

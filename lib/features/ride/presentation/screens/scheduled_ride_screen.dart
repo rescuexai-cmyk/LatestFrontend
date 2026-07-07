@@ -181,7 +181,15 @@ class _ScheduledRideScreenState extends ConsumerState<ScheduledRideScreen> {
     final pickup = booking.pickupAddress ?? 'Pickup';
     final drop = booking.destinationAddress ?? 'Drop-off';
 
-    return Scaffold(
+    // Once the ride is scheduled, back always returns to home — not the
+    // create-ride flow the user came from.
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        context.go(AppRoutes.services);
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       body: SafeArea(
         child: Column(
@@ -191,7 +199,7 @@ class _ScheduledRideScreenState extends ConsumerState<ScheduledRideScreen> {
               child: Row(
                 children: [
                   FigmaSquareBackButton(
-                    onPressed: () => context.pop(),
+                    onPressed: () => context.go(AppRoutes.services),
                   ),
                   const Spacer(),
                   Container(
@@ -407,6 +415,7 @@ class _ScheduledRideScreenState extends ConsumerState<ScheduledRideScreen> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

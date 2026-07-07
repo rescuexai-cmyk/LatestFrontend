@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/models/ride.dart';
 import '../../../../core/theme/app_colors.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
@@ -440,14 +441,12 @@ class _LostAndFoundSheetState extends State<LostAndFoundSheet> {
     try {
       final uri = Uri(
         scheme: 'mailto',
-        path: 'support@raahi.app',
+        path: AppConfig.supportEmail,
         query: Uri.encodeFull(
           'subject=Lost Item Report — Ride ${ride.id.substring(0, 8)}&body=${body.toString()}',
         ),
       );
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-      }
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     } catch (_) {}
 
     await Future.delayed(const Duration(milliseconds: 600));

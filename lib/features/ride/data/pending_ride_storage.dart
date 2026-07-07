@@ -13,15 +13,16 @@ class PendingRideStorage {
   static const _key = 'pending_ride_booking_v1';
   static const _stashKey = 'pending_scheduled_ride_stash_v1';
 
-  static Future<void> save(RideBookingState state) async {
-    if (state.rideId == null || state.rideId!.isEmpty) {
-      await clear();
-      return;
-    }
+  /// Separate slot for a scheduled ride that was set aside so the user could
+  /// book another (instant) ride before their scheduled pickup time.
+  static const _parkedScheduledKey = 'parked_scheduled_ride_v1';
 
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, jsonEncode(_encode(state)));
-  }
+  static Future<void> save(RideBookingState state) =>
+      _saveToKey(_key, state);
+
+  /// Park a scheduled ride aside without losing it.
+  static Future<void> saveParkedScheduled(RideBookingState state) =>
+      _saveToKey(_parkedScheduledKey, state);
 
   /// Keeps a scheduled ride snapshot while the user books/cancels an immediate ride.
   static Future<void> saveStash(RideBookingState state) async {
@@ -34,6 +35,9 @@ class PendingRideStorage {
   static Future<RideBookingState?> load() => _loadFromKey(_key);
 
   static Future<RideBookingState?> loadStash() => _loadFromKey(_stashKey);
+
+  static Future<RideBookingState?> loadParkedScheduled() =>
+      _loadFromKey(_parkedScheduledKey);
 
   static Future<bool> hasStash() async {
     final prefs = await SharedPreferences.getInstance();
@@ -49,6 +53,20 @@ class PendingRideStorage {
   static Future<void> clearStash() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_stashKey);
+  }
+
+  static Future<void> clearParkedScheduled() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_parkedScheduledKey);
+  }
+
+  static Future<void> _saveToKey(String key, RideBookingState state) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (state.rideId == null || state.rideId!.isEmpty) {
+      await prefs.remove(key);
+      return;
+    }
+    await prefs.setString(key, jsonEncode(_encode(state)));
   }
 
   static Map<String, dynamic> _encode(RideBookingState state) {

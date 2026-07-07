@@ -1064,6 +1064,27 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(user: user);
   }
 
+  /// Re-fetch the current user from the backend and sync state + secure
+  /// storage cache. Used after profile edits (name / email / phone / photo).
+  /// Returns the fresh user, or null if the refresh failed (state unchanged).
+  Future<User?> refreshCurrentUser() async {
+    try {
+      final response = await apiClient.getCurrentUser();
+      if (response['success'] != true) return null;
+      final data = response['data'] as Map<String, dynamic>?;
+      final userJson = data?['user'] as Map<String, dynamic>?;
+      if (userJson == null) return null;
+
+      final freshUser = _mapUserFromBackend(userJson);
+      await _secureStorage.write(key: _userKey, value: _encodeUser(freshUser));
+      state = state.copyWith(user: freshUser);
+      return freshUser;
+    } catch (e) {
+      debugPrint('refreshCurrentUser failed: $e');
+      return null;
+    }
+  }
+
   /// Mark onboarding as complete.
   void completeOnboarding() {
     state = state.copyWith(pendingOnboarding: false);

@@ -12,6 +12,7 @@ import '../../features/auth/providers/welcome_onboarding_provider.dart';
 import '../../features/home/presentation/screens/home_screen.dart';
 import '../../features/home/presentation/screens/services_screen.dart';
 import '../../features/history/presentation/screens/history_screen.dart';
+import '../../features/profile/presentation/screens/edit_profile_screen.dart';
 import '../../features/profile/presentation/screens/profile_screen.dart';
 import '../../features/ride/presentation/screens/ride_details_screen.dart';
 import '../../features/ride/presentation/screens/ride_tracking_screen.dart';
@@ -253,6 +254,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: AppRoutes.profile,
         name: 'profile',
         builder: (context, state) => const ProfileScreen(),
+      ),
+
+      // Edit profile (name, email, phone, photo)
+      GoRoute(
+        path: AppRoutes.editProfile,
+        name: 'editProfile',
+        builder: (context, state) => const EditProfileScreen(),
       ),
       
       // Ride details (outside bottom nav)

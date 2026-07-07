@@ -1787,6 +1787,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _pushForegroundSubscription =
         pushNotificationService.notificationStream.listen((message) {
       _handleIncomingRidePush(message);
+      // Admin approved/rejected documents from the dashboard — refresh the
+      // verification banner and Go Online gate in realtime.
+      if (message.data['type'] == NotificationTypes.driverOnboarding) {
+        _fetchVerificationStatus();
+      }
     });
     pushNotificationService.onNotificationAction =
         _handleNotificationRideAction;
@@ -7550,19 +7555,25 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             ListTile(
               leading: const Icon(Icons.email, color: Color(0xFFD4956A)),
               title: Text(trEmailSupport),
-              subtitle: const Text('support@raahi.com'),
+              subtitle: const Text(AppConfig.supportEmail),
               onTap: () {
                 Navigator.pop(context);
-                AppMessenger.showDriverErrorBanner(context, trOpeningEmail);
+                launchUrl(
+                  Uri(scheme: 'mailto', path: AppConfig.supportEmail),
+                  mode: LaunchMode.externalApplication,
+                );
               },
             ),
             ListTile(
               leading: const Icon(Icons.phone, color: Color(0xFFD4956A)),
               title: Text(trCallSupport),
-              subtitle: const Text('1800-123-4567'),
+              subtitle: const Text(AppConfig.supportPhoneDisplay),
               onTap: () {
                 Navigator.pop(context);
-                AppMessenger.showDriverErrorBanner(context, trDialingSupport);
+                launchUrl(
+                  Uri(scheme: 'tel', path: AppConfig.supportPhone),
+                  mode: LaunchMode.externalApplication,
+                );
               },
             ),
           ],

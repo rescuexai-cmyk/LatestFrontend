@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/models/driver.dart';
 import '../../../../core/models/location.dart';
 import '../../../../core/models/ride.dart';
@@ -1378,10 +1379,9 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
   Future<void> _launchUpiPayment(Map<String, dynamic> app) async {
     final amount = widget.ride.fare.toStringAsFixed(2);
     final transactionNote = 'Raahi Ride Payment - ${widget.ride.id}';
-    // Use driver's UPI ID if available, otherwise use a default merchant UPI
-    final payeeVpa =
-        'raahi@upi'; // This should come from driver/merchant config
-    final payeeName = 'Raahi';
+    // Company merchant UPI (rider pays into the Raahi account).
+    final payeeVpa = AppConfig.companyUpiId;
+    final payeeName = AppConfig.companyName;
 
     // Construct UPI URL
     // Format: upi://pay?pa=<payee_vpa>&pn=<payee_name>&am=<amount>&cu=INR&tn=<note>

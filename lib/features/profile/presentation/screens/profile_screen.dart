@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
@@ -7,6 +8,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/models/user.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/push_notification_service.dart';
@@ -66,8 +68,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
   /// Re-read the OS notification permission and align local prefs / FCM token.
   Future<void> _syncNotificationStatus() async {
-    final status = await Permission.notification.status;
-    final granted = status.isGranted;
+    bool granted = false;
+    try {
+      granted = (await Permission.notification.status).isGranted;
+    } catch (_) {}
+    if (!granted) {
+      // permission_handler can misreport on iOS; trust Firebase as fallback.
+      try {
+        final settings =
+            await FirebaseMessaging.instance.getNotificationSettings();
+        granted = settings.authorizationStatus ==
+                AuthorizationStatus.authorized ||
+            settings.authorizationStatus == AuthorizationStatus.provisional;
+      } catch (_) {}
+    }
 
     if (mounted && granted != _notificationsGranted) {
       setState(() => _notificationsGranted = granted);
@@ -78,7 +92,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
         if (prefs.getBool('pref_push_notifications') != true) {
           await prefs.setBool('pref_push_notifications', true);
           await prefs.setBool('notificationsEnabled', true);
-          pushNotificationService.registerToken().catchError((_) {});
+          pushNotificationService.registerToken().catchError((_) => false);
         }
       } else {
         // User revoked notifications from device settings – unregister FCM
@@ -236,25 +250,48 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          CircleAvatar(
-                            radius: 36,
-                            backgroundColor:
-                                AppColors.secondary.withValues(alpha: 0.22),
-                            backgroundImage: user?.avatarUrl != null &&
-                                    user!.avatarUrl!.isNotEmpty
-                                ? NetworkImage(user.avatarUrl!)
-                                : null,
-                            child: user?.avatarUrl == null ||
-                                    user!.avatarUrl!.isEmpty
-                                ? Text(
-                                    _getUserInitials(user),
-                                    style: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: AppColors.secondary,
+                          Stack(
+                            children: [
+                              CircleAvatar(
+                                radius: 36,
+                                backgroundColor:
+                                    AppColors.secondary.withValues(alpha: 0.22),
+                                backgroundImage: user?.avatarUrl != null &&
+                                        user!.avatarUrl!.isNotEmpty
+                                    ? NetworkImage(user.avatarUrl!)
+                                    : null,
+                                child: user?.avatarUrl == null ||
+                                        user!.avatarUrl!.isEmpty
+                                    ? Text(
+                                        _getUserInitials(user),
+                                        style: const TextStyle(
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.bold,
+                                          color: AppColors.secondary,
+                                        ),
+                                      )
+                                    : null,
+                              ),
+                              // Direct shortcut to Edit Profile
+                              Positioned(
+                                right: 0,
+                                bottom: 0,
+                                child: Material(
+                                  color: const Color(0xFFD4956A),
+                                  shape: const CircleBorder(),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: () =>
+                                        context.push(AppRoutes.editProfile),
+                                    child: const Padding(
+                                      padding: EdgeInsets.all(5),
+                                      child: Icon(Icons.edit_outlined,
+                                          size: 14, color: Colors.white),
                                     ),
-                                  )
-                                : null,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(width: 14),
                           Expanded(
@@ -495,155 +532,27 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     );
   }
 
-  Future<SharedPreferences> _prefs() => SharedPreferences.getInstance();
-
   Future<void> _openSettings(BuildContext context) async {
-    final prefs = await _prefs();
-    bool pushEnabled = prefs.getBool('pref_push_notifications') ?? false;
-    bool promoEnabled = prefs.getBool('pref_promo_notifications') ?? false;
-
-    // Check current notification permission status
-    final notificationStatus = await Permission.notification.status;
-    pushEnabled = pushEnabled && notificationStatus.isGranted;
-
-    // Capture translations before entering StatefulBuilder
-    final trNotificationsEnabled = ref.tr('notifications_enabled');
-    final trNotifications = ref.tr('notifications');
-    final trNotificationsDesc = ref.tr('notifications_desc');
-    final trEnableInSettings = ref.tr('enable_in_settings');
-    final trPromotions = ref.tr('promotions');
-    final trPromotionsDesc = ref.tr('promotions_desc');
-    final trEnableNotificationsFirst = ref.tr('enable_notifications_first');
-    final trServerConfig = ref.tr('server_config');
-    final trServerConfigDesc = ref.tr('server_config_desc');
-
-    // ignore: use_build_context_synchronously
     await showModalBottomSheet(
       context: context,
       showDragHandle: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            // Function to request notification permission
-            Future<void> requestNotificationPermission(bool enable) async {
-              if (enable) {
-                // Brief delay helps Android 13 show the system dialog when requesting from a modal
-                await Future.delayed(const Duration(milliseconds: 300));
-                final status = await Permission.notification.request();
-
-                if (status.isGranted) {
-                  setModalState(() => pushEnabled = true);
-                  await prefs.setBool('pref_push_notifications', true);
-                  await prefs.setBool('notificationsEnabled', true);
-                  // Register FCM token with backend (user may have denied at login, now enabling)
-                  pushNotificationService.registerToken().catchError((_) {});
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(trNotificationsEnabled),
-                        backgroundColor: Color(0xFF4CAF50),
-                      ),
-                    );
-                  }
-                } else if (status.isDenied || status.isPermanentlyDenied) {
-                  setModalState(() => pushEnabled = false);
-                  await prefs.setBool('pref_push_notifications', false);
-                  // Always offer Open Settings when denied - on Android 13, request() often
-                  // returns denied without showing a dialog; Settings is the only path.
-                  if (context.mounted) {
-                    _showOpenSettingsDialog(context, onOpenSettings: () {
-                      Navigator.of(context)
-                          .pop(); // pop sheet so next open reads fresh state
-                      openAppSettings();
-                    });
-                  }
-                }
-              } else {
-                // Just disable in preferences (can't revoke system permission)
-                setModalState(() => pushEnabled = false);
-                await prefs.setBool('pref_push_notifications', false);
-                await prefs.setBool('notificationsEnabled', false);
-                await pushNotificationService.unregisterToken();
-              }
-            }
-
-            return Padding(
-              padding: EdgeInsets.fromLTRB(16, 16, 16,
-                  16 + MediaQuery.of(context).viewPadding.bottom),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SwitchListTile(
-                    title: Text(trNotifications),
-                    subtitle: Text(trNotificationsDesc),
-                    value: pushEnabled,
-                    activeColor: const Color(0xFFD4956A),
-                    onChanged: (value) => requestNotificationPermission(value),
-                  ),
-                  // When permission not granted, offer direct path to settings
-                  if (!pushEnabled) ...[
-                    Padding(
-                      padding:
-                          const EdgeInsets.only(left: 16, right: 16, bottom: 8),
-                      child: TextButton.icon(
-                        onPressed: () => openAppSettings(),
-                        icon: const Icon(Icons.settings,
-                            size: 18, color: Color(0xFFD4956A)),
-                        label: Text(trEnableInSettings,
-                            style: TextStyle(color: Color(0xFFD4956A))),
-                      ),
-                    ),
-                  ],
-                  SwitchListTile(
-                    title: Text(trPromotions),
-                    subtitle: Text(trPromotionsDesc),
-                    value: promoEnabled,
-                    activeColor: const Color(0xFFD4956A),
-                    onChanged: (value) async {
-                      if (value && !pushEnabled) {
-                        // Need to enable notifications first
-                        if (context.mounted) {
-                          AppMessenger.showErrorBanner(context, trEnableNotificationsFirst);
-                        }
-                        return;
-                      }
-                      setModalState(() => promoEnabled = value);
-                      await prefs.setBool('pref_promo_notifications', value);
-                    },
-                  ),
-                  const Divider(),
-                  // Language selection
-                  ListTile(
-                    leading: const Icon(Icons.language),
-                    title: const Text('Language'),
-                    subtitle: Text(_getCurrentLanguageName()),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _showLanguageSelector();
-                    },
-                  ),
-                  const Divider(),
-                  ListTile(
-                    leading: const Icon(Icons.dns_outlined),
-                    title: Text(trServerConfig),
-                    subtitle: Text(trServerConfigDesc),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () {
-                      Navigator.pop(context);
-                      context.push('${AppRoutes.serverConfig}?initial=false');
-                    },
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
+      builder: (sheetContext) => _NotificationSettingsSheet(
+        currentLanguageName: _getCurrentLanguageName(),
+        onLanguageTap: () {
+          Navigator.pop(sheetContext);
+          _showLanguageSelector();
+        },
+        onServerConfigTap: () {
+          Navigator.pop(sheetContext);
+          context.push('${AppRoutes.serverConfig}?initial=false');
+        },
+      ),
     );
+    // Sheet closed — align parent screen state with whatever changed inside.
+    _syncNotificationStatus();
   }
 
   /// Get current language display name
@@ -791,38 +700,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
             ),
           );
         },
-      ),
-    );
-  }
-
-  void _showOpenSettingsDialog(BuildContext context,
-      {VoidCallback? onOpenSettings}) {
-    showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(ref.tr('notifications_disabled')),
-        content: const Text(
-          'Notification permission has been denied. To enable notifications, please go to your device settings and allow notifications for this app.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: Text(ref.tr('cancel')),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              if (onOpenSettings != null) {
-                onOpenSettings();
-              } else {
-                openAppSettings();
-              }
-            },
-            style: PrimaryCtaStyles.elevated(),
-            child: Text(ref.tr('open_settings'),
-                style: TextStyle(color: Colors.white)),
-          ),
-        ],
       ),
     );
   }
@@ -1210,6 +1087,60 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
                   if (type == null) return;
 
+                  // "Other" places get a user-chosen label (e.g. "Gym", "Mom's
+                  // house") instead of the raw place name.
+                  String? customName;
+                  if (type == 'other') {
+                    final nameController = TextEditingController(
+                      text: place['name']?.toString() ?? '',
+                    );
+                    customName = await showDialog<String>(
+                      context: context,
+                      builder: (dialogContext) => AlertDialog(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        title: Text(ref.tr('save_as')),
+                        content: TextField(
+                          controller: nameController,
+                          autofocus: true,
+                          textCapitalization: TextCapitalization.words,
+                          maxLength: 40,
+                          decoration: InputDecoration(
+                            labelText: 'Place name',
+                            hintText: 'e.g. Gym, Mom\'s house',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          onSubmitted: (value) =>
+                              Navigator.pop(dialogContext, value.trim()),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(dialogContext),
+                            child: Text(ref.tr('cancel')),
+                          ),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFD4956A),
+                              foregroundColor: Colors.white,
+                            ),
+                            onPressed: () => Navigator.pop(
+                              dialogContext,
+                              nameController.text.trim(),
+                            ),
+                            child: Text(ref.tr('save')),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (customName == null) return; // cancelled
+                    if (customName.isEmpty) {
+                      customName = place['name']?.toString() ?? 'Other';
+                    }
+                  }
+
                   // Get place details if we don't have coordinates yet
                   double? lat = place['lat'] as double?;
                   double? lng = place['lng'] as double?;
@@ -1226,7 +1157,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                     'id': DateTime.now().millisecondsSinceEpoch.toString(),
                     'name': type == 'home'
                         ? 'Home'
-                        : (type == 'work' ? 'Work' : place['name']),
+                        : (type == 'work'
+                            ? 'Work'
+                            : (customName ?? place['name'])),
                     'address': place['address'] ?? place['name'],
                     'type': type,
                     'lat': lat,
@@ -1577,6 +1510,32 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                 ),
               ),
               const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    context.push(AppRoutes.editProfile);
+                  },
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text(
+                    'Edit Profile',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF1A1A1A),
+                    side: const BorderSide(color: Color(0xFFD4956A)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
               TextButton(
                 onPressed: () {
                   Navigator.pop(ctx);
@@ -1605,8 +1564,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
   }
 
   Future<void> _openHelpOptions(BuildContext context) async {
-    const supportNumber = '+18001234567';
-    const supportEmail = 'support@raahi.app';
+    const supportNumber = AppConfig.supportPhone;
+    const supportEmail = AppConfig.supportEmail;
 
     await showModalBottomSheet(
       context: context,
@@ -1624,7 +1583,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
               ListTile(
                 leading: const Icon(Icons.call),
                 title: Text(ref.tr('call_support_profile')),
-                subtitle: Text(supportNumber),
+                subtitle: const Text(AppConfig.supportPhoneDisplay),
                 onTap: () =>
                     _launchUri(Uri(scheme: 'tel', path: supportNumber), context),
               ),
@@ -1636,7 +1595,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                     Uri(
                       scheme: 'mailto',
                       path: supportEmail,
-                      query: 'subject=Support request',
+                      query: Uri.encodeFull('subject=Support request')
+                          .replaceAll('+', '%2B'),
                     ),
                     context),
               ),
@@ -1655,10 +1615,18 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
   }
 
   Future<void> _launchUri(Uri uri, BuildContext context) async {
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    } else {
-      AppMessenger.showErrorBanner(context, ref.tr('cannot_open_link'));
+    // canLaunchUrl() can false-negative for mailto/tel on some devices, so
+    // attempt the launch directly and only report failure if it throws.
+    try {
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched && context.mounted) {
+        AppMessenger.showErrorBanner(context, ref.tr('cannot_open_link'));
+      }
+    } catch (_) {
+      if (context.mounted) {
+        AppMessenger.showErrorBanner(context, ref.tr('cannot_open_link'));
+      }
     }
   }
 
@@ -1925,6 +1893,300 @@ class _ProfileGroupedTile extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Settings bottom sheet with working notification & promotion toggles.
+///
+/// Industry-standard behaviour:
+/// - Reflects the real OS permission state (checked on open and again when
+///   returning from the system Settings app).
+/// - Toggle ON: shows the system permission prompt when possible; if the user
+///   has permanently denied it, deep-links to the app's notification settings.
+/// - Toggle OFF: stops pushes for this device by unregistering the FCM token.
+/// - Promotions: FCM topic subscription, dependent on notifications being on.
+class _NotificationSettingsSheet extends ConsumerStatefulWidget {
+  const _NotificationSettingsSheet({
+    required this.currentLanguageName,
+    required this.onLanguageTap,
+    required this.onServerConfigTap,
+  });
+
+  final String currentLanguageName;
+  final VoidCallback onLanguageTap;
+  final VoidCallback onServerConfigTap;
+
+  @override
+  ConsumerState<_NotificationSettingsSheet> createState() =>
+      _NotificationSettingsSheetState();
+}
+
+class _NotificationSettingsSheetState
+    extends ConsumerState<_NotificationSettingsSheet>
+    with WidgetsBindingObserver {
+  static const _promoTopic = 'raahi_promotions';
+  static const _accent = Color(0xFFD4956A);
+
+  bool _loading = true;
+  bool _pushEnabled = false;
+  bool _promoEnabled = false;
+  bool _permissionPermanentlyDenied = false;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refreshState();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // User may have changed permission in the system Settings app.
+    if (state == AppLifecycleState.resumed) _refreshState();
+  }
+
+  /// True when the OS allows this app to post notifications.
+  /// permission_handler can misreport on iOS, so Firebase is the fallback.
+  Future<bool> _readSystemPermission() async {
+    try {
+      final status = await Permission.notification.status;
+      if (status.isGranted) return true;
+      _permissionPermanentlyDenied = status.isPermanentlyDenied;
+    } catch (_) {}
+    try {
+      final settings =
+          await FirebaseMessaging.instance.getNotificationSettings();
+      final auth = settings.authorizationStatus;
+      if (auth == AuthorizationStatus.authorized ||
+          auth == AuthorizationStatus.provisional) {
+        _permissionPermanentlyDenied = false;
+        return true;
+      }
+      if (auth == AuthorizationStatus.denied) {
+        // iOS never re-prompts once denied — Settings is the only path.
+        _permissionPermanentlyDenied = true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  Future<void> _refreshState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final granted = await _readSystemPermission();
+    if (!mounted) return;
+    setState(() {
+      _pushEnabled =
+          granted && (prefs.getBool('pref_push_notifications') ?? true);
+      _promoEnabled = _pushEnabled &&
+          (prefs.getBool('pref_promo_notifications') ?? false);
+      _loading = false;
+    });
+  }
+
+  Future<void> _setPushEnabled(bool enable) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      if (!enable) {
+        // Can't revoke the OS permission programmatically — stop pushes for
+        // this device instead.
+        await prefs.setBool('pref_push_notifications', false);
+        await prefs.setBool('notificationsEnabled', false);
+        await pushNotificationService.unregisterToken();
+        try {
+          await FirebaseMessaging.instance.unsubscribeFromTopic(_promoTopic);
+        } catch (_) {}
+        if (!mounted) return;
+        setState(() {
+          _pushEnabled = false;
+          _promoEnabled = false;
+        });
+        return;
+      }
+
+      // Request via Firebase first — shows the iOS prompt when the user
+      // hasn't been asked yet, and is a no-op if already authorized.
+      bool granted = false;
+      try {
+        final settings = await FirebaseMessaging.instance.requestPermission(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+        granted = settings.authorizationStatus ==
+                AuthorizationStatus.authorized ||
+            settings.authorizationStatus == AuthorizationStatus.provisional;
+      } catch (_) {}
+      if (!granted) {
+        // Android 13+ runtime permission prompt.
+        try {
+          final status = await Permission.notification.request();
+          granted = status.isGranted;
+          _permissionPermanentlyDenied = status.isPermanentlyDenied;
+        } catch (_) {}
+      }
+
+      if (granted) {
+        await prefs.setBool('pref_push_notifications', true);
+        await prefs.setBool('notificationsEnabled', true);
+        pushNotificationService.registerToken().catchError((_) => false);
+        final promoPref = prefs.getBool('pref_promo_notifications') ?? false;
+        if (promoPref) {
+          try {
+            await FirebaseMessaging.instance.subscribeToTopic(_promoTopic);
+          } catch (_) {}
+        }
+        if (!mounted) return;
+        setState(() {
+          _pushEnabled = true;
+          _promoEnabled = promoPref;
+          _permissionPermanentlyDenied = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(ref.tr('notifications_enabled')),
+            backgroundColor: const Color(0xFF4CAF50),
+          ),
+        );
+      } else {
+        await prefs.setBool('pref_push_notifications', false);
+        if (!mounted) return;
+        setState(() {
+          _pushEnabled = false;
+          _promoEnabled = false;
+        });
+        _showOpenSettingsDialog();
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _setPromoEnabled(bool enable) async {
+    if (_busy) return;
+    if (enable && !_pushEnabled) {
+      AppMessenger.showErrorBanner(
+          context, ref.tr('enable_notifications_first'));
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _promoEnabled = enable;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('pref_promo_notifications', enable);
+    try {
+      if (enable) {
+        await FirebaseMessaging.instance.subscribeToTopic(_promoTopic);
+      } else {
+        await FirebaseMessaging.instance.unsubscribeFromTopic(_promoTopic);
+      }
+    } catch (_) {
+      // Topic call failed (offline) — preference is saved; FCM retries on
+      // next app start via registerToken.
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  void _showOpenSettingsDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(ref.tr('notifications_disabled')),
+        content: const Text(
+          'Notification permission is turned off for Raahi. Please allow '
+          'notifications for this app in your device settings.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text(ref.tr('cancel')),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              openAppSettings();
+            },
+            style: PrimaryCtaStyles.elevated(),
+            child: Text(ref.tr('open_settings'),
+                style: const TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          16, 16, 16, 16 + MediaQuery.of(context).viewPadding.bottom),
+      child: _loading
+          ? const SizedBox(
+              height: 220,
+              child: Center(
+                child: CircularProgressIndicator(color: _accent),
+              ),
+            )
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SwitchListTile(
+                  title: Text(ref.tr('notifications')),
+                  subtitle: Text(ref.tr('notifications_desc')),
+                  value: _pushEnabled,
+                  activeColor: _accent,
+                  onChanged: _busy ? null : (v) => _setPushEnabled(v),
+                ),
+                if (!_pushEnabled && _permissionPermanentlyDenied)
+                  Padding(
+                    padding:
+                        const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+                    child: TextButton.icon(
+                      onPressed: () => openAppSettings(),
+                      icon:
+                          const Icon(Icons.settings, size: 18, color: _accent),
+                      label: Text(ref.tr('enable_in_settings'),
+                          style: const TextStyle(color: _accent)),
+                    ),
+                  ),
+                SwitchListTile(
+                  title: Text(ref.tr('promotions')),
+                  subtitle: Text(ref.tr('promotions_desc')),
+                  value: _promoEnabled,
+                  activeColor: _accent,
+                  // Visually disabled until notifications are on.
+                  onChanged:
+                      _busy || !_pushEnabled ? null : (v) => _setPromoEnabled(v),
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.language),
+                  title: const Text('Language'),
+                  subtitle: Text(widget.currentLanguageName),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: widget.onLanguageTap,
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.dns_outlined),
+                  title: Text(ref.tr('server_config')),
+                  subtitle: Text(ref.tr('server_config_desc')),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: widget.onServerConfigTap,
+                ),
+              ],
+            ),
     );
   }
 }

@@ -14,6 +14,7 @@ class AppRoutes {
   static const String services = '/services';
   static const String history = '/history';
   static const String profile = '/profile';
+  static const String editProfile = '/profile/edit';
 
   // Ride routes
   static const String rideDetails = '/ride/:rideId';

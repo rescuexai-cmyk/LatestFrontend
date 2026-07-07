@@ -1,0 +1,13 @@
+{
+  "city": "default",
+  "version": 1,
+  "services": [
+    { "id": "cab_mini", "status": "live", "sortOrder": 1, "showOnHome": true, "showInBooking": true },
+    { "id": "auto", "status": "live", "sortOrder": 2, "showOnHome": true, "showInBooking": true },
+    { "id": "bike_taxi", "status": "live", "sortOrder": 3, "showOnHome": true, "showInBooking": true },
+    { "id": "bike_rescue", "status": "live", "sortOrder": 4, "showOnHome": true, "showInBooking": true },
+    { "id": "cab_xl", "status": "live", "sortOrder": 5, "showOnHome": true, "showInBooking": true },
+    { "id": "cab_premium", "status": "live", "sortOrder": 6, "showOnHome": true, "showInBooking": true },
+    { "id": "personal_driver", "status": "live", "sortOrder": 7, "showOnHome": false, "showInBooking": true }
+  ]
+}

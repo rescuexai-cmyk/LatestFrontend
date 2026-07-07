@@ -377,6 +377,28 @@ class RideBookingNotifier extends StateNotifier<RideBookingState> {
     return restoreStashedScheduledRide();
   }
 
+  /// Set the current scheduled ride aside so the user can book another
+  /// (instant) ride before their scheduled pickup. The scheduled ride stays
+  /// booked on the backend and is restored once the booking slot frees up.
+  Future<void> parkScheduledRide() async {
+    if (!state.isScheduledRide) return;
+    await PendingRideStorage.saveParkedScheduled(state);
+    state = const RideBookingState();
+    await PendingRideStorage.clear();
+  }
+
+  /// Bring back a parked scheduled ride when no other booking is active.
+  /// Returns true if a scheduled ride was restored.
+  Future<bool> restoreParkedScheduledRide() async {
+    if (state.hasActiveRideId) return false;
+    final parked = await PendingRideStorage.loadParkedScheduled();
+    if (parked == null) return false;
+    state = parked;
+    await PendingRideStorage.save(parked);
+    await PendingRideStorage.clearParkedScheduled();
+    return true;
+  }
+
   Future<void> _persistIfNeeded() async {
     if (state.hasActiveRideId) {
       await PendingRideStorage.save(state);

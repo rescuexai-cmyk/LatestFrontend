@@ -28,6 +28,10 @@ class _RideStackViewState extends ConsumerState<RideStackView>
   late final AnimationController _promotionController;
   bool _isPromoting = false;
   bool _isProcessing = false;
+  // True only while the accept API call is in flight. Renders a progress card
+  // instead of the (swiped-off-screen) RideCard, so the sheet is never blank;
+  // if accept fails, the RideCard subtree is recreated with its swipe reset.
+  bool _isAcceptingOffer = false;
 
   @override
   void initState() {
@@ -46,13 +50,24 @@ class _RideStackViewState extends ConsumerState<RideStackView>
 
   Future<void> _handleAccept(RideOffer ride) async {
     if (_isPromoting || _isProcessing) return;
-    
-    setState(() => _isProcessing = true);
-    
-    await widget.onAccept(ride);
-    
-    if (mounted) {
-      setState(() => _isProcessing = false);
+
+    setState(() {
+      _isProcessing = true;
+      _isAcceptingOffer = true;
+    });
+
+    try {
+      await widget.onAccept(ride);
+    } finally {
+      // On success the overlay unmounts (activeOffer cleared) before this
+      // runs; on failure this restores the card stack so the driver sees the
+      // offer again instead of a blank sheet.
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+          _isAcceptingOffer = false;
+        });
+      }
     }
   }
 
@@ -77,6 +92,10 @@ class _RideStackViewState extends ConsumerState<RideStackView>
     final driverRidesState = ref.watch(driverRidesProvider);
     final visibleOffers = driverRidesState.visibleOffers;
 
+    if (_isAcceptingOffer) {
+      return _buildAcceptingIndicator();
+    }
+
     if (visibleOffers.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -99,6 +118,49 @@ class _RideStackViewState extends ConsumerState<RideStackView>
           ),
         );
       },
+    );
+  }
+
+  /// Progress card shown while the accept API call is in flight, replacing
+  /// the swiped-away RideCard so the sheet never appears blank.
+  Widget _buildAcceptingIndicator() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: const Color(0xFFD0D0D0)),
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 44,
+              height: 44,
+              child: CircularProgressIndicator(
+                strokeWidth: 3.5,
+                valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF2ECC71)),
+              ),
+            ),
+            SizedBox(height: 20),
+            Text(
+              'Accepting ride…',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF2C3E50),
+              ),
+            ),
+            SizedBox(height: 6),
+            Text(
+              'Confirming with the rider',
+              style: TextStyle(fontSize: 14, color: Color(0xFF7F8C8D)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

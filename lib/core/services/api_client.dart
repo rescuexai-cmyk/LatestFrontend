@@ -470,6 +470,53 @@ class ApiClient {
     return response.data as Map<String, dynamic>;
   }
 
+  /// Get a presigned S3 upload URL for the user's profile photo.
+  /// Backend: POST /api/auth/profile/photo-upload-url
+  /// Returns: { success, data: { uploadUrl, downloadUrl, key } }
+  Future<Map<String, dynamic>> getProfilePhotoUploadUrl({
+    required String fileName,
+    required String contentType,
+  }) async {
+    final response = await _dio.post('/api/auth/profile/photo-upload-url', data: {
+      'fileName': fileName,
+      'contentType': contentType,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Upload raw bytes to a presigned S3 PUT URL.
+  /// Uses a bare Dio instance: the presigned URL is absolute and must NOT
+  /// carry our Authorization header (S3 rejects extra auth).
+  Future<void> uploadToPresignedUrl({
+    required String uploadUrl,
+    required List<int> bytes,
+    required String contentType,
+  }) async {
+    final bareDio = Dio();
+    await bareDio.put(
+      uploadUrl,
+      data: Stream.fromIterable([bytes]),
+      options: Options(
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': bytes.length,
+        },
+        sendTimeout: const Duration(seconds: 60),
+        receiveTimeout: const Duration(seconds: 60),
+      ),
+    );
+  }
+
+  /// Change the account's phone number after Firebase OTP verification of
+  /// the new number.
+  /// Backend: POST /api/auth/change-phone  body: { idToken }
+  Future<Map<String, dynamic>> changePhone(String firebaseIdToken) async {
+    final response = await _dio.post('/api/auth/change-phone', data: {
+      'idToken': firebaseIdToken,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
   /// Delete user account permanently.
   /// Backend: DELETE /api/auth/account
   Future<Map<String, dynamic>> deleteAccount() async {
@@ -914,6 +961,38 @@ class ApiClient {
       debugPrint('getActiveBanners unexpected error: $e');
       return [];
     }
+  }
+
+  /// Rider-facing service catalog with per-city availability.
+  /// Backend: GET /api/pricing/available-services?lat=&lng=&dropLat=&dropLng=&city=
+  ///
+  /// Returns the raw `data` map ({ city, services, actionCards, version }).
+  /// Throws on failure so the provider can fall back to cache / bundled default.
+  Future<Map<String, dynamic>> getAvailableServices({
+    double? lat,
+    double? lng,
+    double? dropLat,
+    double? dropLng,
+    String? city,
+  }) async {
+    final response = await _dio.get(
+      '/api/pricing/available-services',
+      queryParameters: {
+        if (lat != null) 'lat': lat,
+        if (lng != null) 'lng': lng,
+        if (dropLat != null) 'dropLat': dropLat,
+        if (dropLng != null) 'dropLng': dropLng,
+        if (city != null && city.trim().isNotEmpty) 'city': city.trim(),
+      },
+    );
+    final data = response.data;
+    if (data is Map && data['data'] is Map) {
+      return Map<String, dynamic>.from(data['data'] as Map);
+    }
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    throw StateError('Unexpected available-services response shape');
   }
 
   /// Get active promo/coupon codes available to the current user.

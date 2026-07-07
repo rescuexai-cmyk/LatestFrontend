@@ -501,7 +501,8 @@ class _SearchingDriversScreenState extends ConsumerState<SearchingDriversScreen>
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          FigmaSquareBackButton(onPressed: () => context.pop()),
+          // Ride is already booked — back returns to home, not the create flow.
+          FigmaSquareBackButton(onPressed: _goToHomeWithBanner),
           if (isRescue) ...[
             const Spacer(),
             Container(

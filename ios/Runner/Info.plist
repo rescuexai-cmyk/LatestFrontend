@@ -89,6 +89,31 @@
 				</dict>
 			</dict>
 		</dict>
+		<!-- Google Sign-in and Firebase Auth URL Schemes -->
+		<key>CFBundleURLTypes</key>
+		<array>
+			<dict>
+				<key>CFBundleTypeRole</key>
+				<string>Editor</string>
+				<key>CFBundleURLSchemes</key>
+				<array>
+					<string>com.googleusercontent.apps.877632727493-r2hh9qmjid0mffi3a5e049f26bofepv2</string>
+					<string>com.rhi.raahi</string>
+				</array>
+			</dict>
+		</array>
+		<!-- Required so canLaunchUrl() works for support links and UPI apps -->
+		<key>LSApplicationQueriesSchemes</key>
+		<array>
+			<string>mailto</string>
+			<string>tel</string>
+			<string>sms</string>
+			<string>upi</string>
+			<string>gpay</string>
+			<string>phonepe</string>
+			<string>paytmmp</string>
+			<string>credpay</string>
+		</array>
 		<key>CADisableMinimumFrameDurationOnPhone</key>
 		<true/>
 		<key>UIApplicationSupportsIndirectInputEvents</key>

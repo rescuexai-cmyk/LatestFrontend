@@ -79,7 +79,12 @@ class AppConfig {
   
   // Company UPI Details (used for all payments)
   static const String companyUpiId =
-      'MSRAAHICABSERVICESPVTLTD.eazypay@icici';
+      'msraahicabservicesprivatelimited.eazypay@icici';
   static const String companyName = 'Raahi Cab Services';
   static const String companyDisplayName = 'Raahi Cab Services';
+
+  // Support contact (single source of truth for all Help & Support UIs)
+  static const String supportPhone = '+918005039127';
+  static const String supportPhoneDisplay = '+91 80050 39127';
+  static const String supportEmail = 'contactus@raahionrescue.com';
 }

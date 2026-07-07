@@ -1,7 +1,7 @@
 name: ride_hailing_flutter
 description: A ride-hailing mobile app migrated from React Native to Flutter.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+8
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -108,6 +108,7 @@ flutter:
     - assets/map_icons/
     - assets/vehicles/
     - assets/map_styles/
+    - assets/config/
 
   # fonts:
   #   - family: Poppins

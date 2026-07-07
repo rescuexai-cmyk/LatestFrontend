@@ -15,6 +15,8 @@ import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:ionicons/ionicons.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
@@ -27,10 +29,12 @@ import '../../../../core/theme/primary_cta_styles.dart';
 import '../widgets/figma_ride_selection_widgets.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/providers/service_catalog_provider.dart';
 import '../../../../core/models/pricing_v2.dart';
 import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
 import '../../../../core/utils/cab_map_icon.dart';
+import '../../../../core/utils/trip_endpoint_icons.dart';
 import '../../providers/ride_booking_provider.dart';
 import 'confirm_location_on_map_screen.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -271,6 +275,24 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   BitmapDescriptor? _carIcon;
   BitmapDescriptor? _bikeIcon;
   BitmapDescriptor? _autoIcon;
+  // Trip endpoint markers: small dot at pickup, drop pin at destination.
+  BitmapDescriptor? _pickupDotIcon;
+  BitmapDescriptor? _dropPinIcon;
+  // Long-distance route → single "Intercity (coming soon)" product, like Uber.
+  // The backend is the source of truth: POST /api/pricing/calculate returns
+  // { isIntercity: true, intercity: {...} } (threshold/config lives in
+  // platform_config "intercity_config_v1"). The local km check is only an
+  // offline fallback when pricing is unreachable.
+  bool _isIntercity = false;
+  String _intercityName = 'Intercity';
+  String _intercityDescription = 'Outstation trips between cities';
+  String _intercityMessage =
+      'Rides between different cities are not available yet. We are '
+      'working on bringing intercity rides to you soon.';
+  // Route "breathing" highlight while the vehicle sheet is open.
+  Timer? _routePulseTimer;
+  double _routePulsePhase = 0;
+  List<LatLng> _routePoints = const [];
   // Route info
   String _distanceText = '';
   String _durationText = '';
@@ -296,6 +318,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     super.initState();
     _sheetController.addListener(_onSheetSizeChanged);
     _startClusterPulseTicker();
+    _loadTripEndpointIcons();
     // Set selected cab type from parameter or use default
     _selectedCabType = widget.initialServiceType ?? 'bike_rescue';
     // Set scheduled time from parameter
@@ -736,6 +759,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       case 'cab_xl':
         return 'assets/vehicles/cab_xl.png';
       case 'cab_premium':
+      case 'intercity':
         return 'assets/vehicles/cab_premium.png';
       case 'personal_driver':
         return 'assets/vehicles/cab_premium.png';
@@ -755,6 +779,59 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       _clusterIconCache.removeWhere((key, _) => key.startsWith('lg-'));
       _updateDriverMarkers();
     });
+  }
+
+  /// Route polylines: constant dark under-line for continuity plus a lighter
+  /// highlight line whose opacity breathes with [_routePulsePhase] — the
+  /// Uber-like "route is selected" cue while the vehicle sheet is open.
+  Set<Polyline> _buildRoutePolylines() {
+    if (_routePoints.isEmpty) return {};
+    // Smooth 0→1→0 wave from the phase.
+    final wave = (1 - math.cos(_routePulsePhase * 2 * math.pi)) / 2;
+    final highlightAlpha = 0.25 + 0.75 * wave;
+    return {
+      Polyline(
+        polylineId: const PolylineId('route_border'),
+        points: _routePoints,
+        color: const Color(0xFF1A1A1A),
+        width: 4,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+      ),
+      Polyline(
+        polylineId: const PolylineId('route'),
+        points: _routePoints,
+        color: const Color(0xFFD4956A).withValues(alpha: highlightAlpha),
+        width: 2,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+      ),
+    };
+  }
+
+  /// Breathe the route highlight (~2s cycle) while a route is on screen.
+  /// Ticks at 10fps — smooth enough to read as a glow, cheap enough that the
+  /// platform map view doesn't stutter.
+  void _startRoutePulse() {
+    _routePulseTimer?.cancel();
+    if (_routePoints.isEmpty) return;
+    _routePulseTimer =
+        Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (!mounted || _routePoints.isEmpty) {
+        _routePulseTimer?.cancel();
+        return;
+      }
+      _routePulsePhase = (_routePulsePhase + 0.05) % 1.0;
+      setState(() => _polylines = _buildRoutePolylines());
+    });
+  }
+
+  void _stopRoutePulse() {
+    _routePulseTimer?.cancel();
+    _routePulseTimer = null;
+    _routePulsePhase = 0;
   }
   Future<BitmapDescriptor> _getClusterIcon(int count) async {
     final bucket = count < 5 ? 'sm' : (count <= 15 ? 'md' : 'lg');
@@ -1223,8 +1300,29 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     _pickupController.dispose();
     _destinationController.dispose();
     _clusterPulseTimer?.cancel();
+    _routePulseTimer?.cancel();
     super.dispose();
   }
+  /// Uber-style endpoint markers, drawn once at device pixel ratio.
+  Future<void> _loadTripEndpointIcons() async {
+    try {
+      final dpr = WidgetsBinding
+          .instance.platformDispatcher.views.first.devicePixelRatio;
+      final results = await Future.wait([
+        TripEndpointIcons.pickupDot(devicePixelRatio: dpr),
+        TripEndpointIcons.dropPin(devicePixelRatio: dpr),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _pickupDotIcon = results[0];
+        _dropPinIcon = results[1];
+        _markers = _mergeMapMarkers(_buildCoreMarkers(), _driverClusterMarkers);
+      });
+    } catch (e) {
+      debugPrint('Trip endpoint icons failed to load: $e');
+    }
+  }
+
   Set<Marker> _buildCoreMarkers() {
     final stopMarkers = <Marker>{};
     for (int i = 0; i < _stops.length; i++) {
@@ -1249,7 +1347,33 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       );
     }
     final markers = <Marker>{...stopMarkers};
-    // Pickup + destination: no default pins — pills + polyline show route (Figma).
+    // Trip endpoints (Uber-style): small circle at pickup, drop pin at
+    // destination. The floating pills carry the text; these anchor the route
+    // visually to its exact start/end coordinates.
+    if (_pickupLocation != null && _pickupDotIcon != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('trip_pickup'),
+          position: _pickupLocation!,
+          icon: _pickupDotIcon!,
+          anchor: const Offset(0.5, 0.5),
+          zIndex: 3,
+          consumeTapEvents: true,
+        ),
+      );
+    }
+    if (_destinationLocation != null && _dropPinIcon != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('trip_drop'),
+          position: _destinationLocation!,
+          icon: _dropPinIcon!,
+          anchor: const Offset(0.5, 1.0),
+          zIndex: 3,
+          consumeTapEvents: true,
+        ),
+      );
+    }
     return markers;
   }
   void _setupMapElements() {
@@ -1327,8 +1451,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     }
     
     // Clear old route data before calculating new
+    _stopRoutePulse();
     setState(() {
       _polylines = {};
+      _routePoints = const [];
+      _isIntercity = false;
       _isLoadingRoute = true;
       _isLoadingPricing = true;
       _routeLegCount = 0;
@@ -1364,7 +1491,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       debugPrint(
           '✅ Route calculated: ${route.distanceText}, ${route.durationText}');
       debugPrint('   Path points: ${route.points.length}');
-      // Fetch pricing from backend
+      // Fetch pricing from backend. The backend classifies intercity routes
+      // itself (platform_config intercity_config_v1) and answers with either
+      // the vehicle list or an Intercity (coming soon) descriptor.
       await _fetchPricingFromBackend(route.distance, route.duration.toInt());
       if (!mounted) return;
       // Use selected cab type fare for the provider
@@ -1395,31 +1524,15 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         _routeLegCount = route.legCount;
         _firstLegDurationMin =
             math.max(1, (route.firstLegDurationSeconds / 60).ceil());
-        // Uber/Rapido-style polylines: thin, clean lines
-        _polylines = {
-          Polyline(
-            polylineId: const PolylineId('route_border'),
-            points: route.points,
-            color: const Color(0xFF1A1A1A),
-            width: 3,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-          Polyline(
-            polylineId: const PolylineId('route'),
-            points: route.points,
-            color: Colors.black,
-            width: 2,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-        };
+        // Uber/Rapido-style polylines: thin, clean lines. The highlight line
+        // "breathes" while the rider is choosing a vehicle (see pulse ticker).
+        _routePoints = route.points;
+        _polylines = _buildRoutePolylines();
         debugPrint('📍 Polyline created with ${route.points.length} points');
         _markers = _mergeMapMarkers(_buildCoreMarkers(), _driverClusterMarkers);
         _isLoadingRoute = false;
       });
+      _startRoutePulse();
       // Animate camera to fit the entire route with all polyline points
       await Future.delayed(const Duration(milliseconds: 200));
       await _fitRouteBounds(route.bounds);
@@ -1467,6 +1580,24 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       // Backend returns v2 pricing with subsidy, eco pickup, zone health
       if (data['success'] == true) {
         final pricingData = data['data'] as Map<String, dynamic>? ?? {};
+        // Backend-classified intercity route: show the single Intercity
+        // (coming soon) product instead of the city vehicle list.
+        if (pricingData['isIntercity'] == true ||
+            pricingData['is_intercity'] == true) {
+          final info = (pricingData['intercity'] as Map?) ?? const {};
+          final durationMin =
+              (pricingData['durationMin'] ?? pricingData['duration_min'] ?? 0)
+                  .toInt();
+          _applyIntercityState(
+            name: (info['name'] ?? 'Intercity').toString(),
+            description:
+                (info['description'] ?? 'Outstation trips between cities')
+                    .toString(),
+            message: (info['message'] ?? '').toString(),
+            etaText: durationMin > 0 ? '$durationMin min' : '',
+          );
+          return;
+        }
         // Parse v2 pricing features
         RiderSubsidy? subsidy;
         EcoPickup? ecoPickup;
@@ -1731,6 +1862,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       if (res['success'] != true) return null;
       final map = res['data'];
       if (map is! Map || map.isEmpty) return null;
+      // Intercity payload instead of a vehicle-type map — nothing to merge;
+      // the /calculate response already switched the sheet to Intercity.
+      if (map['isIntercity'] == true || map['is_intercity'] == true) {
+        return null;
+      }
       final options = _cabOptionsFromTypeMap(Map<String, dynamic>.from(map));
       return options.isEmpty ? null : options;
     } catch (e) {
@@ -1915,10 +2051,27 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         return 'directions_car';
     }
   }
+  /// Backend catalog visibility filter for fallback/static vehicle lists.
+  /// Fail-open: if the catalog is unavailable or doesn't know the id, keep it.
+  bool _isVehicleVisibleInBooking(String id) {
+    final catalog = ref.read(serviceCatalogValueProvider);
+    if (catalog == null || catalog.isEmpty) return true;
+    final item = catalog.itemFor(id);
+    if (item == null) return true;
+    return item.showInBooking && catalog.isVisible(id);
+  }
+
   /// Fallback pricing calculation if backend is unavailable
   void _loadFallbackPricing(double distance, int duration) {
     final distanceKm = distance / 1000;
     final durationMin = duration / 60;
+    // Offline fallback only: when pricing is unreachable, apply the local
+    // intercity heuristic so long routes still aren't priced as city trips.
+    // When the backend is reachable it is the sole source of truth.
+    if (distanceKm > _intercityThresholdKm) {
+      _applyIntercityState(etaText: '${durationMin.ceil()} min');
+      return;
+    }
     // Fallback cab types
     final fallbackTypes = [
       {
@@ -1998,7 +2151,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         'badge': 'Hourly'
       },
     ];
-    final options = fallbackTypes.map((type) {
+    final options = fallbackTypes
+        .where((type) => _isVehicleVisibleInBooking(type['id'] as String))
+        .map((type) {
       final fare = (type['base_fare'] as num) +
           (distanceKm * (type['per_km_rate'] as num)) +
           (durationMin * (type['per_min_rate'] as num));
@@ -2079,10 +2234,18 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       debugPrint(
           '   NE: (${bounds.northeast.latitude.toStringAsFixed(4)}, ${bounds.northeast.longitude.toStringAsFixed(4)})');
       await Future.delayed(const Duration(milliseconds: 100));
-      // Animate camera with padding for UI elements at top
+      // Uber-style framing: generous edge padding (the GoogleMap widget's own
+      // padding already accounts for the bottom sheet and top pills, so the
+      // route lands centered in the visible window above the sheet).
       await _controller?.animateCamera(
-        CameraUpdate.newLatLngBounds(bounds, 50), // 50 pixel padding from edges
+        CameraUpdate.newLatLngBounds(bounds, 80),
       );
+      // Short trips shouldn't zoom into street level — cap like Uber does so
+      // the rider always has neighborhood context around the route.
+      final zoom = await _controller?.getZoomLevel();
+      if (zoom != null && zoom > 16.0) {
+        await _controller?.animateCamera(CameraUpdate.zoomTo(16.0));
+      }
       debugPrint('✅ Map camera animated to show full route');
       if (mounted) await _refreshMapPillPositions();
     } catch (e) {
@@ -2239,10 +2402,12 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                         _durationText = '';
                         _estimatedFare = 0;
                         _polylines = {};
+                        _routePoints = const [];
                         _routeLegCount = 0;
                         _firstLegDurationMin = 0;
                         _dropPillAnchor = null;
                       });
+                      _stopRoutePulse();
                       ref
                           .read(rideBookingProvider.notifier)
                           .clearDestinationAndRoute();
@@ -2262,9 +2427,11 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                         _durationText = '';
                         _estimatedFare = 0;
                         _polylines = {};
+                        _routePoints = const [];
                         _routeLegCount = 0;
                         _firstLegDurationMin = 0;
                       });
+                      _stopRoutePulse();
                       ref
                           .read(rideBookingProvider.notifier)
                           .clearPickupAndRoutePreview();
@@ -2571,14 +2738,26 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             ListTile(
               leading: const Icon(Icons.phone, color: Color(0xFFD4956A)),
               title: const Text('Call Support'),
-              subtitle: const Text('1800-123-4567'),
-              onTap: () => Navigator.pop(context),
+              subtitle: const Text(AppConfig.supportPhoneDisplay),
+              onTap: () {
+                Navigator.pop(context);
+                launchUrl(
+                  Uri(scheme: 'tel', path: AppConfig.supportPhone),
+                  mode: LaunchMode.externalApplication,
+                );
+              },
             ),
             ListTile(
               leading: const Icon(Icons.email, color: Color(0xFFD4956A)),
               title: const Text('Email Us'),
-              subtitle: const Text('support@raahi.com'),
-              onTap: () => Navigator.pop(context),
+              subtitle: const Text(AppConfig.supportEmail),
+              onTap: () {
+                Navigator.pop(context);
+                launchUrl(
+                  Uri(scheme: 'mailto', path: AppConfig.supportEmail),
+                  mode: LaunchMode.externalApplication,
+                );
+              },
             ),
             ListTile(
               leading: const Icon(Icons.chat, color: Color(0xFFD4956A)),
@@ -3768,7 +3947,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         'color': const Color(0xFF455A64)
       },
     ];
-    return services.map((svc) {
+    return services
+        .where((svc) => _isVehicleVisibleInBooking(svc['id'] as String))
+        .map((svc) {
       final isSelected = _selectedCabType == svc['id'];
       return Padding(
         padding: const EdgeInsets.only(bottom: 10),
@@ -4021,6 +4202,22 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     final isSelected = _selectedCabType == cab.id;
     final fare = _cabFares[cab.id];
 
+    // Intercity product: informational card only — booking not available yet.
+    if (cab.id == 'intercity') {
+      return FigmaVehicleOptionCard(
+        title: cab.name,
+        imageAsset: _getVehicleImage(cab.id),
+        capacity: cab.capacity,
+        eta: cab.eta,
+        priceText: 'Coming soon',
+        isSelected: isSelected,
+        isRescue: false,
+        paymentNote: _intercityDescription,
+        fallbackIcon: cab.icon,
+        onTap: _showIntercityComingSoonDialog,
+      );
+    }
+
     return FigmaVehicleOptionCard(
       title: cab.name,
       imageAsset: _getVehicleImage(cab.id),
@@ -4040,6 +4237,64 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
             );
         _updateDriverMarkers();
       },
+    );
+  }
+
+  /// Switch the sheet to the single Intercity (coming soon) product, using
+  /// backend-provided copy when available.
+  void _applyIntercityState({
+    String name = 'Intercity',
+    String description = 'Outstation trips between cities',
+    String message = '',
+    String etaText = '',
+  }) {
+    if (!mounted) return;
+    setState(() {
+      _isIntercity = true;
+      _intercityName = name.isNotEmpty ? name : 'Intercity';
+      _intercityDescription =
+          description.isNotEmpty ? description : 'Outstation trips between cities';
+      if (message.isNotEmpty) _intercityMessage = message;
+      _cabFares = {};
+      _cabTypes = [
+        CabType(
+          id: 'intercity',
+          name: _intercityName,
+          description: _intercityDescription,
+          iconName: 'airport_shuttle',
+          capacity: 4,
+          eta: etaText.isNotEmpty ? etaText : _durationText,
+          badge: 'Coming soon',
+        ),
+      ];
+      _selectedCabType = 'intercity';
+      _isLoadingPricing = false;
+    });
+  }
+
+  void _showIntercityComingSoonDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(Icons.info_outline, color: figmaRideAccent, size: 28),
+            const SizedBox(width: 12),
+            Expanded(child: Text('$_intercityName is coming soon')),
+          ],
+        ),
+        content: Text(
+          _intercityMessage,
+          style: const TextStyle(fontSize: 15),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
     );
   }
   Widget _buildFareBreakdown() {
@@ -4153,6 +4408,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       ),
     );
   }
+  /// Offline-fallback intercity threshold. The authoritative threshold lives
+  /// in the backend (platform_config "intercity_config_v1"); this is only
+  /// used when pricing is unreachable (_loadFallbackPricing).
   static const double _intercityThresholdKm = 50;
 
   /// After cab + fare selected: persist selection then pin exact locations.
@@ -4229,34 +4487,10 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType,
         orElse: () => _cabTypes.first);
     final fare = _cabFares[_selectedCabType] ?? selectedCab.baseFare;
-    final bookingState = ref.read(rideBookingProvider);
-    final distanceKm = bookingState.distance / 1000;
-
-    if (distanceKm > _intercityThresholdKm) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Row(
-            children: const [
-              Icon(Icons.info_outline, color: figmaRideAccent, size: 28),
-              SizedBox(width: 12),
-              Text('Intercity Coming Soon'),
-            ],
-          ),
-          content: const Text(
-            'Rides between different cities are not available yet. We are working on bringing intercity rides soon. Please book a ride within the same city for now.',
-            style: TextStyle(fontSize: 15),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
+    // Backend classifies intercity; the ride-service also rejects such
+    // bookings server-side, so no raw distance check is needed here.
+    if (_isIntercity || _selectedCabType == 'intercity') {
+      _showIntercityComingSoonDialog();
       return;
     }
 

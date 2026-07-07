@@ -19,9 +19,11 @@ import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/nearby_places_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/providers/service_catalog_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../rescue/providers/rescue_booking_provider.dart';
 import '../../../ride/providers/ride_booking_provider.dart';
+import '../../../ride/providers/ride_provider.dart';
 
 class ServicesScreen extends ConsumerStatefulWidget {
   const ServicesScreen({super.key});
@@ -111,10 +113,30 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   DateTime? _scheduledTime;
   bool get _isScheduled => _scheduledTime != null;
 
+  bool _restoringParkedScheduled = false;
+
   @override
   void initState() {
     super.initState();
     _fetchRealtimeLocationAndPlaces();
+  }
+
+  /// If a scheduled ride was parked aside for an instant booking that has
+  /// since finished (or was abandoned), bring it back so its banner and
+  /// polling resume. Safe to call repeatedly — no-ops while a booking exists.
+  void _maybeRestoreParkedScheduledRide() {
+    if (_restoringParkedScheduled) return;
+    if (ref.read(rideBookingProvider).hasActiveRideId) return;
+    _restoringParkedScheduled = true;
+    Future.microtask(() async {
+      try {
+        await ref
+            .read(rideBookingProvider.notifier)
+            .restoreParkedScheduledRide();
+      } finally {
+        _restoringParkedScheduled = false;
+      }
+    });
   }
 
   /// Fetch current device location (realtime) and set pickup + nearby places
@@ -245,10 +267,65 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     context.push(AppRoutes.rescueLanding);
   }
 
-  void _navigateToFindTrip({String serviceType = 'cab_mini'}) {
-    if (_comingSoonServices.contains(serviceType)) {
+  /// Backend catalog + local fallback: a service is "coming soon" if the static
+  /// set says so, or the backend rollout marks it coming_soon for this city.
+  bool _isServiceComingSoon(String serviceType) {
+    if (_comingSoonServices.contains(serviceType)) return true;
+    final catalog = ref.read(serviceCatalogValueProvider);
+    return catalog?.isComingSoon(serviceType) ?? false;
+  }
+
+  /// Grid services, filtered/ordered by the backend catalog when available.
+  /// Falls back to the full static list if the catalog is missing, so the hub
+  /// never breaks. Unknown ids stay visible (fail-open).
+  List<_Svc> _resolveGridServices() {
+    final catalog = ref.watch(serviceCatalogValueProvider);
+    if (catalog == null || catalog.isEmpty) {
+      return ServicesScreen._services;
+    }
+
+    final visible = ServicesScreen._services
+        .where((s) => catalog.isVisible(s.id))
+        .toList();
+
+    visible.sort((a, b) {
+      final ai = catalog.itemFor(a.id)?.sortOrder ??
+          ServicesScreen._services.indexOf(a);
+      final bi = catalog.itemFor(b.id)?.sortOrder ??
+          ServicesScreen._services.indexOf(b);
+      return ai.compareTo(bi);
+    });
+
+    // Never render an empty grid — fall back to the static list.
+    return visible.isEmpty ? ServicesScreen._services : visible;
+  }
+
+  Future<void> _navigateToFindTrip({String serviceType = 'cab_mini'}) async {
+    if (_isServiceComingSoon(serviceType)) {
       _showComingSoonDialog(serviceType);
       return;
+    }
+
+    // Check if there's an active ride - redirect to appropriate screen
+    final activeRideState = ref.read(activeRideProvider);
+    final bookingState = ref.read(rideBookingProvider);
+
+    if (activeRideState.hasActiveRide) {
+      context.push(AppRoutes.driverAssigned);
+      return;
+    }
+
+    if (bookingState.rideId != null && bookingState.rideId!.isNotEmpty) {
+      if (bookingState.isScheduledRide) {
+        // A ride scheduled for later shouldn't block booking a cab right now.
+        // Park it aside (it stays booked on the backend and is restored once
+        // this booking finishes) and continue into the create-ride flow.
+        await ref.read(rideBookingProvider.notifier).parkScheduledRide();
+        if (!mounted) return;
+      } else {
+        context.push(AppRoutes.searchingDrivers);
+        return;
+      }
     }
 
     String route =
@@ -452,8 +529,13 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Watch so returning here after the instant ride finishes re-runs restore.
+    ref.watch(rideBookingProvider.select((s) => s.hasActiveRideId));
+    _maybeRestoreParkedScheduledRide();
+
     final user = ref.watch(currentUserProvider);
     final langCode = ref.watch(settingsProvider).languageCode;
+    final gridServices = _resolveGridServices();
     // Never show email as greeting — use name, or last 4 digits of phone, or localized User
     final rawName = user?.name;
     final hasRealName = rawName != null && rawName.isNotEmpty && rawName != 'User';
@@ -608,9 +690,9 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                           crossAxisSpacing: 12,
                           childAspectRatio: 0.92,
                         ),
-                        itemCount: ServicesScreen._services.length,
+                        itemCount: gridServices.length,
                         itemBuilder: (ctx, i) {
-                          final s = ServicesScreen._services[i];
+                          final s = gridServices[i];
                           return _ServiceCard(
                             title: ref.tr(s.titleKey),
                             svc: s,

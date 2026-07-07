@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/models/promo.dart';
 import '../../../../core/services/api_client.dart';
@@ -323,6 +324,19 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       final data = error.response?.data;
       if (data is Map) {
         final backendMsg = data['error'] ?? data['message'];
+        // Express-validator failures come as { message: 'Validation failed',
+        // errors: [{ path, msg }, ...] } — surface which field failed.
+        final validationErrors = data['errors'];
+        if (validationErrors is List && validationErrors.isNotEmpty) {
+          final first = validationErrors.first;
+          if (first is Map) {
+            final field = (first['path'] ?? first['param'])?.toString();
+            final msg = first['msg']?.toString();
+            if (field != null && msg != null) {
+              return 'Invalid booking details ($field: $msg). Please try a different payment method.';
+            }
+          }
+        }
         if (backendMsg != null && backendMsg.toString().trim().isNotEmpty) {
           return backendMsg.toString();
         }
@@ -428,8 +442,8 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   Future<void> _launchDirectUpiPayment(Map<String, dynamic> app) async {
     final totalAmount = _payableAmount().toStringAsFixed(2);
     final transactionNote = 'Raahi Ride Payment';
-    final payeeVpa = 'raahi@upi'; // This should come from merchant config
-    final payeeName = 'Raahi';
+    final payeeVpa = AppConfig.companyUpiId;
+    final payeeName = AppConfig.companyName;
     // Construct UPI URL
     final upiUrl = Uri.parse(
         'upi://pay?pa=$payeeVpa&pn=$payeeName&am=$totalAmount&cu=INR&tn=${Uri.encodeComponent(transactionNote)}');

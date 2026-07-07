@@ -72,7 +72,9 @@ class _RescueJourneyScreenState extends ConsumerState<RescueJourneyScreen> {
   }
 
   Future<void> _confirmDelivery() async {
-    await ref.read(rescueBookingProvider.notifier).confirmVehicleDelivery();
+    await ref
+        .read(rescueBookingProvider.notifier)
+        .confirmVehicleDelivery(accepted: true);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

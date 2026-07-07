@@ -21,3 +21,21 @@ final homeMarketingBannersProvider =
       .toList()
     ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
 });
+
+/// Active marketing banners for the in-ride bottom sheet (`placement=RIDES`).
+///
+/// Shown at the bottom of the ride panel while a ride is in progress.
+/// Failures return an empty list so the ride UI never breaks.
+final ridesMarketingBannersProvider =
+    FutureProvider<List<MarketingBanner>>((ref) async {
+  final city = inferPromoCity(ref.watch(rideBookingProvider).pickupAddress);
+  final raw = await ref.read(apiClientProvider).getActiveBanners(
+        placement: 'RIDES',
+        city: city,
+      );
+  return raw
+      .map(MarketingBanner.fromJson)
+      .where((b) => b.imageUrl.trim().isNotEmpty)
+      .toList()
+    ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+});

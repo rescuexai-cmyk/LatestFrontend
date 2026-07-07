@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
+import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/providers/settings_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
@@ -28,6 +30,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
   static const _success = Color(0xFF4CAF50);
   static const _error = Color(0xFFE53935);
   bool _hasFetchedStatus = false;
+  Timer? _statusPollTimer;
+  StreamSubscription? _pushSubscription;
   final ImagePicker _picker = ImagePicker();
   String? _reuploadingDocType;
   final ScrollController _scrollController = ScrollController();
@@ -59,8 +63,48 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
       final state = ref.read(driverOnboardingProvider);
       if (state.canStartRides && mounted) {
         context.go(AppRoutes.driverHome);
+        return;
+      }
+      _startRealtimeStatusUpdates();
+    });
+  }
+
+  /// Keep verification status fresh while the driver waits:
+  /// - Instantly refresh when a DRIVER_ONBOARDING push arrives (admin
+  ///   approved/rejected a document from the dashboard).
+  /// - Poll every 30s as a fallback in case push is unavailable.
+  void _startRealtimeStatusUpdates() {
+    _pushSubscription?.cancel();
+    _pushSubscription =
+        pushNotificationService.notificationStream.listen((message) {
+      final type = message.data['type'] as String?;
+      if (type == NotificationTypes.driverOnboarding) {
+        debugPrint('📋 DriverWelcomeScreen: onboarding push received, refreshing status');
+        _refreshAndMaybeNavigate();
       }
     });
+    _statusPollTimer?.cancel();
+    _statusPollTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _refreshAndMaybeNavigate();
+    });
+  }
+
+  Future<void> _refreshAndMaybeNavigate() async {
+    if (!mounted) return;
+    await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
+    if (!mounted) return;
+    _preFillEditFields();
+    final state = ref.read(driverOnboardingProvider);
+    if (state.canStartRides) {
+      _statusPollTimer?.cancel();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You are verified! You can now start driving.'),
+          backgroundColor: _success,
+        ),
+      );
+      context.go(AppRoutes.driverHome);
+    }
   }
   /// Pre-fill edit fields from the backend status data.
   /// Must be called AFTER fetchOnboardingStatus() completes.
@@ -95,6 +139,8 @@ class _DriverWelcomeScreenState extends ConsumerState<DriverWelcomeScreen> {
   }
   @override
   void dispose() {
+    _statusPollTimer?.cancel();
+    _pushSubscription?.cancel();
     _scrollController.dispose();
     _aadhaarController.dispose();
     _vehicleNumberController.dispose();

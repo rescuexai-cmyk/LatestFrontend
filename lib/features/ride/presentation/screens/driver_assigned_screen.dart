@@ -21,7 +21,10 @@ import '../../../../core/theme/app_colors.dart';
 import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
 import '../../../../core/utils/cab_map_icon.dart';
+import '../../../../core/models/marketing_banner.dart';
+import '../../../../core/providers/marketing_banners_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/widgets/marketing_banner_carousel.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -2365,9 +2368,44 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           _buildActionButtons(),
           const SizedBox(height: 16),
           _buildTripLocations(),
+          // Marketing banners (dashboard placement=RIDES) — always last.
+          _buildRideBanners(),
         ]),
       ),
     );
+  }
+
+  /// RIDES-placement marketing banners at the very bottom of the ride sheet.
+  /// Renders nothing (and takes no space) when there are no active banners.
+  Widget _buildRideBanners() {
+    final bannersAsync = ref.watch(ridesMarketingBannersProvider);
+    return bannersAsync.maybeWhen(
+      data: (banners) {
+        if (banners.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 16),
+          child: MarketingBannerCarousel(
+            banners: banners,
+            borderRadius: const BorderRadius.all(Radius.circular(16)),
+            onBannerTap: _onRideBannerTap,
+          ),
+        );
+      },
+      // No loader/error UI here — the ride panel stays clean.
+      orElse: () => const SizedBox.shrink(),
+    );
+  }
+
+  Future<void> _onRideBannerTap(MarketingBanner banner) async {
+    final link = banner.linkUrl?.trim();
+    if (link == null || link.isEmpty) return;
+    final uri = Uri.tryParse(link);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // Bad or unsupported link — ignore, never disturb an active ride.
+    }
   }
 
   Widget _buildDriverInfoCard() {
