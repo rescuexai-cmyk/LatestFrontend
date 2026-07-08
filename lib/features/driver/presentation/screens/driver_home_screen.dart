@@ -1061,11 +1061,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     }
     if (lower.contains('suspended') ||
         lower.contains('account_suspended') ||
+        lower.contains('terminated') ||
+        lower.contains('account_terminated') ||
         lower.contains('deactivated')) {
+      final isTerminated = lower.contains('terminated');
       return _BackendError(
-        title: 'Account Suspended',
-        body:
-            'Your account has been suspended. Please contact support for assistance.',
+        title: isTerminated ? 'Account Terminated' : 'Account Suspended',
+        body: isTerminated
+            ? 'Your account has been terminated. Please contact support for assistance.'
+            : 'Your account has been suspended. Please contact support for assistance.',
         cta: 'Contact Support',
         allowRetry: false,
         affectsEligibility: true,

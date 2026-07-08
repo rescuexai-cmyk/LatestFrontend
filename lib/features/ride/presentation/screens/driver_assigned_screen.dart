@@ -120,6 +120,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   DateTime? _lastSharedEtaAt;
   double _fareAmount = 0;
   String _driverPhone = '';
+  String? _driverId;
 
   // Locations from provider
   late String _pickupAddress;
@@ -367,11 +368,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
                   : null),
         );
 
-        debugPrint('🚗 Driver info: $driverName, $driverPhone');
+        final driverId = driverData['id']?.toString() ?? driverData['driverId']?.toString();
+
+        debugPrint('🚗 Driver info: $driverName, $driverPhone, ID: $driverId');
 
         if (driverName.isNotEmpty) {
           setState(() {
             _driverName = driverName;
+            _driverId = driverId;
             if (driverPhone.isNotEmpty) {
               _driverPhone = driverPhone;
             }
@@ -620,8 +624,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         statusVehicle?['vehicleModel'],
         statusVehicle?['name'],
       ]);
+      final statusDriverId = d['id']?.toString() ?? d['driverId']?.toString();
       setState(() {
         _driverName = d['name'] as String? ?? _driverName;
+        if (statusDriverId != null && statusDriverId.isNotEmpty) {
+          _driverId = statusDriverId;
+        }
         if (statusVehicleNumber.isNotEmpty) {
           _vehicleNumber = statusVehicleNumber;
         }
@@ -2693,11 +2701,8 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
                   onTap: () {
                     Navigator.pop(context);
                     if (!mounted) return;
-                    ScaffoldMessenger.of(parentContext).showSnackBar(
-                      SnackBar(
-                          content: Text(
-                              trIssueReportedMsg.replaceAll('{issue}', issue))),
-                    );
+                    // Submit report to backend (fire-and-forget with UI feedback)
+                    _submitIssueReport(issue, parentContext, trIssueReportedMsg);
                   },
                 ),
               ),
@@ -2706,6 +2711,35 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
           ),
         );
       },
+    );
+  }
+
+  /// Submits the selected issue to the backend via POST /api/user/support.
+  Future<void> _submitIssueReport(
+      String issue, BuildContext parentCtx, String successMsg) async {
+    try {
+      final description = StringBuffer()
+        ..writeln('Issue: $issue')
+        ..writeln('Ride ID: ${_rideId ?? 'N/A'}')
+        ..writeln('Driver: ${_driverName.isNotEmpty ? _driverName : 'Unknown'}')
+        ..writeln(
+            'Vehicle: ${_vehicleNumber.isNotEmpty ? _vehicleNumber : 'N/A'}')
+        ..writeln('Phase: ${_phase.name}');
+
+      await apiClient.submitUserSupport(
+        issueType: issue,
+        description: description.toString(),
+        priority: issue.contains('safety') || issue.contains('emergency')
+            ? 'high'
+            : 'medium',
+        driverId: _driverId,
+      );
+    } catch (e) {
+      debugPrint('Failed to submit issue report: $e');
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(parentCtx).showSnackBar(
+      SnackBar(content: Text(successMsg.replaceAll('{issue}', issue))),
     );
   }
 

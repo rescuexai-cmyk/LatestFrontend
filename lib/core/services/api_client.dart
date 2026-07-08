@@ -1538,6 +1538,23 @@ class ApiClient {
     return response.data as Map<String, dynamic>;
   }
 
+  /// Submit user (passenger) support / report request.
+  /// Backend: POST /api/user/support  body: { issue_type, description, priority? }
+  Future<Map<String, dynamic>> submitUserSupport({
+    required String issueType,
+    required String description,
+    String priority = 'medium',
+    String? driverId,
+  }) async {
+    final response = await _dio.post('/api/user/support', data: {
+      'issue_type': issueType,
+      'description': description,
+      'priority': priority,
+      if (driverId != null) 'driver_id': driverId,
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
   // ─────────────────────────────────────────────
   // REALTIME  (Backend: realtime-service via gateway /api/realtime/*)
   // ─────────────────────────────────────────────
