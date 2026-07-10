@@ -37,6 +37,10 @@ void main() async {
   try {
     await Firebase.initializeApp();
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    // Bypass reCAPTCHA / Play Integrity redirect during phone OTP (test / debug flow).
+    await FirebaseAuth.instance.setSettings(
+      appVerificationDisabledForTesting: true,
+    );
   } catch (e, st) {
     debugPrint('❌ Firebase init in main failed: $e\n$st');
   }
@@ -223,9 +227,10 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
       try {
         await FirebaseAuth.instance.setSettings(
           forceRecaptchaFlow: false,
-          appVerificationDisabledForTesting: false,
+          appVerificationDisabledForTesting: true,
         );
-        debugPrint('✅ Firebase Auth: forceRecaptchaFlow=false (native preferred)');
+        debugPrint(
+            '✅ Firebase Auth: appVerificationDisabledForTesting=true (skip captcha)');
       } catch (e) {
         debugPrint('⚠️ Firebase Auth setSettings failed (non-fatal): $e');
       }

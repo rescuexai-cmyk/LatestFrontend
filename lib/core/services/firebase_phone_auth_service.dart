@@ -57,9 +57,10 @@ class FirebasePhoneAuthService {
       try {
         await _auth.setSettings(
           forceRecaptchaFlow: false,
-          appVerificationDisabledForTesting: false,
+          appVerificationDisabledForTesting: true,
         );
-        debugPrint('🔥 Firebase: forceRecaptchaFlow=false (prefer Play Integrity)');
+        debugPrint(
+            '🔥 Firebase: appVerificationDisabledForTesting=true (skip captcha)');
       } catch (e) {
         debugPrint('🔥 Firebase: setSettings error (non-fatal): $e');
       }
@@ -394,7 +395,10 @@ class FirebasePhoneAuthService {
 
       if (Platform.isAndroid) {
         try {
-          await _auth.setSettings(forceRecaptchaFlow: false);
+          await _auth.setSettings(
+            forceRecaptchaFlow: false,
+            appVerificationDisabledForTesting: true,
+          );
         } catch (_) {}
       }
 
