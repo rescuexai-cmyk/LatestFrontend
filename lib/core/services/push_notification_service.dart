@@ -1220,14 +1220,17 @@ class PushNotificationService {
     try {
       final platform = Platform.isIOS ? 'ios' : 'android';
 
-      final response = await apiClient.post('/notifications/device', data: {
+      final response = await apiClient.post('/api/notifications/device', data: {
         'fcmToken': _fcmToken,
         'platform': platform,
       });
 
       final responseData = response.data as Map<String, dynamic>?;
       if (responseData?['success'] == true) {
-        debugPrint('✅ FCM token registered with backend');
+        debugPrint(
+          '✅ FCM token registered with backend '
+          '(len=${_fcmToken!.length}, platform=$platform)',
+        );
         return true;
       } else {
         debugPrint(
@@ -1247,13 +1250,21 @@ class PushNotificationService {
     if (!notificationsEnabled) {
       debugPrint(
         '🔕 Skip token registration due to in-app setting '
-        'userId=unknown notificationsEnabled=false pushSkipped=true',
+        'notificationsEnabled=false pushSkipped=true',
       );
       await unregisterToken();
       return false;
     }
+    // Ensure local init ran (permission + token fetch) before registering.
+    if (!_isInitialized) {
+      await initialize();
+    }
     // Try to get token if not available
     _fcmToken ??= await _messaging.getToken();
+    if (_fcmToken == null || _fcmToken!.isEmpty) {
+      debugPrint('⚠️ No FCM token available after initialize/getToken');
+      return false;
+    }
     return _registerTokenWithBackend();
   }
 
@@ -1261,7 +1272,7 @@ class PushNotificationService {
   /// Call this on logout
   Future<void> unregisterToken() async {
     try {
-      await apiClient.delete('/notifications/device');
+      await apiClient.delete('/api/notifications/device');
       debugPrint('✅ FCM token unregistered from backend');
     } catch (e) {
       debugPrint('❌ Error unregistering FCM token: $e');
