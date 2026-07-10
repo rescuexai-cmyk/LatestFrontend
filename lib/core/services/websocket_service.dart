@@ -55,8 +55,14 @@ class RideLocationUpdate {
   });
 
   Map<String, dynamic> toJson() {
+    // Backend socket handler expects: { rideId, lat, lng, heading?, speed? }
+    // Also include nested driverLocation for older clients / local listeners.
     return {
       'rideId': rideId,
+      'lat': latitude,
+      'lng': longitude,
+      'latitude': latitude,
+      'longitude': longitude,
       'driverLocation': {
         'latitude': latitude,
         'longitude': longitude,
@@ -264,7 +270,8 @@ class WebSocketService {
     final events = [
       'new-ride-request', // New ride offer for drivers
       'ride-status-update', // Ride status changed
-      'driver-location-update', // Driver location updated
+      'driver-location-update', // Legacy / global driver location
+      'driver-location', // Ride-room location broadcast from backend
       'driver-assigned', // Driver was assigned to ride
       'ride-cancelled', // Ride was cancelled
       'ride-accepted', // Ride was accepted by a driver
@@ -278,6 +285,7 @@ class WebSocketService {
       'chat-read', // Conversation-level read cursor update
       'typing-start', // Typing start
       'typing-stop', // Typing stop
+      'admin_action', // Admin dashboard actions (penalty/pass/suspend)
     ];
 
     for (final event in events) {
@@ -334,6 +342,7 @@ class WebSocketService {
       case 'ride-status-update':
         return 'ride_status_update';
       case 'driver-location-update':
+      case 'driver-location':
         return 'driver_location_update';
       case 'driver-assigned':
         return 'driver_assigned';
@@ -607,8 +616,12 @@ class WebSocketService {
   }
 
   /// Send driver location update via Socket.io.
+  /// Emits both the canonical backend event (`location-update`) and the legacy
+  /// alias (`driver-location-update`) so riders always receive live movement.
   void updateDriverLocation(RideLocationUpdate update) {
-    _socket?.emit('driver-location-update', update.toJson());
+    final payload = update.toJson();
+    _socket?.emit('location-update', payload);
+    _socket?.emit('driver-location-update', payload);
   }
 
   /// Send ride status update via Socket.io.
@@ -804,8 +817,12 @@ class WebSocketService {
     unsubscribers.add(subscribe('driver_location_update', (message) {
       final msgData = message.data;
       if (msgData is Map) {
-        callback(
-            {'type': 'location_update', ...Map<String, dynamic>.from(msgData)});
+        final map = Map<String, dynamic>.from(msgData);
+        final msgRideId = map['rideId']?.toString();
+        if (msgRideId != null && msgRideId.isNotEmpty && msgRideId != rideId) {
+          return;
+        }
+        callback({'type': 'location_update', ...map});
       }
     }));
 
@@ -865,6 +882,14 @@ class WebSocketService {
       final msgData = message.data;
       callback({
         'type': 'ride_cancelled',
+        ...msgData is Map ? Map<String, dynamic>.from(msgData) : {},
+      });
+    }));
+
+    unsubscribers.add(subscribe('admin_action', (message) {
+      final msgData = message.data;
+      callback({
+        'type': 'admin_action',
         ...msgData is Map ? Map<String, dynamic>.from(msgData) : {},
       });
     }));

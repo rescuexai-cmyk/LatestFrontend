@@ -669,7 +669,7 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
 
         _carAnimationService!.updateLocation(
           newDriverPos,
-          heading: widget.driverHeading,
+          heading: calculatedBearing,
         );
 
         debugPrint(

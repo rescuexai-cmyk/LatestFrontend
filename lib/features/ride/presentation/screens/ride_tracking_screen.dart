@@ -52,7 +52,6 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
   String _statusMessage = 'Finding your driver...';
   SSESubscription? _sseSubscription;
   VoidCallback? _unsubscribeRide;
-  VoidCallback? _unsubscribeSocketLocation;
   bool _showBottomCard = true;
   bool _chatSheetOpen = false;
   bool _autoChatHandled = false;
@@ -76,7 +75,6 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     _initializeChatProvider();
     _loadRideDetails();
     _subscribeToUpdates();
-    _subscribeToSocketLocationUpdates();
     _startLocationPolling();
     _subscribeToNotificationChatOpens();
   }
@@ -100,7 +98,6 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     _sseSubscription?.cancel();
     _chatOpenSubscription?.cancel();
     _unsubscribeRide?.call();
-    _unsubscribeSocketLocation?.call();
     webSocketService.leaveRideTracking(widget.rideId);
     realtimeService.disconnectRide(widget.rideId);
     super.dispose();
@@ -127,22 +124,6 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
         return;
       }
       _messageDriver();
-    });
-  }
-
-  /// Subscribe directly to Socket.io driver location events
-  void _subscribeToSocketLocationUpdates() {
-    _unsubscribeSocketLocation =
-        webSocketService.subscribe('driver_location_update', (message) {
-      final data = message.data;
-      if (data is Map) {
-        final mapData = Map<String, dynamic>.from(data);
-        // Only process if it's for our ride
-        final msgRideId = mapData['rideId'] as String?;
-        if (msgRideId == null || msgRideId == widget.rideId) {
-          _handleLocationUpdate(mapData);
-        }
-      }
     });
   }
 
@@ -392,57 +373,41 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
     // Use shared ETA from driver if provided (ensures consistency)
     final driverEta = _extractSharedEtaMinutes(data);
 
+    double? lat;
+    double? lng;
+    double? heading;
+
     final location = data['driverLocation'] as Map<String, dynamic>?;
     if (location != null) {
-      final lat = (location['latitude'] as num?)?.toDouble();
-      final lng = (location['longitude'] as num?)?.toDouble();
-      final heading = (location['heading'] as num?)?.toDouble() ??
+      lat = (location['latitude'] as num?)?.toDouble() ??
+          (location['lat'] as num?)?.toDouble();
+      lng = (location['longitude'] as num?)?.toDouble() ??
+          (location['lng'] as num?)?.toDouble();
+      heading = (location['heading'] as num?)?.toDouble() ??
           (data['heading'] as num?)?.toDouble();
+    }
 
-      if (lat != null && lng != null) {
-        final nextLoc = LocationCoordinate(lat: lat, lng: lng);
-        setState(() {
-          _driverLocation = nextLoc;
-          _driverHeading = heading;
-          // Use driver's ETA if available for consistency
-          if (driverEta != null && driverEta > 0) {
-            _driverEtaMinutes = driverEta;
-            _lastSharedEtaAt = DateTime.now();
-            debugPrint('📍 [ETA] Using driver ETA: ${driverEta}min');
-          }
-        });
-        // Only calculate locally if driver didn't provide ETA
-        if ((driverEta == null || driverEta <= 0) &&
-            _shouldUseLocalEtaFallback()) {
-          _updateRealtimeEtaFromDriverLocation(nextLoc);
-        }
-      }
-    } else {
-      // Try alternate data structure (direct lat/lng in data)
-      final lat = (data['lat'] as num?)?.toDouble() ??
-          (data['latitude'] as num?)?.toDouble();
-      final lng = (data['lng'] as num?)?.toDouble() ??
-          (data['longitude'] as num?)?.toDouble();
-      final heading = (data['heading'] as num?)?.toDouble();
+    lat ??= (data['lat'] as num?)?.toDouble() ??
+        (data['latitude'] as num?)?.toDouble();
+    lng ??= (data['lng'] as num?)?.toDouble() ??
+        (data['longitude'] as num?)?.toDouble();
+    heading ??= (data['heading'] as num?)?.toDouble();
 
-      if (lat != null && lng != null) {
-        final nextLoc = LocationCoordinate(lat: lat, lng: lng);
-        setState(() {
-          _driverLocation = nextLoc;
-          _driverHeading = heading;
-          // Use driver's ETA if available for consistency
-          if (driverEta != null && driverEta > 0) {
-            _driverEtaMinutes = driverEta;
-            _lastSharedEtaAt = DateTime.now();
-            debugPrint('📍 [ETA] Using driver ETA: ${driverEta}min');
-          }
-        });
-        // Only calculate locally if driver didn't provide ETA
-        if ((driverEta == null || driverEta <= 0) &&
-            _shouldUseLocalEtaFallback()) {
-          _updateRealtimeEtaFromDriverLocation(nextLoc);
-        }
+    if (lat == null || lng == null) return;
+
+    final nextLoc = LocationCoordinate(lat: lat, lng: lng);
+    setState(() {
+      _driverLocation = nextLoc;
+      _driverHeading = heading;
+      if (driverEta != null && driverEta > 0) {
+        _driverEtaMinutes = driverEta;
+        _lastSharedEtaAt = DateTime.now();
+        debugPrint('📍 [ETA] Using driver ETA: ${driverEta}min');
       }
+    });
+    if ((driverEta == null || driverEta <= 0) &&
+        _shouldUseLocalEtaFallback()) {
+      _updateRealtimeEtaFromDriverLocation(nextLoc);
     }
   }
 

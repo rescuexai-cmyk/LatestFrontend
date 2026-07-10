@@ -1796,9 +1796,114 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       if (message.data['type'] == NotificationTypes.driverOnboarding) {
         _fetchVerificationStatus();
       }
+      // Admin cleared penalties / toggled driver pass / account actions.
+      if (message.data['type'] == NotificationTypes.driverAdminAction) {
+        unawaited(_handleAdminActionUpdate(message.data));
+      }
     });
     pushNotificationService.onNotificationAction =
         _handleNotificationRideAction;
+  }
+
+  /// Apply admin dashboard actions (penalty clear, driver pass, suspend, etc.)
+  /// while the driver app is already open — no reopen required.
+  Future<void> _handleAdminActionUpdate(Map<String, dynamic> data) async {
+    if (!mounted) return;
+    final event = (data['event'] ?? '').toString().toUpperCase();
+    final message = (data['message'] ?? data['title'] ?? '').toString().trim();
+    debugPrint('🛠️ Admin action received: $event');
+
+    switch (event) {
+      case 'PENALTIES_CLEARED':
+        _penaltyLikelyAfterEarlyStop = false;
+        ref.read(driverPenaltyProvider.notifier).markPenaltiesClearedLocally();
+        await ref.read(driverPenaltyProvider.notifier).checkPenaltyStatus();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              message.isNotEmpty
+                  ? message
+                  : 'All penalties cleared. You can go online now.',
+            ),
+            backgroundColor: const Color(0xFF2ECC71),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        break;
+
+      case 'PENALTY_ISSUED':
+        await ref.read(driverPenaltyProvider.notifier).checkPenaltyStatus();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              message.isNotEmpty
+                  ? message
+                  : 'A penalty was added to your account.',
+            ),
+            backgroundColor: Colors.orange.shade800,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        break;
+
+      case 'DRIVER_PASS_ENABLED':
+      case 'DRIVER_PASS_DISABLED':
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              message.isNotEmpty
+                  ? message
+                  : (event == 'DRIVER_PASS_ENABLED'
+                      ? 'Driver pass activated. Go-offline penalties are waived.'
+                      : 'Driver pass deactivated.'),
+            ),
+            backgroundColor: event == 'DRIVER_PASS_ENABLED'
+                ? const Color(0xFF2ECC71)
+                : Colors.orange.shade800,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        break;
+
+      case 'ACCOUNT_SUSPENDED':
+      case 'ACCOUNT_TERMINATED':
+        await _fetchVerificationStatus();
+        if (_isOnline) {
+          await _goOffline();
+        }
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              message.isNotEmpty
+                  ? message
+                  : 'Your account status was updated by admin.',
+            ),
+            backgroundColor: Colors.red.shade700,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        break;
+
+      case 'ACCOUNT_REACTIVATED':
+        await _fetchVerificationStatus();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              message.isNotEmpty
+                  ? message
+                  : 'Your account has been reactivated.',
+            ),
+            backgroundColor: const Color(0xFF2ECC71),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        break;
+    }
   }
 
   Future<void> _handleNotificationRideAction(
@@ -2183,6 +2288,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       debugPrint('✅ Real-time connection established');
       // Do not replay historical offers on reconnect.
       ref.read(driverRidesProvider.notifier).cleanupStaleOffers();
+    } else if (type == 'admin_action') {
+      unawaited(_handleAdminActionUpdate(data));
     }
   }
 
@@ -4032,6 +4139,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final fare = (ride['fare'] ?? 0).toDouble();
     final distance = (ride['distance'] ?? 0).toDouble();
     final createdAt = ride['created_at'] ?? ride['completed_at'];
+    final statusInfo = _driverHistoryStatusInfo(ride);
 
     // Format date
     String dateStr = 'Unknown date';
@@ -4055,10 +4163,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       } catch (_) {}
     }
 
-    // Format distance
-    String distanceStr = '${(distance / 1000).toStringAsFixed(1)} km';
-    if (distance < 1000) {
-      distanceStr = '${distance.toInt()} m';
+    // Format distance — backend stores km for most rides
+    String distanceStr;
+    if (distance >= 100) {
+      // Likely meters from an older payload
+      distanceStr = '${(distance / 1000).toStringAsFixed(1)} km';
+    } else {
+      distanceStr = '${distance.toStringAsFixed(distance < 10 ? 1 : 0)} km';
     }
 
     return Container(
@@ -4073,27 +4184,46 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                dateStr,
-                style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              Expanded(
+                child: Text(
+                  dateStr,
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                ),
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFE8F5E9),
+                  color: statusInfo.badgeColor.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  '₹${fare.toStringAsFixed(0)}',
-                  style: const TextStyle(
-                    color: Color(0xFF4CAF50),
+                  statusInfo.label,
+                  style: TextStyle(
+                    color: statusInfo.badgeColor,
                     fontWeight: FontWeight.w600,
-                    fontSize: 14,
+                    fontSize: 11,
                   ),
                 ),
               ),
+              if (!statusInfo.isCancelled) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8F5E9),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '₹${fare.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      color: Color(0xFF4CAF50),
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 12),
@@ -4129,8 +4259,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               Container(
                 width: 8,
                 height: 8,
-                decoration: const BoxDecoration(
-                  color: Color(0xFF4CAF50),
+                decoration: BoxDecoration(
+                  color: statusInfo.isCancelled
+                      ? const Color(0xFFE57373)
+                      : const Color(0xFF4CAF50),
                   shape: BoxShape.circle,
                 ),
               ),
@@ -4149,8 +4281,80 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
               ),
             ],
           ),
+          if (statusInfo.isCancelled && fare > 0) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Fare charged: ₹${fare.toStringAsFixed(0)}',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+            ),
+          ],
         ],
       ),
+    );
+  }
+
+  ({String label, Color badgeColor, bool isCancelled}) _driverHistoryStatusInfo(
+    Map<String, dynamic> ride,
+  ) {
+    final rawStatus = (ride['status'] ?? '').toString().toLowerCase().trim();
+    final cancelledBy =
+        (ride['cancelled_by'] ?? ride['cancelledBy'] ?? '').toString().toLowerCase().trim();
+
+    final isCancelled = rawStatus == 'cancelled' ||
+        rawStatus == 'canceled' ||
+        rawStatus.contains('cancel');
+
+    if (isCancelled) {
+      if (cancelledBy == 'passenger' || cancelledBy == 'rider' || cancelledBy == 'user') {
+        return (
+          label: ref.tr('cancelled_by_rider'),
+          badgeColor: const Color(0xFFE53935),
+          isCancelled: true,
+        );
+      }
+      if (cancelledBy == 'driver') {
+        return (
+          label: 'Cancelled by you',
+          badgeColor: const Color(0xFFE53935),
+          isCancelled: true,
+        );
+      }
+      return (
+        label: ref.tr('ride_cancelled_status'),
+        badgeColor: const Color(0xFFE53935),
+        isCancelled: true,
+      );
+    }
+
+    if (rawStatus == 'ride_completed' || rawStatus == 'completed') {
+      return (
+        label: ref.tr('completed'),
+        badgeColor: const Color(0xFF2E7D32),
+        isCancelled: false,
+      );
+    }
+
+    if (rawStatus.isEmpty) {
+      // Legacy rows without status — only treat as completed if no cancel fields.
+      if (cancelledBy.isNotEmpty || ride['cancelled_at'] != null || ride['cancelledAt'] != null) {
+        return (
+          label: ref.tr('cancelled_by_rider'),
+          badgeColor: const Color(0xFFE53935),
+          isCancelled: true,
+        );
+      }
+      return (
+        label: ref.tr('completed'),
+        badgeColor: const Color(0xFF2E7D32),
+        isCancelled: false,
+      );
+    }
+
+    final pretty = rawStatus.replaceAll('_', ' ');
+    return (
+      label: pretty.isEmpty ? ref.tr('completed') : '${pretty[0].toUpperCase()}${pretty.substring(1)}',
+      badgeColor: const Color(0xFF757575),
+      isCancelled: false,
     );
   }
 

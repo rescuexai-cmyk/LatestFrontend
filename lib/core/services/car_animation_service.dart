@@ -83,12 +83,12 @@ class CarAnimationService {
       _currentSpeed = distance / (durationMs / 1000);
     }
     
-    // Calculate bearing if not provided
-    if (heading != null && heading != 0) {
+    // Prefer provided heading (including 0° / due north). Only fall back to
+    // movement-based bearing when heading is missing and the car actually moved.
+    if (heading != null) {
       _previousBearing = _currentBearing;
       _currentBearing = heading;
     } else if (distance > 2) {
-      // Only calculate bearing if moving more than 2 meters
       _previousBearing = _currentBearing;
       _currentBearing = calculateBearing(_previousPosition!, newPosition);
     }

@@ -68,6 +68,7 @@ class NotificationActions {
 
 class NotificationTypes {
   static const String driverOnboarding = 'DRIVER_ONBOARDING';
+  static const String driverAdminAction = 'DRIVER_ADMIN_ACTION';
   static const String newRide = 'NEW_RIDE';
   static const String chatMessage = 'CHAT_MESSAGE';
 }
@@ -1134,6 +1135,42 @@ class PushNotificationService {
         message.hashCode,
         'You are verified!',
         'Your driver documents are approved. You can start taking rides now.',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'raahi_system',
+            'System',
+            channelDescription: 'System notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: jsonEncode(message.data),
+      );
+      return;
+    }
+    if (type == NotificationTypes.driverAdminAction) {
+      final title = notification?.title ??
+          (event == 'PENALTIES_CLEARED'
+              ? 'Penalties Cleared'
+              : event == 'DRIVER_PASS_ENABLED'
+                  ? 'Driver Pass Activated'
+                  : event == 'DRIVER_PASS_DISABLED'
+                      ? 'Driver Pass Deactivated'
+                      : 'Account Update');
+      final body = notification?.body ??
+          (message.data['message']?.toString() ??
+              'Your driver account was updated by admin.');
+      await _localNotifications.show(
+        message.hashCode,
+        title,
+        body,
         const NotificationDetails(
           android: AndroidNotificationDetails(
             'raahi_system',

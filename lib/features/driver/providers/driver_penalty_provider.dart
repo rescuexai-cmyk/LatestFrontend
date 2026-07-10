@@ -84,6 +84,15 @@ class DriverPenaltyNotifier extends StateNotifier<DriverPenaltyState> {
     }
   }
 
+  /// Instantly clear local penalty state (e.g. after admin clears from dashboard).
+  void markPenaltiesClearedLocally() {
+    state = state.copyWith(
+      isLoading: false,
+      clearError: true,
+      penaltyStatus: PenaltyStatusResponse.none(),
+    );
+  }
+
   Future<bool> clearPenaltyWithWallet() async {
     if (state.isClearing) return false;
     

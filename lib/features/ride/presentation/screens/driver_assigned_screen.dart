@@ -571,6 +571,38 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         _handleRideCancelled(
             {'reason': data['cancelReason'] ?? 'Ride was cancelled'});
       }
+
+      // Backup cab movement when realtime streams miss updates.
+      final driverJson = data['driver'];
+      if (driverJson is Map) {
+        final driverMap = Map<String, dynamic>.from(driverJson);
+        final loc = driverMap['current_location'] ??
+            driverMap['currentLocation'];
+        double? lat;
+        double? lng;
+        if (loc is Map) {
+          lat = (loc['lat'] as num?)?.toDouble() ??
+              (loc['latitude'] as num?)?.toDouble();
+          lng = (loc['lng'] as num?)?.toDouble() ??
+              (loc['longitude'] as num?)?.toDouble();
+        } else {
+          lat = (driverMap['currentLatitude'] as num?)?.toDouble();
+          lng = (driverMap['currentLongitude'] as num?)?.toDouble();
+        }
+        if (lat != null && lng != null) {
+          _handleLocationUpdate({
+            'rideId': _rideId,
+            'lat': lat,
+            'lng': lng,
+            'heading': (driverMap['heading'] as num?)?.toDouble(),
+            'driverLocation': {
+              'latitude': lat,
+              'longitude': lng,
+              'heading': (driverMap['heading'] as num?)?.toDouble(),
+            },
+          });
+        }
+      }
     } catch (_) {}
   }
 
@@ -662,36 +694,52 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   }
 
   void _handleLocationUpdate(Map<String, dynamic> data) {
-    final loc = data['driverLocation'] as Map<String, dynamic>?;
-    if (loc != null && mounted) {
-      final newDriverLocation = LatLng(
-        (loc['latitude'] as num).toDouble(),
-        (loc['longitude'] as num).toDouble(),
-      );
+    if (!mounted) return;
 
+    double? lat;
+    double? lng;
+    double? heading;
+
+    final loc = data['driverLocation'] as Map<String, dynamic>?;
+    if (loc != null) {
+      lat = (loc['latitude'] as num?)?.toDouble() ??
+          (loc['lat'] as num?)?.toDouble();
+      lng = (loc['longitude'] as num?)?.toDouble() ??
+          (loc['lng'] as num?)?.toDouble();
+      heading = (loc['heading'] as num?)?.toDouble() ??
+          (data['heading'] as num?)?.toDouble();
+    }
+
+    lat ??= (data['lat'] as num?)?.toDouble() ??
+        (data['latitude'] as num?)?.toDouble();
+    lng ??= (data['lng'] as num?)?.toDouble() ??
+        (data['longitude'] as num?)?.toDouble();
+    heading ??= (data['heading'] as num?)?.toDouble();
+
+    if (lat == null || lng == null) return;
+
+    final newDriverLocation = LatLng(lat, lng);
+    final moved = _distanceMeters(_driverLocation, newDriverLocation) > 0.5;
+    if (moved) {
       _animateDriverMarkerTo(newDriverLocation);
       _followDriverOnMap(newDriverLocation);
-
-      // Use shared ETA from driver if provided (ensures consistency)
-      final driverEta = _extractSharedEtaMinutes(data);
-      if (driverEta != null && driverEta > 0) {
-        if (_eta != driverEta && mounted) {
-          setState(() {
-            _eta = driverEta;
-            _lastSharedEtaAt = DateTime.now();
-          });
-          debugPrint('📍 [ETA] Using driver ETA: ${driverEta}min');
-        } else {
-          _lastSharedEtaAt = DateTime.now();
-        }
-      } else {
-        // Fallback only when shared ETA is unavailable/stale
-        if (_shouldUseLocalEtaFallback()) {
-          _updateRealtimeEtaEstimate(newDriverLocation);
-        }
-      }
-
       _recalculateRouteIfNeeded(newDriverLocation);
+    }
+
+    // Use shared ETA from driver if provided (ensures consistency)
+    final driverEta = _extractSharedEtaMinutes(data);
+    if (driverEta != null && driverEta > 0) {
+      if (_eta != driverEta && mounted) {
+        setState(() {
+          _eta = driverEta;
+          _lastSharedEtaAt = DateTime.now();
+        });
+        debugPrint('📍 [ETA] Using driver ETA: ${driverEta}min');
+      } else {
+        _lastSharedEtaAt = DateTime.now();
+      }
+    } else if (moved && _shouldUseLocalEtaFallback()) {
+      _updateRealtimeEtaEstimate(newDriverLocation);
     }
   }
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../../core/widgets/upi_app_icon.dart';
+import '../../../../core/services/push_notification_service.dart';
 import '../../providers/driver_penalty_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
@@ -23,6 +25,7 @@ class _DriverPenaltyPaymentScreenState
   bool _paymentInitiated = false;
   final TextEditingController _transactionIdController =
       TextEditingController();
+  StreamSubscription? _adminActionSub;
 
   @override
   void initState() {
@@ -31,10 +34,27 @@ class _DriverPenaltyPaymentScreenState
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(driverPenaltyProvider.notifier).checkPenaltyStatus();
     });
+    _adminActionSub =
+        pushNotificationService.notificationStream.listen((message) {
+      if (message.data['type'] != NotificationTypes.driverAdminAction) return;
+      final event = (message.data['event'] ?? '').toString().toUpperCase();
+      if (event != 'PENALTIES_CLEARED') return;
+      ref.read(driverPenaltyProvider.notifier).markPenaltiesClearedLocally();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('All penalties cleared by admin. You can go online now.'),
+          backgroundColor: Color(0xFF2ECC71),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      context.pop(true);
+    });
   }
 
   @override
   void dispose() {
+    _adminActionSub?.cancel();
     _transactionIdController.dispose();
     super.dispose();
   }

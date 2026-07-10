@@ -136,6 +136,7 @@ class BackendDocumentInfo {
   final String? aiMismatchReason;
   final double? aiConfidence;
   final bool? aiVerified;
+  final bool isVerified;
 
   const BackendDocumentInfo({
     required this.type,
@@ -146,18 +147,24 @@ class BackendDocumentInfo {
     this.aiMismatchReason,
     this.aiConfidence,
     this.aiVerified,
+    this.isVerified = false,
   });
 
-  /// True if this document needs attention (rejected, failed, or flagged by AI)
+  /// True if this document needs attention (rejected, failed, or flagged by AI).
+  /// Admin-verified docs must never be treated as rejected just because an old
+  /// AI mismatch reason is still present on the row.
   bool get isFlaggedOrRejected {
+    if (isVerified || status.toUpperCase() == 'VERIFIED') return false;
     final s = status.toUpperCase();
     return s == 'REJECTED' || s == 'FAILED' || s == 'FLAGGED' ||
         (rejectionReason != null && rejectionReason!.isNotEmpty) ||
         (aiMismatchReason != null && aiMismatchReason!.isNotEmpty);
   }
 
-  /// The display reason: prefers explicit rejection, falls back to AI mismatch
+  /// The display reason: prefers explicit rejection, falls back to AI mismatch.
+  /// Hidden once the document is verified (admin or AI).
   String? get displayReason {
+    if (isVerified || status.toUpperCase() == 'VERIFIED') return null;
     if (rejectionReason != null && rejectionReason!.isNotEmpty) return rejectionReason;
     if (aiMismatchReason != null && aiMismatchReason!.isNotEmpty) return aiMismatchReason;
     return null;
@@ -168,7 +175,7 @@ class BackendDocumentInfo {
     final rawStatus = json['status'] as String? ??
         json['verificationStatus'] as String? ??
         json['verification_status'] as String?;
-    final isVerified = json['is_verified'] as bool? ?? json['isVerified'] as bool?;
+    final isVerified = json['is_verified'] as bool? ?? json['isVerified'] as bool? ?? false;
 
     // Parse rejection reason
     final reason = json['rejectionReason'] as String? ??
@@ -178,13 +185,14 @@ class BackendDocumentInfo {
     final aiReason = json['aiMismatchReason'] as String? ??
         json['ai_mismatch_reason'] as String?;
 
-    final hasIssue = (reason != null && reason.isNotEmpty) ||
-        (aiReason != null && aiReason.isNotEmpty);
+    final hasIssue = !isVerified &&
+        ((reason != null && reason.isNotEmpty) ||
+            (aiReason != null && aiReason.isNotEmpty));
 
-    // Derive canonical status
+    // Derive canonical status — verified wins over leftover AI failure fields.
     String status;
     final upper = rawStatus?.toUpperCase() ?? '';
-    if (upper == 'VERIFIED') {
+    if (isVerified || upper == 'VERIFIED') {
       status = 'VERIFIED';
     } else if (upper == 'REJECTED' || upper == 'FAILED') {
       status = 'REJECTED';
@@ -194,12 +202,8 @@ class BackendDocumentInfo {
       status = rawStatus.toUpperCase();
     } else if (hasIssue) {
       status = 'FLAGGED';
-    } else if (isVerified == true) {
-      status = 'VERIFIED';
-    } else if (isVerified == false) {
-      status = 'PENDING';
     } else {
-      status = 'NOT_UPLOADED';
+      status = 'PENDING';
     }
 
     return BackendDocumentInfo(
@@ -211,11 +215,12 @@ class BackendDocumentInfo {
         if (raw is String && raw.isNotEmpty) return DateTime.tryParse(raw);
         return null;
       })(),
-      rejectionReason: reason,
-      aiMismatchReason: aiReason,
+      rejectionReason: (isVerified || status == 'VERIFIED') ? null : reason,
+      aiMismatchReason: (isVerified || status == 'VERIFIED') ? null : aiReason,
       aiConfidence: (json['aiConfidence'] as num?)?.toDouble() ??
           (json['ai_confidence'] as num?)?.toDouble(),
       aiVerified: json['aiVerified'] as bool? ?? json['ai_verified'] as bool?,
+      isVerified: isVerified || status == 'VERIFIED',
     );
   }
 }
@@ -297,13 +302,18 @@ class BackendOnboardingStatus {
     final flaggedList = docs['flagged'] as List? ?? [];
     for (final item in flaggedList) {
       final type = item is String ? item : (item is Map<String, dynamic> ? item['type'] as String? ?? '' : '');
-      if (type.isNotEmpty && !rejectedRaw.contains(type)) {
+      final itemVerified = item is Map<String, dynamic> &&
+          (item['is_verified'] == true || item['isVerified'] == true);
+      if (type.isNotEmpty && !itemVerified && !verified.contains(type) && !rejectedRaw.contains(type)) {
         rejectedRaw.add(type);
       }
     }
 
-    // Check details for rejected/failed/flagged docs
+    // Check details for rejected/failed/flagged docs (never override verified)
     for (final detail in details) {
+      if (detail.isVerified || detail.status.toUpperCase() == 'VERIFIED' || verified.contains(detail.type)) {
+        continue;
+      }
       if (detail.isFlaggedOrRejected && !rejectedRaw.contains(detail.type)) {
         rejectedRaw.add(detail.type);
         debugPrint('📋 Document ${detail.type} flagged/rejected: '
@@ -317,6 +327,8 @@ class BackendOnboardingStatus {
     for (final item in pendingRaw) {
       if (item is Map<String, dynamic>) {
         final type = item['type'] as String? ?? '';
+        final itemVerified = item['is_verified'] == true || item['isVerified'] == true;
+        if (itemVerified || verified.contains(type)) continue;
         final reason = item['rejection_reason'] as String? ??
             item['rejectionReason'] as String?;
         final aiReason = item['aiMismatchReason'] as String? ??
@@ -327,6 +339,9 @@ class BackendOnboardingStatus {
         }
       }
     }
+
+    // Verified always wins — remove any type that backend lists as verified.
+    rejectedRaw.removeWhere((t) => verified.contains(t));
 
     // Remove rejected docs from pending list
     final cleanPending = pending.where((t) => !rejectedRaw.contains(t)).toList();
@@ -363,8 +378,11 @@ class BackendOnboardingStatus {
     
     final canStartRaw =
         data['can_start_rides'] as bool? ?? data['canStartRides'] as bool?;
-    final derivedCanStart = parsedStatus == OnboardingStatus.completed &&
-        rejectedRaw.isEmpty;
+    final allRequiredVerified = required.isNotEmpty &&
+        required.every((doc) => verified.contains(doc));
+    final derivedCanStart = (parsedStatus == OnboardingStatus.completed || allRequiredVerified) &&
+        rejectedRaw.isEmpty &&
+        (data['is_verified'] as bool? ?? data['isVerified'] as bool? ?? allRequiredVerified);
 
     // Parse personal info from status response
     final kyc = data['kyc'] as Map<String, dynamic>? ?? {};
@@ -423,8 +441,9 @@ class BackendOnboardingStatus {
   
   /// Get document status for a backend type
   DocumentStatus getDocumentStatus(String backendType) {
-    if (rejectedDocuments.contains(backendType)) return DocumentStatus.rejected;
+    // Verified wins over any stale rejected/flagged classification.
     if (verifiedDocuments.contains(backendType)) return DocumentStatus.verified;
+    if (rejectedDocuments.contains(backendType)) return DocumentStatus.rejected;
     if (pendingDocuments.contains(backendType)) return DocumentStatus.inReview;
     if (uploadedDocuments.contains(backendType)) return DocumentStatus.uploaded;
     return DocumentStatus.notUploaded;

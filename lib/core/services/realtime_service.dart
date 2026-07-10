@@ -321,23 +321,25 @@ class RealtimeService {
         _dispatchRideEvent(event, data, onEvent);
       },
       onError: (error) {
-        debugPrint('🚕 Realtime: SSE ride error, using Socket.io: $error');
+        debugPrint('🚕 Realtime: SSE ride error (Socket.io already active): $error');
         onError?.call(error);
-        _connectRideSocketFallback(rideId, onEvent: onEvent);
       },
     );
 
-    // Also join Socket.io room as backup
+    // Always join Socket.io + subscribe in parallel with SSE so cab movement
+    // keeps working when SSE is flaky or Fireball state is cold.
     webSocketService.joinRideTracking(rideId);
+    _connectRideSocketFallback(rideId, onEvent: onEvent);
 
     return _rideSSE;
   }
 
-  /// Fallback: use Socket.io for ride tracking.
+  /// Parallel Socket.io path for ride tracking (status + location + chat).
   void _connectRideSocketFallback(
     String rideId, {
     required void Function(String type, Map<String, dynamic> data) onEvent,
   }) {
+    _rideSocketSub?.call();
     _rideSocketSub = webSocketService.subscribeToRideUpdates(rideId, (data) {
       final type = data['type'] as String? ?? '';
       onEvent(type, data);
@@ -357,15 +359,24 @@ class RealtimeService {
       case 'driver-location':
         // Preserve heading and speed from the event data
         final locationData = data['location'] as Map<String, dynamic>? ?? data;
+        final lat = locationData['lat'] ?? locationData['latitude'];
+        final lng = locationData['lng'] ?? locationData['longitude'];
         onEvent('location_update', {
+          'rideId': data['rideId'] ?? locationData['rideId'],
+          'lat': lat,
+          'lng': lng,
+          'latitude': lat,
+          'longitude': lng,
           'driverLocation': {
-            'latitude': locationData['lat'] ?? locationData['latitude'],
-            'longitude': locationData['lng'] ?? locationData['longitude'],
+            'latitude': lat,
+            'longitude': lng,
             'heading': locationData['heading'] ?? data['heading'],
             'speed': locationData['speed'] ?? data['speed'],
           },
           'heading': locationData['heading'] ?? data['heading'],
           'speed': locationData['speed'] ?? data['speed'],
+          'etaMinutes': data['etaMinutes'] ?? data['eta_minutes'],
+          'distanceMeters': data['distanceMeters'] ?? data['distance_meters'],
         });
         break;
       case 'driver-assigned':
