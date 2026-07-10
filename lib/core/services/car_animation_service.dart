@@ -264,21 +264,18 @@ class CarAnimationService {
     required bool isRideInProgress,
     double speedMps = 0,
   }) {
+    // Rapido-style: clear 3D perspective without extreme gaming tilt
     if (!isRideInProgress) {
-      // Driver arriving - moderate tilt for navigation feel
-      return 35.0;
+      return 38.0;
     }
-    
-    // Ride in progress - more tilt for immersive experience
-    // Higher speed = more tilt (up to 55°)
     if (speedMps > 15) {
-      return 55.0; // Fast driving
+      return 52.0;
     } else if (speedMps > 8) {
-      return 50.0; // Normal driving
+      return 48.0;
     } else if (speedMps > 3) {
-      return 45.0; // Slow driving
+      return 45.0;
     } else {
-      return 40.0; // Stopped or very slow
+      return 42.0;
     }
   }
 }

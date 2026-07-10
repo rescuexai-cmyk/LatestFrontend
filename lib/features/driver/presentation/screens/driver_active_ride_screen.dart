@@ -14,6 +14,8 @@ import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/services/sse_service.dart';
+import '../../../../core/services/app_language_service.dart';
+import '../../../../core/utils/fare_format.dart';
 import '../../../../core/widgets/bottom_insets.dart';
 import '../../../../core/widgets/slide_to_action_button.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -1140,6 +1142,7 @@ class _DriverActiveRideScreenState
         : null;
     final values = <dynamic>[
       rideData['totalFare'],
+      rideData['total_fare'],
       rideData['fare'],
       rideData['estimatedFare'],
       rideData['payableAmount'],
@@ -1151,11 +1154,8 @@ class _DriverActiveRideScreenState
       pricing?['estimatedFare'],
     ];
     for (final value in values) {
-      if (value is num && value.toDouble() > 0) return value.toDouble();
-      if (value is String) {
-        final parsed = double.tryParse(value);
-        if (parsed != null && parsed > 0) return parsed;
-      }
+      final parsed = parseFare(value);
+      if (parsed > 0) return parsed;
     }
     return 0;
   }
@@ -1736,7 +1736,7 @@ class _DriverActiveRideScreenState
                       ),
                     ),
                     Text(
-                      '₹${_earning.toStringAsFixed(0)}',
+                      formatInrFare(_earning),
                       style: const TextStyle(
                         fontSize: 32,
                         fontWeight: FontWeight.w700,
@@ -1986,7 +1986,7 @@ class _DriverActiveRideScreenState
                     style: TextStyle(fontSize: 14),
                   ),
                   Text(
-                    '₹${_earning.toStringAsFixed(2)}',
+                    formatInrFare(_earning),
                     style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w700,
@@ -2596,7 +2596,7 @@ class _DriverActiveRideScreenState
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            _riderName,
+                            AppLanguageService.displayName(ref, _riderName),
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.w600,
@@ -2665,7 +2665,7 @@ class _DriverActiveRideScreenState
                       Container(
                           width: 1, height: 40, color: const Color(0xFFE0E0E0)),
                       _buildInfoItem(Icons.currency_rupee,
-                          _earning.toStringAsFixed(0), 'Fare'),
+                          formatInrFare(_earning, includeSymbol: false), 'Fare'),
                     ],
                   ),
                 ),

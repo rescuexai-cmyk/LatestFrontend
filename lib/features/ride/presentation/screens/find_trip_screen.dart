@@ -21,6 +21,7 @@ import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/places_service.dart';
+import '../../../../core/utils/fare_format.dart';
 import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/schedule_ride_sheet.dart';
@@ -4017,10 +4018,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   }
   String _formatFareDisplay(double? fare, CabType cab) {
     if (fare == null) return '₹${cab.baseFare.toStringAsFixed(0)}+';
-    if (fare == fare.roundToDouble()) {
-      return '₹${fare.toStringAsFixed(0)}';
-    }
-    return '₹${fare.toStringAsFixed(2)}';
+    return formatInrFare(fare);
   }
 
   /// Figma Frame 1707478743 — rescue-mode header shown above the vehicle list.
@@ -4418,13 +4416,14 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       CabType selectedCab, double fare) async {
     if (!mounted) return;
     final isEcoPickup = selectedCab.id == 'eco_pickup';
+    final lockedFare = roundFare(fare);
     ref.read(rideBookingProvider.notifier).setCabType(
           id: selectedCab.id,
           name: selectedCab.name,
-          fare: fare,
+          fare: lockedFare,
           originalFare: _riderSubsidy != null && _riderSubsidy!.isActive
-              ? fare / (1 - _riderSubsidy!.subsidyPct)
-              : fare,
+              ? roundFare(lockedFare / (1 - _riderSubsidy!.subsidyPct))
+              : lockedFare,
           subsidyAmount: _savingsAmount,
           isSubsidyApplied: _riderSubsidy?.isActive ?? false,
           isEcoPickup: isEcoPickup,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -61,6 +62,9 @@ class _ConfirmLocationOnMapScreenState
   bool _isGeocoding = false;
   bool _isFinishing = false;
   Timer? _geocodeDebounce;
+  /// Pickup used when the vehicle-sheet fare was quoted — keep fare locked
+  /// unless the pin moves far from this point.
+  LatLng? _quotedPickup;
 
   @override
   void dispose() {
@@ -123,6 +127,7 @@ class _ConfirmLocationOnMapScreenState
   void _seedFromBooking() {
     final booking = ref.read(rideBookingProvider);
     _draftPosition = booking.pickupLocation;
+    _quotedPickup = booking.pickupLocation;
     _draftAddress = booking.pickupAddress ?? '';
   }
 
@@ -187,22 +192,30 @@ class _ConfirmLocationOnMapScreenState
     );
 
     double fare = booking.fare;
-    try {
-      final pricing = await apiClient.getRidePricing(
-        pickupLat: pickup.latitude,
-        pickupLng: pickup.longitude,
-        dropLat: drop.latitude,
-        dropLng: drop.longitude,
-        vehicleType: booking.selectedCabTypeId,
-        scheduledTime: booking.scheduledTime?.toUtc().toIso8601String(),
-        distanceKm: route.distance / 1000,
-        durationMin: (route.duration / 60).ceil(),
-      );
-      final data = pricing['data'] as Map<String, dynamic>? ?? {};
-      final total = data['totalFare'] ?? data['total_fare'] ?? data['fare'];
-      if (total is num) fare = total.toDouble();
-    } catch (_) {
-      // Keep previously selected vehicle fare if pricing refresh fails.
+    // Keep the vehicle-sheet quote locked unless the pin moved meaningfully.
+    // Re-quoting here was causing sheet vs payment price mismatches.
+    final quotedPickup = _quotedPickup;
+    final pinMovedMeters = quotedPickup == null
+        ? 9999.0
+        : _distanceMeters(quotedPickup, pickup);
+    if (pinMovedMeters > 80) {
+      try {
+        final pricing = await apiClient.getRidePricing(
+          pickupLat: pickup.latitude,
+          pickupLng: pickup.longitude,
+          dropLat: drop.latitude,
+          dropLng: drop.longitude,
+          vehicleType: booking.selectedCabTypeId,
+          scheduledTime: booking.scheduledTime?.toUtc().toIso8601String(),
+          distanceKm: route.distance / 1000,
+          durationMin: (route.duration / 60).ceil(),
+        );
+        final data = pricing['data'] as Map<String, dynamic>? ?? {};
+        final total = data['totalFare'] ?? data['total_fare'] ?? data['fare'];
+        if (total is num) fare = total.toDouble();
+      } catch (_) {
+        // Keep previously selected vehicle fare if pricing refresh fails.
+      }
     }
 
     ref.read(rideBookingProvider.notifier).updateRouteInfo(
@@ -450,5 +463,16 @@ class _ConfirmLocationOnMapScreenState
         ),
       ),
     );
+  }
+
+  double _distanceMeters(LatLng a, LatLng b) {
+    const earthRadius = 6371000.0;
+    final lat1 = a.latitude * math.pi / 180;
+    final lat2 = b.latitude * math.pi / 180;
+    final dLat = (b.latitude - a.latitude) * math.pi / 180;
+    final dLng = (b.longitude - a.longitude) * math.pi / 180;
+    final h = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1) * math.cos(lat2) * math.sin(dLng / 2) * math.sin(dLng / 2);
+    return earthRadius * 2 * math.atan2(math.sqrt(h), math.sqrt(1 - h));
   }
 }

@@ -7,6 +7,7 @@ import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/models/promo.dart';
 import '../../../../core/services/api_client.dart';
+import '../../../../core/utils/fare_format.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../widgets/figma_ride_selection_widgets.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -67,20 +68,22 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
   double _estimateFare() {
     final booking = ref.read(rideBookingProvider);
-    if (booking.fare > 0) return booking.fare;
-    if (booking.originalFare > 0) return booking.originalFare;
+    if (booking.fare > 0) return roundFare(booking.fare);
+    if (booking.originalFare > 0) return roundFare(booking.originalFare);
     return 0;
   }
 
   double _displayOriginalFare() {
     final preview = _promoPreview;
-    if (preview != null && preview.originalFare > 0) return preview.originalFare;
+    if (preview != null && preview.originalFare > 0) {
+      return roundFare(preview.originalFare);
+    }
     return _estimateFare();
   }
 
   double _payableAmount() {
     final preview = _promoPreview;
-    if (preview != null) return preview.payableNow;
+    if (preview != null) return roundFare(preview.payableNow);
     return _estimateFare();
   }
 
@@ -693,7 +696,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
-                  '₹${totalAmount.toStringAsFixed(0)}',
+                  formatInrFare(totalAmount),
                   style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
@@ -2180,7 +2183,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 9, vertical: 4),
                         child: Text(
-                          '₹${totalAmount.toStringAsFixed(2)}',
+                          formatInrFare(totalAmount),
                           style: const TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.w800,
@@ -2323,6 +2326,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         vehicleType: rideBookingState.selectedCabTypeId,
         scheduledTime: rideBookingState.scheduledTime?.toUtc().toIso8601String(),
         promoCode: _appliedVoucher,
+        quotedFare: _payableAmount(),
       );
       debugPrint('API Response: $responseData');
       if (responseData['success'] == true) {

@@ -19,10 +19,15 @@ class AppLanguage {
   });
 }
 
-/// App-only locales (English + Hindi). Fallback for unknown persisted codes is English.
+/// App locales. Dictionary keys fall back to English when a translation is missing.
 const List<AppLanguage> supportedLanguages = [
   AppLanguage(code: 'en', name: 'English (India)', nativeName: 'English', locale: Locale('en', 'IN')),
   AppLanguage(code: 'hi', name: 'Hindi', nativeName: 'हिंदी', locale: Locale('hi', 'IN')),
+  AppLanguage(code: 'ta', name: 'Tamil', nativeName: 'தமிழ்', locale: Locale('ta', 'IN')),
+  AppLanguage(code: 'te', name: 'Telugu', nativeName: 'తెలుగు', locale: Locale('te', 'IN')),
+  AppLanguage(code: 'kn', name: 'Kannada', nativeName: 'ಕನ್ನಡ', locale: Locale('kn', 'IN')),
+  AppLanguage(code: 'ml', name: 'Malayalam', nativeName: 'മലയാളം', locale: Locale('ml', 'IN')),
+  AppLanguage(code: 'bn', name: 'Bengali', nativeName: 'বাংলা', locale: Locale('bn', 'IN')),
 ];
 
 AppLanguage resolveAppLanguage(String code) {
@@ -87,6 +92,11 @@ class AppStrings {
       'dark_mode': 'Dark Mode',
       'dark_mode_desc': 'Switch to dark theme',
       'language_saved': 'Language saved',
+      'language_changed_to': 'Language changed to {name}',
+      'select_your_language': 'Select your language',
+      'language_change_anytime':
+          'You can change your language anytime from settings',
+      'sign_in_details_required': 'Sign-in Details Required',
       'about': 'About',
       'about_desc': 'App info and legal',
       'logout': 'Logout',
@@ -854,6 +864,11 @@ class AppStrings {
       'dark_mode': 'डार्क मोड',
       'dark_mode_desc': 'डार्क थीम पर स्विच करें',
       'language_saved': 'भाषा सहेज ली गई',
+      'language_changed_to': 'भाषा बदलकर {name} कर दी गई',
+      'select_your_language': 'अपनी भाषा चुनें',
+      'language_change_anytime':
+          'आप सेटिंग्स से कभी भी अपनी भाषा बदल सकते हैं',
+      'sign_in_details_required': 'साइन-इन विवरण आवश्यक',
       'about': 'एप के बारे में',
       'about_desc': 'एप जानकारी और कानूनी',
       'logout': 'लॉग आउट',
@@ -1926,33 +1941,51 @@ class SettingsState {
 
 // Settings Notifier
 class SettingsNotifier extends StateNotifier<SettingsState> {
+  Completer<void>? _loadCompleter;
+
   SettingsNotifier() : super(const SettingsState()) {
+    _loadCompleter = Completer<void>();
     _loadSettings();
   }
 
+  /// Wait until SharedPreferences language/theme have been applied.
+  Future<void> ensureLoaded() async {
+    final c = _loadCompleter;
+    if (c != null && !c.isCompleted) await c.future;
+  }
+
   Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final rawCode = prefs.getString('languageCode') ?? 'en';
-    final resolved = resolveAppLanguage(rawCode);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final rawCode = prefs.getString('languageCode') ?? 'en';
+      final resolved = resolveAppLanguage(rawCode);
 
-    debugPrint('🌐 Loading settings from SharedPreferences...');
-    debugPrint('   Language: ${resolved.code} (${resolved.name})');
+      debugPrint('🌐 Loading settings from SharedPreferences...');
+      debugPrint('   Language: ${resolved.code} (${resolved.name})');
 
-    state = SettingsState(
-      isDarkMode: prefs.getBool('isDarkMode') ?? false,
-      languageCode: resolved.code,
-      languageName: resolved.name,
-      notificationsEnabled: prefs.getBool('notificationsEnabled') ?? true,
-      locationSharing: prefs.getBool('locationSharing') ?? true,
-    );
+      state = SettingsState(
+        isDarkMode: prefs.getBool('isDarkMode') ?? false,
+        languageCode: resolved.code,
+        languageName: resolved.name,
+        notificationsEnabled: prefs.getBool('notificationsEnabled') ?? true,
+        locationSharing: prefs.getBool('locationSharing') ?? true,
+      );
 
-    // Keep prefs aligned if we migrated from an unsupported locale code.
-    if (rawCode != resolved.code || prefs.getString('languageName') != resolved.name) {
-      await prefs.setString('languageCode', resolved.code);
-      await prefs.setString('languageName', resolved.name);
+      // Keep prefs aligned if we migrated from an unsupported locale code.
+      if (rawCode != resolved.code ||
+          prefs.getString('languageName') != resolved.name) {
+        await prefs.setString('languageCode', resolved.code);
+        await prefs.setString('languageName', resolved.name);
+      }
+
+      debugPrint('✅ Settings loaded successfully');
+    } catch (e, st) {
+      debugPrint('❌ Failed to load settings: $e\n$st');
+    } finally {
+      if (_loadCompleter != null && !_loadCompleter!.isCompleted) {
+        _loadCompleter!.complete();
+      }
     }
-
-    debugPrint('✅ Settings loaded successfully');
   }
 
   Future<void> setDarkMode(bool value) async {

@@ -720,6 +720,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_transliterator:
+    dependency: "direct main"
+    description:
+      name: flutter_transliterator
+      sha256: "5bd98665da8d4ff95fb7d44c00525fc212cb1ab45d396234db94ea7b9f595c31"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.2"
   flutter_web_plugins:
     dependency: transitive
     description: flutter

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vibration/vibration.dart';
+import '../../../../../core/utils/fare_format.dart';
 import '../../../providers/driver_rides_provider.dart';
 import '../../widgets/driver_trip_route_summary.dart';
 import '../controllers/swipe_controller.dart';
@@ -331,7 +332,7 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Earning',
+                  'Trip fare',
                   style: TextStyle(
                     color: _textDark,
                     fontSize: 18,
@@ -339,7 +340,7 @@ class _RideCardState extends State<RideCard> with SingleTickerProviderStateMixin
                   ),
                 ),
                 Text(
-                  '₹${widget.ride.earning.toStringAsFixed(2)}',
+                  formatInrFare(widget.ride.earning),
                   style: const TextStyle(
                     color: _accentTeal,
                     fontSize: 42,

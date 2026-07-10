@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../core/services/api_client.dart';
 import '../../../core/models/ride_stop.dart';
+import '../../../core/utils/fare_format.dart';
 import 'personal_driver_onboarding_provider.dart';
 
 const Duration _offerFreshnessWindow = Duration(seconds: 90);
@@ -534,14 +535,17 @@ class RideOffer {
       dropAddr = json['dropAddress'].toString();
     }
 
-    // Parse fare - handle both camelCase (socket/SSE) and snake_case (REST) field names
-    final fare = (json['estimatedFare'] ??
-            json['earning'] ??
-            json['fare'] ??
-            json['totalFare'] ??
-            json['total_fare'] ??
-            0)
-        .toDouble();
+    // Always use the rider-facing total fare so driver and rider see the same
+    // ride price. Prefer totalFare over legacy "earning" (which was 80% hack).
+    final fare = parseFare(
+      json['totalFare'] ??
+          json['total_fare'] ??
+          json['estimatedFare'] ??
+          json['estimated_fare'] ??
+          json['fare'] ??
+          json['earning'] ??
+          0,
+    );
 
     final rawNameFallback =
         (json['passengerName'] ?? json['rider_name'])?.toString().trim();

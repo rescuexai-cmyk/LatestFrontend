@@ -26,6 +26,7 @@ import '../../providers/ride_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
+import '../../../../core/utils/fare_format.dart';
 
 class RideTrackingScreen extends ConsumerStatefulWidget {
   final String rideId;
@@ -1227,7 +1228,7 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
                     style: TextStyle(
                         color: AppColors.textSecondary, fontSize: 13)),
                 Text(
-                  '\u20B9${_ride!.fare.round()}',
+                  formatInrFare(_ride!.fare),
                   style: const TextStyle(
                       fontWeight: FontWeight.bold, fontSize: 18),
                 ),
@@ -1583,7 +1584,7 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
                               color: AppColors.textSecondary, fontSize: 14)),
                       const SizedBox(width: 8),
                       Text(
-                        '\u20B9${widget.ride.fare.round()}',
+                        formatInrFare(widget.ride.fare),
                         style: const TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 22,
@@ -1645,7 +1646,7 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
                                 borderRadius: BorderRadius.circular(8),
                               ),
                               child: Text(
-                                '\u20B9${widget.ride.fare.round()}',
+                                formatInrFare(widget.ride.fare),
                                 style: const TextStyle(
                                   fontSize: 14,
                                   fontWeight: FontWeight.bold,

@@ -20,6 +20,7 @@ import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/services/app_language_service.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/widgets/upi_app_icon.dart';
 import '../../../../core/models/pricing_v2.dart';
@@ -198,23 +199,15 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     }
   }
 
-  /// Keep `driver_language` prefs + backend driver language aligned with **app locale**
-  /// (`settings`). App settings reflect the UX language the user picks in Rider or Driver settings;
-  /// we previously synced the other direction and blocked language changes after dialog pop.
+  /// Keep driver language prefs aligned with app locale — hydrate FROM driver
+  /// preference when the app is still on English after onboarding.
   void _ensureDriverPrefsMatchAppLanguage() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
-      final settings = ref.read(settingsProvider);
-      final code = settings.languageCode;
-      final onboarding = ref.read(driverOnboardingProvider);
-
       try {
-        final lang = resolveAppLanguage(code);
-        if (onboarding.selectedLanguage == lang.code) return;
-
-        await ref.read(driverOnboardingProvider.notifier).setLanguage(lang.code);
+        await AppLanguageService.hydrateFromDriverPreference(ref);
       } catch (e, st) {
-        debugPrint('❌ Failed to sync driver_language to app locale: $e\n$st');
+        debugPrint('❌ Failed to hydrate language from driver preference: $e\n$st');
       }
     });
   }
@@ -7509,11 +7502,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                         return;
                       }
 
-                      await settingsNotifier.setLanguage(lang.code, lang.name);
-                      await ref
-                          .read(driverOnboardingProvider.notifier)
-                          .setLanguage(lang.code)
-                          .catchError((_) => false);
+                      await AppLanguageService.apply(ref, lang.code);
 
                       if (dialogContext.mounted) {
                         Navigator.of(dialogContext).pop();
@@ -7531,7 +7520,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                           backgroundColor:
                               Colors.black.withValues(alpha: 0.82),
                           content: Text(
-                            settingsNotifier.tr('language_saved'),
+                            settingsNotifier
+                                .tr('language_changed_to')
+                                .replaceAll('{name}', lang.name),
                             style: const TextStyle(color: Colors.white),
                           ),
                         ),

@@ -10,6 +10,7 @@ import '../../../auth/providers/auth_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../../providers/personal_driver_onboarding_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/services/app_language_service.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 class DriverOnboardingScreen extends ConsumerStatefulWidget {
@@ -238,15 +239,17 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final onboardingState = ref.read(driverOnboardingProvider);
+      final settingsLang = ref.read(settingsProvider).languageCode;
       final fromProvider = onboardingState.selectedLanguage;
-      if (fromProvider != null && fromProvider.isNotEmpty) {
-        final resolved = resolveAppLanguage(fromProvider);
+      final seed = (fromProvider != null && fromProvider.isNotEmpty)
+          ? fromProvider
+          : settingsLang;
+      if (seed.isNotEmpty) {
+        final resolved = resolveAppLanguage(seed);
         setState(() => _selectedLanguage = resolved.code);
         if (resolved.code != fromProvider) {
-          ref
-              .read(driverOnboardingProvider.notifier)
-              .setLanguage(resolved.code)
-              .catchError((_) => false);
+          // Sync app + driver preference without blocking UI.
+          AppLanguageService.apply(ref, resolved.code).then((_) {}, onError: (_) {});
         }
       }
       final authUser = ref.read(currentUserProvider);
@@ -291,6 +294,9 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
       _isSavingEmail = true;
     });
     try {
+      final langCode = _selectedLanguage ?? 'en';
+      await AppLanguageService.apply(ref, langCode);
+
       final notifier = ref.read(driverOnboardingProvider.notifier);
       final success = await notifier.updateEmail(email);
       
@@ -317,9 +323,9 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Sign-in Details Required',
-            style: TextStyle(
+          Text(
+            ref.tr('sign_in_details_required'),
+            style: const TextStyle(
               fontSize: 24,
               fontWeight: FontWeight.bold,
               color: Color(0xFF1A1A1A),
@@ -327,7 +333,7 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
           ),
           const SizedBox(height: 8),
           Text(
-            'Set up your driver account for Raahi services.\nBuy online codes by email, phone or text message.\n\nSample code address on Random country providing for confirmation and receive your secret activation code.',
+            ref.tr('setup_driver_account'),
             style: TextStyle(
               fontSize: 13,
               color: Colors.grey[600],
@@ -337,9 +343,9 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
           const SizedBox(height: 24),
           
           // Email field (editable)
-          const Text(
-            'Email Address',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          Text(
+            ref.tr('email_address'),
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
           ),
           const SizedBox(height: 8),
           TextField(
@@ -350,7 +356,7 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
             autocorrect: false,
             style: const TextStyle(fontSize: 14),
             decoration: InputDecoration(
-              hintText: 'Enter your email address',
+              hintText: ref.tr('enter_email'),
               hintStyle: TextStyle(color: Colors.grey[500]),
               filled: true,
               fillColor: const Color(0xFFEDE6DA),
@@ -395,20 +401,20 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
             Padding(
               padding: const EdgeInsets.only(top: 6, left: 4),
               child: Text(
-                'Please enter a valid email address',
+                ref.tr('enter_valid_email'),
                 style: TextStyle(fontSize: 12, color: Colors.red[600]),
               ),
             ),
           const SizedBox(height: 24),
           
           // Language selection
-          const Text(
-            'Select your language',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          Text(
+            ref.tr('select_your_language'),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 4),
           Text(
-            'You can change your language anytime you want from settings',
+            ref.tr('language_change_anytime'),
             style: TextStyle(fontSize: 12, color: Colors.grey[600]),
           ),
           const SizedBox(height: 16),
@@ -426,7 +432,7 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
               child: DropdownButton<String>(
                 isExpanded: true,
                 value: _selectedLanguage,
-                hint: const Text('English'),
+                hint: Text(supportedLanguages.first.name),
                 items: supportedLanguages
                     .map(
                       (lang) => DropdownMenuItem<String>(
@@ -435,11 +441,10 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
                       ),
                     )
                     .toList(),
-                onChanged: (value) {
+                onChanged: (value) async {
+                  if (value == null) return;
                   setState(() => _selectedLanguage = value);
-                  if (value != null) {
-                    ref.read(driverOnboardingProvider.notifier).setLanguage(value);
-                  }
+                  await AppLanguageService.apply(ref, value);
                 },
               ),
             ),
@@ -471,9 +476,9 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
                         strokeWidth: 2,
                       ),
                     )
-                  : const Text(
-                      'Continue',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  : Text(
+                      ref.tr('continue'),
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
             ),
           ),

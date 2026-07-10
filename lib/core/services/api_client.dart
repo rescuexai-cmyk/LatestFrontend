@@ -570,6 +570,7 @@ class ApiClient {
     String? scheduledTime,
     String? vehicleType,
     String? promoCode,
+    double? quotedFare,
   }) async {
     final data = <String, dynamic>{
       'pickupLat': pickupLat,
@@ -583,6 +584,7 @@ class ApiClient {
       if (vehicleType != null) 'vehicleType': vehicleType,
       if (promoCode != null && promoCode.trim().isNotEmpty)
         'promoCode': promoCode.trim(),
+      if (quotedFare != null && quotedFare > 0) 'quotedFare': quotedFare,
     };
     if (stops != null && stops.isNotEmpty) {
       data['stops'] = stops;

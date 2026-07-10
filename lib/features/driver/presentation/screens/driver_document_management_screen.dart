@@ -4,10 +4,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
+import '../widgets/edit_personal_details_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 /// Screen for managing/updating driver documents.
@@ -61,11 +63,22 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
   }
   void _handleBackNavigation() {
     final onboardingState = ref.read(driverOnboardingProvider);
-    if (widget.returnToProfileOnBack || onboardingState.isRejected) {
+    // Update Documents is often opened via context.go() (no stack to pop).
+    // Always fall back to driver home so the back control never no-ops.
+    if (widget.returnToProfileOnBack ||
+        onboardingState.isRejected ||
+        !context.canPop()) {
       context.go(AppRoutes.driverHome);
-    } else {
-      context.pop();
+      return;
     }
+    context.pop();
+  }
+
+  Future<void> _openEditPersonalDetails() async {
+    await EditPersonalDetailsSheet.show(
+      context,
+      forceShowAllFields: true,
+    );
   }
   Future<void> _reuploadDocument(String backendId, String title) async {
     final action = await showDialog<String>(
@@ -215,9 +228,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
-                    onPressed: () => context.push(
-                      '${AppRoutes.driverOnboarding}?isUpdateMode=true',
-                    ),
+                    onPressed: _openEditPersonalDetails,
                     icon: const Icon(Icons.edit_outlined, size: 18),
                     label: const Text(
                       'Edit Personal Details (Aadhaar, Email)',
@@ -345,13 +356,31 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
       BackendOnboardingStatus status, String backendId) {
     for (final detail in status.documentDetails) {
       if (detail.type == backendId && detail.url != null) {
-        return detail.url;
+        return _resolveDocumentUrl(detail.url);
       }
     }
     return null;
   }
+
+  /// Turn relative `/uploads/...` paths into absolute URLs the image widget can load.
+  String? _resolveDocumentUrl(String? rawUrl) {
+    if (rawUrl == null) return null;
+    final input = rawUrl.trim();
+    if (input.isEmpty) return null;
+
+    final uri = Uri.tryParse(input);
+    if (uri != null && uri.hasScheme) return input;
+
+    final apiUri = Uri.tryParse(AppConfig.apiUrl);
+    if (apiUri == null || !apiUri.hasScheme) return input;
+    final origin = '${apiUri.scheme}://${apiUri.authority}';
+    if (input.startsWith('/')) return '$origin$input';
+    return '$origin/$input';
+  }
+
   bool _isPdfUrl(String url) {
-    return url.toLowerCase().contains('.pdf');
+    final lower = url.toLowerCase();
+    return lower.contains('.pdf') || lower.contains('content-type=application%2Fpdf');
   }
   Future<void> _openDocumentPreview(String previewUrl) async {
     if (_isPdfUrl(previewUrl)) {
@@ -609,8 +638,34 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                         child: Image.network(
                           previewUrl,
                           fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: 120,
+                          loadingBuilder: (context, child, progress) {
+                            if (progress == null) return child;
+                            return const Center(
+                              child: SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            );
+                          },
                           errorBuilder: (_, __, ___) => const Center(
-                            child: Text('Preview unavailable'),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.broken_image_outlined,
+                                    color: _textSecondary, size: 28),
+                                SizedBox(height: 6),
+                                Text(
+                                  'Preview unavailable',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: _textSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),

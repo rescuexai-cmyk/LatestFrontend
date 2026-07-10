@@ -17,7 +17,9 @@ import '../../../../core/services/websocket_service.dart';
 import '../../../../core/services/realtime_service.dart';
 import '../../../../core/services/sse_service.dart';
 import '../../../../core/services/push_notification_service.dart';
+import '../../../../core/services/app_language_service.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/utils/fare_format.dart';
 import '../../../../core/utils/auto_map_icon.dart';
 import '../../../../core/utils/bike_map_icon.dart';
 import '../../../../core/utils/cab_map_icon.dart';
@@ -155,6 +157,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       Duration(milliseconds: 1000);
   static const Duration _routeRecalculationCooldown = Duration(seconds: 4);
   static const double _routeRecalculationMinDriverMoveMeters = 15.0;
+
+  // Rapido-style navigation camera (heading-up + tilt, follows cab)
+  double _driverHeading = 0;
+  bool _cameraFollowEnabled = true;
+  DateTime? _lastCameraFollowAt;
+  DateTime? _ignoreCameraMoveUntil;
+  static const Duration _cameraFollowCooldown = Duration(milliseconds: 180);
 
   // Vehicle-specific marker icon
   BitmapDescriptor? _vehicleIcon;
@@ -401,6 +410,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         : null;
     final values = <dynamic>[
       rideData['totalFare'],
+      rideData['total_fare'],
       rideData['fare'],
       rideData['estimatedFare'],
       rideData['payableAmount'],
@@ -412,11 +422,8 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       pricing?['estimatedFare'],
     ];
     for (final value in values) {
-      if (value is num && value.toDouble() > 0) return value.toDouble();
-      if (value is String) {
-        final parsed = double.tryParse(value);
-        if (parsed != null && parsed > 0) return parsed;
-      }
+      final parsed = parseFare(value);
+      if (parsed > 0) return parsed;
     }
     return 0;
   }
@@ -720,6 +727,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
 
     final newDriverLocation = LatLng(lat, lng);
     final moved = _distanceMeters(_driverLocation, newDriverLocation) > 0.5;
+    if (heading != null) {
+      _driverHeading = heading;
+    } else if (moved) {
+      _driverHeading = _calculateBearing(_driverLocation, newDriverLocation);
+    }
     if (moved) {
       _animateDriverMarkerTo(newDriverLocation);
       _followDriverOnMap(newDriverLocation);
@@ -898,11 +910,14 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     if (!mounted) return;
     setState(() {
       _phase = _RidePhase.rideInProgress;
+      _cameraFollowEnabled = true;
       // Rebuild markers immediately so pickup/passenger pin is removed at ride start.
       _setupMapElements();
     });
     // Recalculate route from live driver position -> destination.
     _calculateRoutes();
+    // Switch to stronger Rapido-style navigation camera for the trip.
+    _followDriverOnMap(_driverLocation, force: true);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(ref.tr('ride_started_heading')),
@@ -1208,6 +1223,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   }
 
   Future<void> _fitMapToBounds() async {
+    // Prefer Rapido-style follow camera once we have a live cab position.
+    if (_cameraFollowEnabled) {
+      _followDriverOnMap(_driverLocation, force: true);
+      return;
+    }
     if (!_mapController.isCompleted) return;
     final controller = await _mapController.future;
     final points = <LatLng>[
@@ -1249,8 +1269,13 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     final stepMs = (durationMs / steps).round();
     int currentStep = 0;
 
-    // Calculate bearing for marker rotation
-    final bearing = _calculateBearing(start, target);
+    // Calculate bearing for marker rotation + navigation camera
+    final bearing = distance > 1
+        ? _calculateBearing(start, target)
+        : _driverHeading;
+    if (distance > 1) {
+      _driverHeading = bearing;
+    }
 
     _driverMarkerAnimationTimer =
         Timer.periodic(Duration(milliseconds: stepMs), (timer) {
@@ -1290,6 +1315,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         _updateRealtimeEtaEstimate(interpolated);
       }
 
+      // Keep camera locked to cab heading while the marker glides.
+      if (currentStep == 1 || currentStep % 4 == 0 || currentStep >= steps) {
+        _followDriverOnMap(interpolated);
+      }
+
       if (currentStep >= steps) {
         timer.cancel();
       }
@@ -1317,43 +1347,64 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     return (bearing + 360) % 360;
   }
 
-  void _followDriverOnMap(LatLng driverLocation) async {
+  void _followDriverOnMap(LatLng driverLocation, {bool force = false}) async {
+    if (!_cameraFollowEnabled && !force) return;
     if (!_mapController.isCompleted) return;
+
+    final now = DateTime.now();
+    if (!force &&
+        _lastCameraFollowAt != null &&
+        now.difference(_lastCameraFollowAt!) < _cameraFollowCooldown) {
+      return;
+    }
+    _lastCameraFollowAt = now;
+
     final controller = await _mapController.future;
 
-    // Calculate distance to target for dynamic zoom
-    final target = _phase == _RidePhase.rideInProgress
+    // Distance to pickup/drop for dynamic zoom (Rapido-style neighborhood view)
+    final routeTarget = _phase == _RidePhase.rideInProgress
         ? _destinationLocation
         : _pickupLocation;
-    final distance = _distanceMeters(driverLocation, target);
+    final distance = _distanceMeters(driverLocation, routeTarget);
 
-    // Dynamic zoom based on distance
     double zoom;
     if (distance < 100) {
-      zoom = 17.5;
+      zoom = 17.8;
     } else if (distance < 300) {
-      zoom = 17.0;
+      zoom = 17.2;
     } else if (distance < 500) {
-      zoom = 16.5;
+      zoom = 16.6;
     } else if (distance < 1000) {
       zoom = 16.0;
     } else if (distance < 2000) {
-      zoom = 15.5;
+      zoom = 15.4;
+    } else if (distance < 5000) {
+      zoom = 14.8;
     } else {
-      zoom = 15.0;
+      zoom = 14.2;
     }
 
-    // Dynamic tilt based on phase
-    final tilt = _phase == _RidePhase.rideInProgress ? 50.0 : 35.0;
+    // Rapido-like 3D perspective: noticeable tilt, stronger once trip starts
+    final tilt = _phase == _RidePhase.rideInProgress ? 48.0 : 38.0;
 
-    // Calculate bearing to target for navigation feel
-    final bearing = _calculateBearing(driverLocation, target);
+    // Camera bearing = cab travel direction (heading-up), not bearing-to-destination.
+    // Prefer live heading; only fall back to route bearing when we have no movement yet.
+    var bearing = _driverHeading;
+    final hasMeaningfulHeading = _driverHeading != 0 ||
+        _distanceMeters(_driverLocation, driverLocation) > 2;
+    if (!hasMeaningfulHeading && distance > 5) {
+      bearing = _calculateBearing(driverLocation, routeTarget);
+    }
 
-    // Project camera ahead of driver in driving direction
-    final metersAhead = _phase == _RidePhase.rideInProgress ? 50.0 : 35.0;
-    final leadTarget = _projectPointAhead(driverLocation, bearing, metersAhead);
+    // Keep cab slightly below center so the road ahead fills the map
+    final metersAhead = _phase == _RidePhase.rideInProgress ? 60.0 : 40.0;
+    final leadTarget =
+        _projectPointAhead(driverLocation, bearing, metersAhead);
 
-    controller.animateCamera(
+    // Ignore gesture callbacks caused by our own camera animation
+    _ignoreCameraMoveUntil = now.add(const Duration(milliseconds: 700));
+
+    await controller.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(
           target: leadTarget,
@@ -1365,12 +1416,27 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
     );
 
     debugPrint(
-      '📷 [Camera] Following driver '
+      '📷 [Camera] Rapido-style follow '
       'phase=$_phase '
       'zoom=${zoom.toStringAsFixed(1)} '
       'tilt=${tilt.toStringAsFixed(0)}° '
       'bearing=${bearing.toStringAsFixed(0)}°',
     );
+  }
+
+  void _onCameraMoveStartedByUser() {
+    final ignoreUntil = _ignoreCameraMoveUntil;
+    if (ignoreUntil != null && DateTime.now().isBefore(ignoreUntil)) {
+      return;
+    }
+    if (_cameraFollowEnabled && mounted) {
+      setState(() => _cameraFollowEnabled = false);
+    }
+  }
+
+  void _recenterNavigationCamera() {
+    setState(() => _cameraFollowEnabled = true);
+    _followDriverOnMap(_driverLocation, force: true);
   }
 
   LatLng _projectPointAhead(
@@ -2038,6 +2104,30 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
       children: [
         // Full-screen map
         _buildFullScreenMap(),
+        // Rapido-style recenter (re-enable heading-up camera follow)
+        Positioned(
+          right: 16,
+          bottom: 220,
+          child: Material(
+            color: Colors.white,
+            elevation: 3,
+            borderRadius: BorderRadius.circular(24),
+            child: InkWell(
+              onTap: _recenterNavigationCamera,
+              borderRadius: BorderRadius.circular(24),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Icon(
+                  _cameraFollowEnabled
+                      ? Icons.navigation
+                      : Icons.my_location,
+                  color: const Color(0xFF1A1A1A),
+                  size: 22,
+                ),
+              ),
+            ),
+          ),
+        ),
         // Bottom info card
         Positioned(
           bottom: 0,
@@ -2133,7 +2223,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            _driverName,
+                            AppLanguageService.displayName(ref, _driverName),
                             style: const TextStyle(fontWeight: FontWeight.w600),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
@@ -2156,7 +2246,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
                     ),
                     const SizedBox(width: 12),
                     Text(
-                      '\u20B9${_fareAmount.round()}',
+                      formatInrFare(_fareAmount),
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, fontSize: 18),
                     ),
@@ -2201,11 +2291,10 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
 
     return GoogleMap(
       initialCameraPosition: CameraPosition(
-        target: LatLng(
-          (_pickupLocation.latitude + _destinationLocation.latitude) / 2,
-          (_pickupLocation.longitude + _destinationLocation.longitude) / 2,
-        ),
-        zoom: 14,
+        target: _driverLocation,
+        zoom: 16.2,
+        tilt: _phase == _RidePhase.rideInProgress ? 48 : 38,
+        bearing: _driverHeading,
       ),
       markers: _markers,
       polylines: _polylines,
@@ -2216,8 +2305,12 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         if (_mapStyle != null) {
           controller.setMapStyle(_mapStyle);
         }
-        _fitMapToBounds();
+        // Start in Rapido-style navigation camera (not flat overview)
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _followDriverOnMap(_driverLocation, force: true);
+        });
       },
+      onCameraMoveStarted: _onCameraMoveStartedByUser,
       myLocationEnabled: false,
       zoomControlsEnabled: false,
       mapToolbarEnabled: false,
@@ -2330,19 +2423,23 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
             borderRadius: BorderRadius.circular(16),
             child: GoogleMap(
               initialCameraPosition: CameraPosition(
-                target: LatLng(
-                  (_pickupLocation.latitude + _driverLocation.latitude) / 2,
-                  (_pickupLocation.longitude + _driverLocation.longitude) / 2,
-                ),
-                zoom: 15,
+                target: _driverLocation,
+                zoom: 16.2,
+                tilt: 38,
+                bearing: _driverHeading,
               ),
               markers: _markers,
               polylines: _polylines,
               onMapCreated: (controller) {
                 if (!_mapController.isCompleted)
                   _mapController.complete(controller);
-                _fitBounds(controller);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) {
+                    _followDriverOnMap(_driverLocation, force: true);
+                  }
+                });
               },
+              onCameraMoveStarted: _onCameraMoveStartedByUser,
               myLocationEnabled: false,
               zoomControlsEnabled: false,
               mapToolbarEnabled: false,
@@ -2351,21 +2448,47 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           Positioned(
             top: 12,
             right: 12,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      boxShadow: [
+                        BoxShadow(
+                            color: Colors.black.withAlpha(25), blurRadius: 4)
+                      ]),
+                  child: Column(children: [
+                    Text('$_eta',
+                        style: const TextStyle(
+                            fontSize: 24, fontWeight: FontWeight.w700)),
+                    const Text('min',
+                        style:
+                            TextStyle(fontSize: 12, color: Color(0xFF888888))),
+                  ]),
+                ),
+                const SizedBox(height: 8),
+                Material(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(color: Colors.black.withAlpha(25), blurRadius: 4)
-                  ]),
-              child: Column(children: [
-                Text('$_eta',
-                    style: const TextStyle(
-                        fontSize: 24, fontWeight: FontWeight.w700)),
-                const Text('min',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF888888))),
-              ]),
+                  elevation: 2,
+                  child: InkWell(
+                    onTap: _recenterNavigationCamera,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Icon(
+                        _cameraFollowEnabled
+                            ? Icons.navigation
+                            : Icons.my_location,
+                        color: const Color(0xFF1A1A1A),
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           Positioned(
@@ -3146,7 +3269,7 @@ class _RatingSheetState extends State<_RatingSheet>
                   const Text('Total Fare:',
                       style: TextStyle(color: AppColors.textSecondary)),
                   const SizedBox(width: 8),
-                  Text('\u20B9${widget.fare.round()}',
+                  Text(formatInrFare(widget.fare),
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, fontSize: 22)),
                 ]),

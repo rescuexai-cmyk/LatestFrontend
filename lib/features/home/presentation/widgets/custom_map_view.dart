@@ -126,9 +126,9 @@ class _CustomMapViewState extends State<CustomMapView> with TickerProviderStateM
   int _driverEtaMinutes = 0;
   RidePhase? _lastRidePhase;
   
-  // Production-grade camera state
-  double _currentCameraZoom = 15.5;
-  double _currentCameraTilt = 35.0;
+  // Production-grade camera state (Rapido-style navigation defaults)
+  double _currentCameraZoom = 16.2;
+  double _currentCameraTilt = 38.0;
   double _currentCameraBearing = 0;
   bool _isFirstCameraUpdate = true;
   DateTime? _lastCameraTiltUpdate;

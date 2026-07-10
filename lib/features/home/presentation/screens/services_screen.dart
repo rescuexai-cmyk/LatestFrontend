@@ -19,6 +19,7 @@ import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/nearby_places_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/services/app_language_service.dart';
 import '../../../../core/providers/service_catalog_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../rescue/providers/rescue_booking_provider.dart';
@@ -541,7 +542,8 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     final hasRealName = rawName != null && rawName.isNotEmpty && rawName != 'User';
     String displayName;
     if (hasRealName) {
-      displayName = rawName!;
+      displayName =
+          AppLanguageService.transliterateName(rawName!, langCode);
     } else if (user?.phone != null && user!.phone!.isNotEmpty) {
       final digits = user.phone!.replaceAll(RegExp(r'[^\d]'), '');
       displayName = digits.length >= 4

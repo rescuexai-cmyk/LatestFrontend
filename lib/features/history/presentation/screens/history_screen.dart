@@ -237,7 +237,9 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
 
   @override
   Widget build(BuildContext context) {
-    final tr = ref.read(settingsProvider.notifier).tr;
+    // Watch language so titles/tabs rebuild when locale changes.
+    ref.watch(settingsProvider.select((s) => s.languageCode));
+    String tr(String key) => ref.tr(key);
 
     return PopScope(
       canPop: false,

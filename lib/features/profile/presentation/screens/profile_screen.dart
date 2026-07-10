@@ -20,6 +20,7 @@ import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../../core/providers/saved_locations_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
+import '../../../../core/services/app_language_service.dart';
 import '../../../auth/providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
@@ -667,29 +668,28 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                           ? const Icon(Icons.check_circle, color: Color(0xFFD4956A))
                           : null,
                       onTap: () async {
-                        // Close sheet first
                         Navigator.pop(sheetContext);
-                        
-                        // Always allow language change (removed the currentCode check that was blocking)
-                        debugPrint('🌐 Language change requested: ${lang.code} (was: $currentCode)');
-                        
-                        // Small delay to let sheet animation finish
+
+                        debugPrint(
+                            '🌐 Language change requested: ${lang.code} (was: $currentCode)');
+
                         await Future.delayed(const Duration(milliseconds: 200));
-                        
-                        await ref
-                            .read(settingsProvider.notifier)
-                            .setLanguage(lang.code, lang.name);
-                        
+
+                        await AppLanguageService.apply(ref, lang.code);
+
                         debugPrint('✅ Language changed to: ${lang.code}');
-                        
+
                         if (mounted) {
+                          final msg = ref
+                              .tr('language_changed_to')
+                              .replaceAll('{name}', lang.name);
                           ScaffoldMessenger.of(this.context).showSnackBar(
                             SnackBar(
-                              content: Text('Language changed to ${lang.name}'),
+                              content: Text(msg),
                               backgroundColor: const Color(0xFF4CAF50),
                             ),
                           );
-                          setState(() {}); // Refresh UI
+                          setState(() {});
                         }
                       },
                     );
