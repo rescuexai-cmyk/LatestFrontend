@@ -63,7 +63,16 @@ class Driver extends Equatable {
       rating: (json['rating'] as num?)?.toDouble() ?? 4.0,
       totalRides: json['total_rides'] as int? ?? 0,
       status: _parseStatus(json['status'] as String?),
-      avatar: json['avatar'] as String?,
+      avatar: json['avatar'] as String? ??
+          json['profileImage'] as String? ??
+          json['profile_image'] as String? ??
+          json['photoUrl'] as String? ??
+          (json['user'] is Map<String, dynamic>
+              ? ((json['user'] as Map<String, dynamic>)['profileImage']
+                      as String? ??
+                  (json['user'] as Map<String, dynamic>)['profile_image']
+                      as String?)
+              : null),
       heading: (json['heading'] as num?)?.toDouble(),
       eta: json['eta'] as int?,
     );

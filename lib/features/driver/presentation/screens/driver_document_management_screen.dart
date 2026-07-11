@@ -734,54 +734,85 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                         ],
                       )
                     : ClipRRect(
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(
+                            backendId == 'PROFILE_PHOTO' ? 60 : 10),
                         child: localPreviewPath != null
-                            ? Image.file(
-                                File(localPreviewPath),
-                                key: ValueKey('local-$localPreviewPath'),
-                                fit: BoxFit.cover,
-                                width: double.infinity,
-                                height: 120,
-                                errorBuilder: (_, __, ___) =>
-                                    const Center(
-                                  child: Icon(Icons.broken_image_outlined,
-                                      color: _textSecondary, size: 28),
-                                ),
-                              )
-                            : Image.network(
-                                previewUrl!,
-                                key: ValueKey(previewUrl),
-                                fit: BoxFit.cover,
-                                width: double.infinity,
-                                height: 120,
-                                loadingBuilder: (context, child, progress) {
-                                  if (progress == null) return child;
-                                  return const Center(
-                                    child: SizedBox(
-                                      width: 24,
-                                      height: 24,
-                                      child: CircularProgressIndicator(strokeWidth: 2),
+                            ? (backendId == 'PROFILE_PHOTO'
+                                ? Center(
+                                    child: CircleAvatar(
+                                      radius: 48,
+                                      backgroundColor: color.withOpacity(0.15),
+                                      backgroundImage:
+                                          FileImage(File(localPreviewPath)),
                                     ),
-                                  );
-                                },
-                                errorBuilder: (_, __, ___) => const Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(Icons.broken_image_outlined,
+                                  )
+                                : Image.file(
+                                    File(localPreviewPath),
+                                    key: ValueKey('local-$localPreviewPath'),
+                                    fit: BoxFit.cover,
+                                    width: double.infinity,
+                                    height: 120,
+                                    errorBuilder: (_, __, ___) =>
+                                        const Center(
+                                      child: Icon(Icons.broken_image_outlined,
                                           color: _textSecondary, size: 28),
-                                      SizedBox(height: 6),
-                                      Text(
-                                        'Preview unavailable',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: _textSecondary,
+                                    ),
+                                  ))
+                            : (backendId == 'PROFILE_PHOTO' && previewUrl != null
+                                ? Center(
+                                    child: CircleAvatar(
+                                      radius: 48,
+                                      backgroundColor: color.withOpacity(0.15),
+                                      child: ClipOval(
+                                        child: Image.network(
+                                          previewUrl,
+                                          key: ValueKey(previewUrl),
+                                          width: 96,
+                                          height: 96,
+                                          fit: BoxFit.cover,
+                                          errorBuilder: (_, __, ___) => Icon(
+                                            Icons.person,
+                                            color: color,
+                                            size: 40,
+                                          ),
                                         ),
                                       ),
-                                    ],
-                                  ),
-                                ),
-                              ),
+                                    ),
+                                  )
+                                : Image.network(
+                                    previewUrl!,
+                                    key: ValueKey(previewUrl),
+                                    fit: BoxFit.cover,
+                                    width: double.infinity,
+                                    height: 120,
+                                    loadingBuilder: (context, child, progress) {
+                                      if (progress == null) return child;
+                                      return const Center(
+                                        child: SizedBox(
+                                          width: 24,
+                                          height: 24,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        ),
+                                      );
+                                    },
+                                    errorBuilder: (_, __, ___) => const Center(
+                                      child: Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          Icon(Icons.broken_image_outlined,
+                                              color: _textSecondary, size: 28),
+                                          SizedBox(height: 6),
+                                          Text(
+                                            'Preview unavailable',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              color: _textSecondary,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  )),
                       ),
               ),
             ),

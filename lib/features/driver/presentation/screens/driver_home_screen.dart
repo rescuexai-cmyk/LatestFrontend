@@ -34,6 +34,7 @@ import '../../providers/driver_penalty_provider.dart';
 import '../ride_stack/ride_stack_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
+import '../../../../core/widgets/user_avatar.dart';
 import '../../../../core/theme/primary_cta_styles.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
@@ -3861,26 +3862,17 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final displayName = user?.name ?? 'Driver';
     final displayEmail = user?.email ?? '';
     final displayPhone = user?.phone ?? '';
-    final initials = _getUserInitials(displayName);
-    final profilePhotoDetail = onboarding.backendStatus.documentDetails
-        .where((d) => d.type == 'PROFILE_PHOTO' && d.url != null)
-        .fold<BackendDocumentInfo?>(
-      null,
-      (best, current) {
-        if (best == null) return current;
-        final bestTs = best.uploadedAt?.millisecondsSinceEpoch ?? 0;
-        final curTs = current.uploadedAt?.millisecondsSinceEpoch ?? 0;
-        return curTs >= bestTs ? current : best;
-      },
-    );
+    final profilePhotoDetail =
+        onboarding.backendStatus.getLatestDocumentDetail('PROFILE_PHOTO');
     final rawAvatarUrl = (profilePhotoDetail?.url?.isNotEmpty == true)
         ? profilePhotoDetail!.url
         : user?.avatarUrl;
     final avatarUrl = (() {
       if (rawAvatarUrl == null || rawAvatarUrl.isEmpty) return null;
-      final resolved = _resolveAvatarUrl(rawAvatarUrl);
+      final resolved = UserAvatar.resolveUrl(rawAvatarUrl);
       if (resolved == null || resolved.isEmpty) return null;
-      final uploadedAtMs = profilePhotoDetail?.uploadedAt?.millisecondsSinceEpoch;
+      final uploadedAtMs =
+          profilePhotoDetail?.uploadedAt?.millisecondsSinceEpoch;
       if (uploadedAtMs == null) return resolved;
       final separator = resolved.contains('?') ? '&' : '?';
       return '$resolved${separator}v=$uploadedAtMs';
@@ -3895,22 +3887,16 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
+          UserAvatar(
             radius: 36,
+            name: displayName,
+            imageUrl: avatarUrl,
             backgroundColor: AppColors.secondary.withValues(alpha: 0.22),
-            child: ClipOval(
-              child: avatarUrl != null
-                  ? Image.network(
-                      avatarUrl,
-                      width: 72,
-                      height: 72,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _driverDrawerAvatarFallback(
-                        initials,
-                        radius: 36,
-                      ),
-                    )
-                  : _driverDrawerAvatarFallback(initials, radius: 36),
+            foregroundColor: AppColors.textPrimary,
+            textStyle: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 22,
+              color: AppColors.textPrimary,
             ),
           ),
           const SizedBox(width: 14),

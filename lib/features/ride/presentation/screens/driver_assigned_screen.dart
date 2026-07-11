@@ -27,6 +27,7 @@ import '../../../../core/models/marketing_banner.dart';
 import '../../../../core/providers/marketing_banners_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/widgets/marketing_banner_carousel.dart';
+import '../../../../core/widgets/user_avatar.dart';
 import '../../providers/ride_booking_provider.dart';
 import '../../providers/ride_provider.dart';
 import '../../../auth/providers/auth_provider.dart';
@@ -123,6 +124,7 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
   double _fareAmount = 0;
   String _driverPhone = '';
   String? _driverId;
+  String? _driverPhotoUrl;
 
   // Locations from provider
   late String _pickupAddress;
@@ -235,6 +237,27 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         '📍 DriverAssigned — rideId=$_rideId, pickup=$_pickupAddress, drop=$_dropAddress');
     debugPrint(
         '🔐 OTP from booking state: $_otp (raw: ${bookingState.rideOtp})');
+
+    // Seed driver photo/name from active ride if already known.
+    final activeRide = ref.read(activeRideProvider).activeRide;
+    final seededDriver = activeRide?.driver;
+    if (seededDriver != null) {
+      if (seededDriver.name.trim().isNotEmpty) {
+        _driverName = seededDriver.name.trim();
+      }
+      if (seededDriver.avatar != null && seededDriver.avatar!.trim().isNotEmpty) {
+        _driverPhotoUrl = seededDriver.avatar;
+      }
+      if (seededDriver.phone != null && seededDriver.phone!.trim().isNotEmpty) {
+        _driverPhone = seededDriver.phone!.trim();
+      }
+      if (seededDriver.vehicleInfo?.plateNumber.isNotEmpty == true) {
+        _vehicleNumber = seededDriver.vehicleInfo!.plateNumber;
+      }
+      if (seededDriver.vehicleInfo?.model?.isNotEmpty == true) {
+        _vehicleModel = seededDriver.vehicleInfo!.model!;
+      }
+    }
 
     // Get vehicle type from booking state
     _vehicleType = bookingState.selectedCabTypeId;
@@ -376,6 +399,16 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
                       driverData['user']['phoneNumber']?.toString())
                   : null),
         );
+        final driverPhoto = _firstNonEmptyString([
+          driverData['profileImage'],
+          driverData['profile_image'],
+          driverData['avatar'],
+          driverData['photoUrl'],
+          if (driverData['user'] is Map<String, dynamic>) ...[
+            (driverData['user'] as Map)['profileImage'],
+            (driverData['user'] as Map)['profile_image'],
+          ],
+        ]);
 
         final driverId = driverData['id']?.toString() ?? driverData['driverId']?.toString();
 
@@ -393,6 +426,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
             }
             if (vehicleModel.isNotEmpty) {
               _vehicleModel = vehicleModel;
+            }
+            if (driverPhoto.isNotEmpty) {
+              _driverPhotoUrl = driverPhoto;
             }
           });
         }
@@ -664,6 +700,16 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         statusVehicle?['name'],
       ]);
       final statusDriverId = d['id']?.toString() ?? d['driverId']?.toString();
+      final statusPhoto = _firstNonEmptyString([
+        d['profileImage'],
+        d['profile_image'],
+        d['avatar'],
+        d['photoUrl'],
+        if (d['user'] is Map<String, dynamic>) ...[
+          (d['user'] as Map)['profileImage'],
+          (d['user'] as Map)['profile_image'],
+        ],
+      ]);
       setState(() {
         _driverName = d['name'] as String? ?? _driverName;
         if (statusDriverId != null && statusDriverId.isNotEmpty) {
@@ -674,6 +720,9 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
         }
         if (statusVehicleModel.isNotEmpty) {
           _vehicleModel = statusVehicleModel;
+        }
+        if (statusPhoto.isNotEmpty) {
+          _driverPhotoUrl = statusPhoto;
         }
       });
     }
@@ -2209,13 +2258,11 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
                 // Fare + driver info row
                 Row(
                   children: [
-                    CircleAvatar(
+                    UserAvatar(
                       radius: 18,
+                      name: _driverName.isNotEmpty ? _driverName : 'Driver',
+                      imageUrl: _driverPhotoUrl,
                       backgroundColor: const Color(0xFFD4956A),
-                      child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold)),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -2594,18 +2641,16 @@ class _DriverAssignedScreenState extends ConsumerState<DriverAssignedScreen>
           color: const Color(0xFFFAFAFA),
           borderRadius: BorderRadius.circular(16)),
       child: Row(children: [
-        Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-              color: const Color(0xFFD4956A),
-              borderRadius: BorderRadius.circular(12)),
-          child: Center(
-              child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 24))),
+        UserAvatar(
+          radius: 28,
+          name: _driverName.isNotEmpty ? _driverName : 'Driver',
+          imageUrl: _driverPhotoUrl,
+          backgroundColor: const Color(0xFFD4956A),
+          textStyle: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+            fontSize: 24,
+          ),
         ),
         const SizedBox(width: 12),
         Expanded(
@@ -3015,18 +3060,17 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
                         borderRadius: BorderRadius.circular(20)),
                     child: const Icon(Icons.close, size: 20))),
             const SizedBox(width: 12),
-            Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                    color: const Color(0xFFD4956A),
-                    borderRadius: BorderRadius.circular(20)),
-                child: Center(
-                    child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 16)))),
+            UserAvatar(
+              radius: 20,
+              name: _driverName.isNotEmpty ? _driverName : 'Driver',
+              imageUrl: _driverPhotoUrl,
+              backgroundColor: const Color(0xFFD4956A),
+              textStyle: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+                fontSize: 16,
+              ),
+            ),
             const SizedBox(width: 12),
             Expanded(
                 child: Column(
@@ -3114,14 +3158,17 @@ Status: ${_phase == _RidePhase.rideInProgress ? 'IN_PROGRESS' : 'DRIVER_ARRIVING
             msg.isFromDriver ? MainAxisAlignment.start : MainAxisAlignment.end,
         children: [
           if (msg.isFromDriver) ...[
-            CircleAvatar(
-                radius: 14,
-                backgroundColor: const Color(0xFFD4956A),
-                child: Text(_driverName.isNotEmpty ? _driverName[0] : 'D',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600))),
+            UserAvatar(
+              radius: 14,
+              name: _driverName.isNotEmpty ? _driverName : 'Driver',
+              imageUrl: _driverPhotoUrl,
+              backgroundColor: const Color(0xFFD4956A),
+              textStyle: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
             const SizedBox(width: 8),
           ],
           Flexible(

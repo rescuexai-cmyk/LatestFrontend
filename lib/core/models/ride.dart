@@ -208,7 +208,16 @@ class Ride extends Equatable {
                 type: 'economy',
               )
             : null,
-        avatar: driverJson['profileImage'] as String?,
+        avatar: driverJson['profileImage'] as String? ??
+            driverJson['profile_image'] as String? ??
+            driverJson['avatar'] as String? ??
+            driverJson['photoUrl'] as String? ??
+            (driverJson['user'] is Map<String, dynamic>
+                ? ((driverJson['user'] as Map<String, dynamic>)['profileImage']
+                        as String? ??
+                    (driverJson['user'] as Map<String, dynamic>)['profile_image']
+                        as String?)
+                : null),
         currentLocation: driverCurrentLocation,
         heading: (driverJson['current_location']?['heading'] as num?)?.toDouble(),
       );

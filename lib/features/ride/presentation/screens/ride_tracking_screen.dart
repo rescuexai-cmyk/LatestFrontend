@@ -26,6 +26,7 @@ import '../../providers/ride_provider.dart';
 import '../../providers/ride_booking_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
+import '../../../../core/widgets/user_avatar.dart';
 import '../../../../core/utils/fare_format.dart';
 
 class RideTrackingScreen extends ConsumerStatefulWidget {
@@ -1110,17 +1111,16 @@ class _RideTrackingScreenState extends ConsumerState<RideTrackingScreen>
           const SizedBox(height: 16),
           Row(
             children: [
-              CircleAvatar(
+              UserAvatar(
                 radius: 22,
+                name: _driver!.name,
+                imageUrl: _driver!.avatar,
                 backgroundColor: AppColors.secondary.withAlpha(76),
-                child: Text(
-                  _driver!.name.isNotEmpty
-                      ? _driver!.name[0].toUpperCase()
-                      : '?',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 18,
-                      color: AppColors.textPrimary),
+                foregroundColor: AppColors.textPrimary,
+                textStyle: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: AppColors.textPrimary,
                 ),
               ),
               const SizedBox(width: 12),
@@ -1696,17 +1696,16 @@ class _RatingBottomSheetState extends State<_RatingBottomSheet>
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      CircleAvatar(
+                      UserAvatar(
                         radius: 20,
+                        name: widget.driver!.name,
+                        imageUrl: widget.driver!.avatar,
                         backgroundColor: AppColors.secondary.withAlpha(76),
-                        child: Text(
-                          widget.driver!.name.isNotEmpty
-                              ? widget.driver!.name[0].toUpperCase()
-                              : '?',
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16,
-                              color: AppColors.textPrimary),
+                        foregroundColor: AppColors.textPrimary,
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                          color: AppColors.textPrimary,
                         ),
                       ),
                       const SizedBox(width: 12),
