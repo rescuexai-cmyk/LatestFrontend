@@ -88,6 +88,7 @@ class WebSocketService {
 
   // Track rooms to rejoin on reconnect (CRITICAL for real device reliability)
   String? _pendingDriverId;
+  String? _adminInboxDriverId; // Personal room for admin actions while offline
   final Set<String> _joinedRideRooms = {};
 
   // CRITICAL: Track registration state for guaranteed delivery
@@ -119,9 +120,18 @@ class WebSocketService {
   void _onReconnect() {
     debugPrint('🔄 Socket reconnected - rejoining rooms...');
 
-    // Rejoin driver room if we were online
-    if (_pendingDriverId != null && _pendingDriverId!.isNotEmpty) {
-      debugPrint('🔄 Rejoining driver room for: $_pendingDriverId');
+    // Rejoin personal admin inbox (works while Offline)
+    final inboxId = _adminInboxDriverId ?? _pendingDriverId;
+    if (inboxId != null && inboxId.isNotEmpty) {
+      debugPrint('🔄 Rejoining driver admin inbox for: $inboxId');
+      _socket?.emit('join-driver-inbox', inboxId);
+    }
+
+    // Rejoin driver online rooms only if we were online for dispatch
+    if (_pendingDriverId != null &&
+        _pendingDriverId!.isNotEmpty &&
+        _isRegistered) {
+      debugPrint('🔄 Rejoining driver online rooms for: $_pendingDriverId');
       _socket?.emit('join-driver', _pendingDriverId);
       _socket?.emit('driver-online', _pendingDriverId);
     }
@@ -219,6 +229,9 @@ class WebSocketService {
       // Listen for registration confirmation from backend - CRITICAL for guaranteed delivery
       _socket!.on('registration-success', (data) {
         debugPrint('✅ Driver registration confirmed: $data');
+        final inboxOnly = data is Map && data['inboxOnly'] == true;
+        // Inbox-only join must not mark the driver as "online registered".
+        if (inboxOnly) return;
         _isRegistered = true;
         _registrationStatusController.add(true);
         _registrationCompleter?.complete(true);
@@ -378,6 +391,7 @@ class WebSocketService {
   void disconnect() {
     _intentionalDisconnect = true;
     _pendingDriverId = null;
+    // Keep _adminInboxDriverId so reconnect can rejoin personal admin room.
     _joinedRideRooms.clear();
     _isRegistered = false;
     _registrationCompleter?.complete(false);
@@ -547,6 +561,22 @@ class WebSocketService {
     debugPrint('Left ride tracking room: ride-$rideId');
   }
 
+  /// Join personal driver room for admin actions (penalty clear, pass, etc.)
+  /// without joining available-drivers / going online for ride offers.
+  void joinDriverAdminInbox(String driverId) {
+    if (driverId.isEmpty || driverId == 'unknown') {
+      debugPrint('⚠️ Cannot join admin inbox - invalid driverId: $driverId');
+      return;
+    }
+    _adminInboxDriverId = driverId;
+    if (_socket?.connected != true) {
+      debugPrint('⚠️ Socket not connected - will join admin inbox on connect');
+      return;
+    }
+    _socket?.emit('join-driver-inbox', driverId);
+    debugPrint('✅ Joined driver admin inbox: driver-$driverId');
+  }
+
   /// Join driver-specific room (receive ride offers).
   /// CRITICAL: This must be called with valid driverId for socket events to work.
   void joinDriverRoom(String driverId) {
@@ -555,6 +585,7 @@ class WebSocketService {
       return;
     }
     _pendingDriverId = driverId;
+    _adminInboxDriverId = driverId;
     if (_socket?.connected != true) {
       debugPrint('⚠️ Socket not connected - will join driver room on connect');
       return;

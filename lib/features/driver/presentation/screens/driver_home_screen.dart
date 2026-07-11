@@ -94,6 +94,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
   // WebSocket subscription
   VoidCallback? _rideOffersSubscription;
+  VoidCallback? _adminActionSocketUnsub;
 
   // Connection status stream subscription
   StreamSubscription<bool>? _connectionStatusSubscription;
@@ -133,6 +134,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
             preserveAcceptedRide: true,
           );
       unawaited(_initDriverProfile());
+      unawaited(_ensureDriverAdminInbox());
+      unawaited(_refreshPenaltyStateFromBackend());
     });
   }
 
@@ -275,11 +278,57 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         _fetchVerificationStatus();
         _fetchSubscriptionStatus();
       }
+      // Refresh penalty state on resume so admin clears apply without app restart.
+      unawaited(_refreshPenaltyStateFromBackend());
+      unawaited(_ensureDriverAdminInbox());
       if (_isOnline) {
         _ensureSocketConnection();
       }
     } else if (state == AppLifecycleState.paused && _isOnline) {
       debugPrint('📱 App paused - socket will auto-reconnect when resumed');
+    }
+  }
+
+  Future<void> _refreshPenaltyStateFromBackend() async {
+    try {
+      final hasPending =
+          await ref.read(driverPenaltyProvider.notifier).checkPenaltyStatus();
+      if (!hasPending) {
+        _penaltyLikelyAfterEarlyStop = false;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Penalty refresh on resume failed: $e');
+    }
+  }
+
+  /// Keep the driver in their personal socket room while the home screen is open
+  /// (even when Offline) so admin actions like penalty clear arrive in realtime.
+  Future<void> _ensureDriverAdminInbox() async {
+    try {
+      if (_driverId == 'unknown' || _driverId.isEmpty) {
+        await _hydrateDriverRecordId();
+      }
+      final driverId = _driverId;
+      if (driverId == 'unknown' || driverId.isEmpty) return;
+
+      final secureStorage = ref.read(secureStorageProvider);
+      final token = await secureStorage.read(key: 'auth_token');
+      await webSocketService.connect(token: token);
+      webSocketService.joinDriverAdminInbox(driverId);
+
+      // disconnect() clears listeners — re-bind admin_action every time.
+      _adminActionSocketUnsub?.call();
+      _adminActionSocketUnsub = webSocketService.subscribe('admin_action', (message) {
+        final raw = message.data;
+        final data = raw is Map
+            ? Map<String, dynamic>.from(raw)
+            : <String, dynamic>{};
+        unawaited(_handleAdminActionUpdate(data));
+      });
+
+      debugPrint('📬 Driver admin inbox joined for $driverId');
+    } catch (e) {
+      debugPrint('⚠️ Failed to join driver admin inbox: $e');
     }
   }
 
@@ -555,24 +604,31 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   Future<bool> _resolvePenaltyBeforeGoingOnline() async {
     try {
       final notifier = ref.read(driverPenaltyProvider.notifier);
+      // Fresh backend check — never trust the early-stop local hint alone.
       final hasPending = await notifier.checkPenaltyStatus();
       final st = ref.read(driverPenaltyProvider);
-      final shouldForcePenaltyFlow = _penaltyLikelyAfterEarlyStop;
       final hasActionablePenalty =
           hasPending || st.hasPendingPenalty || st.penaltyAmount > 0;
-      if (hasActionablePenalty || shouldForcePenaltyFlow) {
-        final resolved = await _showPendingPenaltyDialog(
-          allowEstimatedAmountIfMissing: shouldForcePenaltyFlow,
-        );
-        if (resolved) {
-          _penaltyLikelyAfterEarlyStop = false;
-          return true;
-        }
-        return false;
+
+      if (!hasActionablePenalty) {
+        _penaltyLikelyAfterEarlyStop = false;
+        return true;
       }
-      _penaltyLikelyAfterEarlyStop = false;
+
+      // Real pending dues from API → always show the pay sheet.
+      // Estimate amount only if backend flags pending but omits the rupee value.
+      final resolved = await _showPendingPenaltyDialog(
+        allowEstimatedAmountIfMissing: true,
+      );
+      if (resolved) {
+        _penaltyLikelyAfterEarlyStop = false;
+        return true;
+      }
+      return false;
     } catch (e) {
       debugPrint('⚠️ Penalty pre-check failed: $e');
+      // Fail open only when we cannot reach the API; do not invent a penalty.
+      _penaltyLikelyAfterEarlyStop = false;
     }
     return true;
   }
@@ -746,16 +802,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     if (!mounted) return false;
 
-    // Amount for UI / UPI: use API value, or ₹10 when backend flags pending but omits amount
+    // Amount for UI / UPI: use API value only. Estimate ₹10 only when the API
+    // explicitly says a penalty is pending but omits the amount.
     var displayPenalty = penaltyState.penaltyAmount > 0
         ? penaltyState.penaltyAmount
         : 0.0;
     if (displayPenalty <= 0 &&
-        (allowEstimatedAmountIfMissing || penaltyState.hasPendingPenalty)) {
+        penaltyState.hasPendingPenalty &&
+        allowEstimatedAmountIfMissing) {
       displayPenalty = 10.0;
     }
 
     if (displayPenalty <= 0) {
+      // No actionable penalty from backend — treat as cleared (e.g. admin wipe).
+      if (!penaltyState.hasPendingPenalty) {
+        _penaltyLikelyAfterEarlyStop = false;
+        return true;
+      }
       if (mounted) {
         AppMessenger.showDriverErrorBanner(context, 'Could not load penalty details. Please try again or contact support.');
       }
@@ -1097,19 +1160,31 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     final classified =
         hasBackendReason ? _classifyBackendError(registrationMessage) : null;
 
-    // Handle penalty case specially - show penalty payment dialog
+    // Handle penalty case specially - show payment UI only if still due in DB
     if (classified != null && classified.isPenalty) {
-      _penaltyLikelyAfterEarlyStop = true;
-      final resolved =
-          await _showPendingPenaltyDialog(allowEstimatedAmountIfMissing: true);
-      if (resolved) return;
+      final handled = await _tryShowPenaltyFlowForBlockedDriver();
+      if (handled) return;
+      // Stale socket/status message after admin clear — don't invent a pay sheet.
+      if (!ref.read(driverPenaltyProvider).hasPendingPenalty) {
+        _penaltyLikelyAfterEarlyStop = false;
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No pending penalty. Tap Go Online again.'),
+              backgroundColor: Color(0xFF2ECC71),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
     }
 
     // 403 / "not eligible" often means unpaid penalty but socket message omits the word "penalty"
     if (classified != null && classified.offerPenaltyResolution) {
-      _penaltyLikelyAfterEarlyStop = true;
       final resolved = await _tryShowPenaltyFlowForBlockedDriver();
       if (resolved) return;
+      _penaltyLikelyAfterEarlyStop = false;
     }
 
     // Only eligibility-related failures should disable start rides.
@@ -1222,10 +1297,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       if (hasPending || st.hasPendingPenalty || st.penaltyAmount > 0) {
         debugPrint(
             '📛 Penalty flow: hasPending=$hasPending amount=${st.penaltyAmount}');
-        return await _showPendingPenaltyDialog();
+        return await _showPendingPenaltyDialog(
+          allowEstimatedAmountIfMissing: st.hasPendingPenalty,
+        );
       }
       debugPrint(
           '📛 Penalty API: no pending penalty (403 may be onboarding/subscription)');
+      _penaltyLikelyAfterEarlyStop = false;
     } catch (e) {
       debugPrint('⚠️ Penalty resolution check failed: $e');
     }
@@ -1236,16 +1314,22 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   Future<void> _handleDriverBlockedAfterStatusUpdate(
       _BackendError classified) async {
     if (!mounted) return;
-    if (classified.isPenalty) {
-      _penaltyLikelyAfterEarlyStop = true;
-      final resolved =
-          await _showPendingPenaltyDialog(allowEstimatedAmountIfMissing: true);
-      if (resolved) return;
-    }
-    if (classified.offerPenaltyResolution) {
-      _penaltyLikelyAfterEarlyStop = true;
+    if (classified.isPenalty || classified.offerPenaltyResolution) {
       final resolved = await _tryShowPenaltyFlowForBlockedDriver();
       if (resolved) return;
+      if (!ref.read(driverPenaltyProvider).hasPendingPenalty) {
+        _penaltyLikelyAfterEarlyStop = false;
+        if (classified.isPenalty && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No pending penalty. Tap Go Online again.'),
+              backgroundColor: Color(0xFF2ECC71),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          return;
+        }
+      }
     }
     await _showStartRideBlockedDialog(classified);
   }
@@ -1426,9 +1510,11 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       debugPrint('Failed to update driver status: $e');
     }
 
-    // Disconnect all real-time transports (SSE + Socket.io)
+    // Disconnect dispatch transports (SSE + Socket.io online rooms)
     debugPrint('🚗 Driver going offline: $driverId');
     realtimeService.disconnectDriver();
+    // Stay in personal admin inbox so dashboard clears (penalty etc.) arrive live.
+    unawaited(_ensureDriverAdminInbox());
     _sessionExpiryTimer?.cancel();
     _sessionExpiryTimer = null;
     _countdownTimer?.cancel();
@@ -1645,6 +1731,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     _offerCleanupTimer?.cancel();
     _positionStream?.cancel();
     _rideOffersSubscription?.call();
+    _adminActionSocketUnsub?.call();
     _connectionStatusSubscription?.cancel();
     _pushForegroundSubscription?.cancel();
     if (pushNotificationService.onNotificationAction ==
@@ -1808,6 +1895,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
     switch (event) {
       case 'PENALTIES_CLEARED':
+      case 'PENALTY_CLEARED':
         _penaltyLikelyAfterEarlyStop = false;
         ref.read(driverPenaltyProvider.notifier).markPenaltiesClearedLocally();
         await ref.read(driverPenaltyProvider.notifier).checkPenaltyStatus();
@@ -2366,6 +2454,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         debugPrint(
             '❌ Registration rejected by backend. Reason: $backendReason');
         setState(() => _isConnecting = false);
+        unawaited(_ensureDriverAdminInbox());
         if (mounted) {
           _showConnectionErrorDialog(registrationMessage: backendReason);
         }
@@ -2392,6 +2481,7 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         debugPrint('❌ Failed to update driver status on backend: $e');
         // CRITICAL: If backend fails, disconnect and show error
         realtimeService.disconnectDriver();
+        unawaited(_ensureDriverAdminInbox());
         setState(() => _isConnecting = false);
         if (mounted) {
           final classified = _classifyBackendError(e.toString());

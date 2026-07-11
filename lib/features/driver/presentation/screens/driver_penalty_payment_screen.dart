@@ -38,7 +38,7 @@ class _DriverPenaltyPaymentScreenState
         pushNotificationService.notificationStream.listen((message) {
       if (message.data['type'] != NotificationTypes.driverAdminAction) return;
       final event = (message.data['event'] ?? '').toString().toUpperCase();
-      if (event != 'PENALTIES_CLEARED') return;
+      if (event != 'PENALTIES_CLEARED' && event != 'PENALTY_CLEARED') return;
       ref.read(driverPenaltyProvider.notifier).markPenaltiesClearedLocally();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
