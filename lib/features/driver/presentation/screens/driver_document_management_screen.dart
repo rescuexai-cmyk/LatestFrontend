@@ -17,6 +17,7 @@ import '../../providers/driver_onboarding_provider.dart';
 import '../widgets/edit_personal_details_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import '../../../../core/utils/media_url.dart';
 /// Screen for managing/updating driver documents.
 /// Shows all uploaded documents with status, expiry warnings, and re-upload options.
 class DriverDocumentManagementScreen extends ConsumerStatefulWidget {
@@ -415,32 +416,24 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     final resolved = _resolveDocumentUrl(latest?.url);
     if (resolved == null) return null;
 
+    // Never append ?v= to S3/CloudFront presigned URLs — that breaks the
+    // signature and Image.network shows "Preview unavailable".
     final bust = _previewCacheBustMs[backendId] ??
         latest?.uploadedAt?.millisecondsSinceEpoch;
-    if (bust == null) return resolved;
-    final separator = resolved.contains('?') ? '&' : '?';
-    return '$resolved${separator}v=$bust';
+    return MediaUrl.withCacheBust(resolved, bust);
   }
 
   /// Turn relative `/uploads/...` paths into absolute URLs the image widget can load.
-  String? _resolveDocumentUrl(String? rawUrl) {
-    if (rawUrl == null) return null;
-    final input = rawUrl.trim();
-    if (input.isEmpty) return null;
-
-    final uri = Uri.tryParse(input);
-    if (uri != null && uri.hasScheme) return input;
-
-    final apiUri = Uri.tryParse(AppConfig.apiUrl);
-    if (apiUri == null || !apiUri.hasScheme) return input;
-    final origin = '${apiUri.scheme}://${apiUri.authority}';
-    if (input.startsWith('/')) return '$origin$input';
-    return '$origin/$input';
-  }
+  String? _resolveDocumentUrl(String? rawUrl) => MediaUrl.resolve(rawUrl);
 
   bool _isPdfUrl(String url) {
     final lower = url.toLowerCase();
-    return lower.contains('.pdf') || lower.contains('content-type=application%2Fpdf');
+    // Strip query string for extension checks (presigned URLs hide .pdf in path sometimes).
+    final pathOnly = lower.split('?').first;
+    return pathOnly.endsWith('.pdf') ||
+        lower.contains('.pdf') ||
+        lower.contains('content-type=application%2Fpdf') ||
+        lower.contains('content-type=application/pdf');
   }
   Future<void> _openLocalDocumentPreview(String path) async {
     if (!mounted) return;

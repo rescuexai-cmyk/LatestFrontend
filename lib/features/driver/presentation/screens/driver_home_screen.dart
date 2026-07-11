@@ -35,6 +35,7 @@ import '../ride_stack/ride_stack_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/user_avatar.dart';
+import '../../../../core/utils/media_url.dart';
 import '../../../../core/theme/primary_cta_styles.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
@@ -3869,13 +3870,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         : user?.avatarUrl;
     final avatarUrl = (() {
       if (rawAvatarUrl == null || rawAvatarUrl.isEmpty) return null;
-      final resolved = UserAvatar.resolveUrl(rawAvatarUrl);
+      final resolved = MediaUrl.resolve(rawAvatarUrl) ??
+          UserAvatar.resolveUrl(rawAvatarUrl);
       if (resolved == null || resolved.isEmpty) return null;
       final uploadedAtMs =
           profilePhotoDetail?.uploadedAt?.millisecondsSinceEpoch;
-      if (uploadedAtMs == null) return resolved;
-      final separator = resolved.contains('?') ? '&' : '?';
-      return '$resolved${separator}v=$uploadedAtMs';
+      return MediaUrl.withCacheBust(resolved, uploadedAtMs);
     })();
 
     return Container(
