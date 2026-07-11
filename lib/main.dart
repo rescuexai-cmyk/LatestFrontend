@@ -37,9 +37,14 @@ void main() async {
   try {
     await Firebase.initializeApp();
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-    // Bypass reCAPTCHA / Play Integrity redirect during phone OTP (test / debug flow).
+    // Only for Firebase Console test phone numbers. Real OTP needs Play Integrity /
+    // reCAPTCHA — leaving this true causes missing-client-identifier on Get OTP.
+    const disableAppVerification = bool.fromEnvironment(
+      'DISABLE_PHONE_APP_VERIFICATION',
+      defaultValue: false,
+    );
     await FirebaseAuth.instance.setSettings(
-      appVerificationDisabledForTesting: true,
+      appVerificationDisabledForTesting: disableAppVerification,
     );
   } catch (e, st) {
     debugPrint('❌ Firebase init in main failed: $e\n$st');
@@ -225,12 +230,16 @@ class _AppInitializerState extends ConsumerState<_AppInitializer> {
     }
     if (Platform.isAndroid) {
       try {
+        const disableAppVerification = bool.fromEnvironment(
+          'DISABLE_PHONE_APP_VERIFICATION',
+          defaultValue: false,
+        );
         await FirebaseAuth.instance.setSettings(
           forceRecaptchaFlow: false,
-          appVerificationDisabledForTesting: true,
+          appVerificationDisabledForTesting: disableAppVerification,
         );
         debugPrint(
-            '✅ Firebase Auth: appVerificationDisabledForTesting=true (skip captcha)');
+            '✅ Firebase Auth: appVerificationDisabledForTesting=$disableAppVerification');
       } catch (e) {
         debugPrint('⚠️ Firebase Auth setSettings failed (non-fatal): $e');
       }

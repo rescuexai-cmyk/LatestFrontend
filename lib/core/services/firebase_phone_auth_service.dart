@@ -50,17 +50,21 @@ class FirebasePhoneAuthService {
       }
     }
 
-    // Tell Firebase to prefer native (Play Integrity / SafetyNet) over
-    // browser-based reCAPTCHA. This is critical on browsers like Brave that
-    // block sessionStorage and cause the "missing initial state" error.
+    // Prefer native Play Integrity over browser reCAPTCHA on Android.
+    // Never disable app verification for real phone numbers — that causes
+    // missing-client-identifier on Get OTP. Opt-in only via dart-define.
     if (Platform.isAndroid) {
       try {
+        const disableAppVerification = bool.fromEnvironment(
+          'DISABLE_PHONE_APP_VERIFICATION',
+          defaultValue: false,
+        );
         await _auth.setSettings(
           forceRecaptchaFlow: false,
-          appVerificationDisabledForTesting: true,
+          appVerificationDisabledForTesting: disableAppVerification,
         );
         debugPrint(
-            '🔥 Firebase: appVerificationDisabledForTesting=true (skip captcha)');
+            '🔥 Firebase: appVerificationDisabledForTesting=$disableAppVerification');
       } catch (e) {
         debugPrint('🔥 Firebase: setSettings error (non-fatal): $e');
       }
@@ -395,9 +399,13 @@ class FirebasePhoneAuthService {
 
       if (Platform.isAndroid) {
         try {
+          const disableAppVerification = bool.fromEnvironment(
+            'DISABLE_PHONE_APP_VERIFICATION',
+            defaultValue: false,
+          );
           await _auth.setSettings(
             forceRecaptchaFlow: false,
-            appVerificationDisabledForTesting: true,
+            appVerificationDisabledForTesting: disableAppVerification,
           );
         } catch (_) {}
       }
