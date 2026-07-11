@@ -110,6 +110,10 @@ class CabType {
   final double baseFare;
   final double perKmRate;
   final double perMinRate;
+  final double distanceFare;
+  final double timeFare;
+  final double surgeAmount;
+  final bool minimumFareApplied;
   final int capacity;
   final String eta;
   final bool isPopular;
@@ -125,6 +129,10 @@ class CabType {
     this.baseFare = 0,
     this.perKmRate = 0,
     this.perMinRate = 0,
+    this.distanceFare = 0,
+    this.timeFare = 0,
+    this.surgeAmount = 0,
+    this.minimumFareApplied = false,
     required this.capacity,
     this.eta = '3-5 min',
     this.isPopular = false,
@@ -153,19 +161,42 @@ class CabType {
     }
   }
   factory CabType.fromJson(Map<String, dynamic> json) {
+    final breakdown = json['breakdown'] is Map
+        ? Map<String, dynamic>.from(json['breakdown'] as Map)
+        : const <String, dynamic>{};
     return CabType(
       id: json['id'] ?? '',
       name: json['name'] ?? '',
       description: json['description'] ?? '',
       iconName: json['icon'] ?? 'directions_car',
-      baseFare: (json['base_fare'] ?? 0).toDouble(),
-      perKmRate: (json['per_km_rate'] ?? 0).toDouble(),
-      perMinRate: (json['per_min_rate'] ?? 0).toDouble(),
+      baseFare: (breakdown['startingFee'] ??
+              json['startingFee'] ??
+              json['base_fare'] ??
+              json['baseFare'] ??
+              0)
+          .toDouble(),
+      perKmRate: (breakdown['ratePerKm'] ??
+              json['per_km_rate'] ??
+              json['perKmRate'] ??
+              0)
+          .toDouble(),
+      perMinRate: (breakdown['ratePerMin'] ??
+              json['per_min_rate'] ??
+              json['perMinRate'] ??
+              0)
+          .toDouble(),
+      distanceFare: (breakdown['distanceFare'] ?? json['distanceFare'] ?? 0)
+          .toDouble(),
+      timeFare: (breakdown['timeFare'] ?? json['timeFare'] ?? 0).toDouble(),
+      surgeAmount: (breakdown['surgeAmount'] ?? json['surgeAmount'] ?? 0)
+          .toDouble(),
+      minimumFareApplied: breakdown['minimumFareApplied'] == true ||
+          json['minimumFareApplied'] == true,
       capacity: json['capacity'] ?? 4,
       eta: json['eta'] ?? '3-5 min',
       isPopular: json['is_popular'] ?? false,
       badge: json['badge'],
-      fare: (json['fare'] ?? 0).toDouble(),
+      fare: (json['fare'] ?? json['totalFare'] ?? 0).toDouble(),
       surgeMultiplier: (json['surge_multiplier'] ?? 1.0).toDouble(),
       isSurge: json['is_surge'] ?? false,
     );
@@ -1650,29 +1681,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                     0)
                 .toDouble();
             final cabSavings = originalFare - effectiveFare;
-            options.add(CabType(
-              id: cabData['id'] ?? cabData['vehicle_type'] ?? '',
-              name: cabData['name'] ?? '',
-              description: cabData['description'] ?? '',
-              iconName:
-                  _getIconName(cabData['id'] ?? cabData['vehicle_type'] ?? ''),
-              capacity: cabData['capacity'] ?? 4,
-              fare: effectiveFare,
-              baseFare:
-                  (cabData['base_fare'] ?? cabData['baseFare'] ?? 0).toDouble(),
-              perKmRate: (cabData['per_km_rate'] ?? cabData['perKmRate'] ?? 0)
-                  .toDouble(),
-              perMinRate:
-                  (cabData['per_min_rate'] ?? cabData['perMinRate'] ?? 0)
-                      .toDouble(),
-              eta: cabData['eta'] ?? '5 min',
-              isPopular: cabData['is_popular'] ?? cabData['isPopular'] ?? false,
-              badge: cabData['badge'],
-              surgeMultiplier: (cabData['surge_multiplier'] ??
-                      cabData['surgeMultiplier'] ??
-                      1.0)
-                  .toDouble(),
-              isSurge: cabData['is_surge'] ?? cabData['isSurge'] ?? false,
+            options.add(_cabTypeFromPricingEntry(
+              (cabData['id'] ?? cabData['vehicle_type'] ?? '').toString(),
+              cabData,
             ));
             if (cabSavings > totalSavings) totalSavings = cabSavings;
           }
@@ -1926,6 +1937,63 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         .join(' ');
   }
 
+  /// Map a pricing-service estimate object into [CabType] (display-only fields).
+  CabType _cabTypeFromPricingEntry(String key, Map<String, dynamic> entry) {
+    final breakdown = entry['breakdown'] is Map
+        ? Map<String, dynamic>.from(entry['breakdown'] as Map)
+        : const <String, dynamic>{};
+    final fare = (entry['effective_fare'] ??
+            entry['effectiveFare'] ??
+            entry['totalFare'] ??
+            entry['total_fare'] ??
+            entry['fare'] ??
+            breakdown['totalFare'] ??
+            0)
+        .toDouble();
+    return CabType(
+      id: key,
+      name: (entry['name'] ?? _vehicleNames[key] ?? _prettifyVehicleKey(key))
+          .toString(),
+      description:
+          (entry['description'] ?? _vehicleDescriptions[key] ?? '').toString(),
+      iconName: _getIconName(key),
+      capacity: (entry['capacity'] as num?)?.toInt() ??
+          _vehicleCapacities[key] ??
+          4,
+      fare: fare,
+      baseFare: (breakdown['startingFee'] ??
+              entry['startingFee'] ??
+              entry['base_fare'] ??
+              entry['baseFare'] ??
+              0)
+          .toDouble(),
+      perKmRate: (breakdown['ratePerKm'] ??
+              entry['per_km_rate'] ??
+              entry['perKmRate'] ??
+              0)
+          .toDouble(),
+      perMinRate: (breakdown['ratePerMin'] ??
+              entry['per_min_rate'] ??
+              entry['perMinRate'] ??
+              0)
+          .toDouble(),
+      distanceFare: (breakdown['distanceFare'] ?? entry['distanceFare'] ?? 0)
+          .toDouble(),
+      timeFare: (breakdown['timeFare'] ?? entry['timeFare'] ?? 0).toDouble(),
+      surgeAmount: (breakdown['surgeAmount'] ?? entry['surgeAmount'] ?? 0)
+          .toDouble(),
+      minimumFareApplied: breakdown['minimumFareApplied'] == true ||
+          entry['minimumFareApplied'] == true,
+      eta: (entry['eta'] ?? '5 min').toString(),
+      isPopular: entry['is_popular'] ?? entry['isPopular'] ?? key == 'cab_mini',
+      badge: entry['badge'],
+      surgeMultiplier:
+          (entry['surge_multiplier'] ?? entry['surgeMultiplier'] ?? 1.0)
+              .toDouble(),
+      isSurge: entry['is_surge'] ?? entry['isSurge'] ?? false,
+    );
+  }
+
   /// Build ordered [CabType]s from a `calculate-all` `{ "<type>": {fare} }` map.
   List<CabType> _cabOptionsFromTypeMap(Map<String, dynamic> byType) {
     final keys = byType.keys.toList()
@@ -1941,38 +2009,9 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
     for (final key in keys) {
       final raw = byType[key];
       if (raw is! Map) continue;
-      final entry = Map<String, dynamic>.from(raw);
-      final fare = (entry['effective_fare'] ??
-              entry['effectiveFare'] ??
-              entry['totalFare'] ??
-              entry['total_fare'] ??
-              entry['fare'] ??
-              0)
-          .toDouble();
-      result.add(CabType(
-        id: key,
-        name: (entry['name'] ?? _vehicleNames[key] ?? _prettifyVehicleKey(key))
-            .toString(),
-        description:
-            (entry['description'] ?? _vehicleDescriptions[key] ?? '').toString(),
-        iconName: _getIconName(key),
-        capacity: (entry['capacity'] as num?)?.toInt() ??
-            _vehicleCapacities[key] ??
-            4,
-        fare: fare,
-        baseFare: (entry['base_fare'] ?? entry['baseFare'] ?? 0).toDouble(),
-        perKmRate:
-            (entry['per_km_rate'] ?? entry['perKmRate'] ?? 0).toDouble(),
-        perMinRate:
-            (entry['per_min_rate'] ?? entry['perMinRate'] ?? 0).toDouble(),
-        eta: (entry['eta'] ?? '5 min').toString(),
-        isPopular: entry['is_popular'] ?? entry['isPopular'] ?? key == 'cab_mini',
-        badge: entry['badge'],
-        surgeMultiplier:
-            (entry['surge_multiplier'] ?? entry['surgeMultiplier'] ?? 1.0)
-                .toDouble(),
-        isSurge: entry['is_surge'] ?? entry['isSurge'] ?? false,
-      ));
+      result.add(
+        _cabTypeFromPricingEntry(key, Map<String, dynamic>.from(raw)),
+      );
     }
     return result;
   }
@@ -4298,16 +4337,28 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
   Widget _buildFareBreakdown() {
     final selectedCab = _cabTypes.firstWhere((c) => c.id == _selectedCabType,
         orElse: () => _cabTypes.first);
-    final fare = _cabFares[_selectedCabType] ?? 0;
-    final distanceKm = _distanceText.isNotEmpty
-        ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0
-        : 0;
+    final fare = _cabFares[_selectedCabType] ?? selectedCab.fare;
+    final distanceKm = selectedCab.distanceFare > 0 || selectedCab.perKmRate > 0
+        ? (_distanceText.isNotEmpty
+            ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0
+            : 0)
+        : (_distanceText.isNotEmpty
+            ? double.tryParse(_distanceText.replaceAll(' km', '')) ?? 0
+            : 0);
     final durationMinParsed = figmaParseTripDurationMinutes(_durationText);
     final durationMin = (durationMinParsed != null && durationMinParsed > 0)
         ? durationMinParsed.toDouble()
         : (_durationMinFromBackend > 0
             ? _durationMinFromBackend.toDouble()
             : 0);
+
+    final hasKmRate = selectedCab.perKmRate > 0;
+    final hasMinRate = selectedCab.perMinRate > 0;
+    // Amounts come from pricing-service — never recompute on device.
+    final distanceFare = selectedCab.distanceFare;
+    final timeFare = selectedCab.timeFare;
+    final baseFare = selectedCab.baseFare;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -4348,13 +4399,29 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           ),
           const SizedBox(height: 10),
           _buildFareRow(
-              'Base Fare', '₹${selectedCab.baseFare.toStringAsFixed(0)}'),
+              'Base Fare', '₹${baseFare.toStringAsFixed(0)}'),
           _buildFareRow(
-              'Distance (${distanceKm.toStringAsFixed(1)} km × ₹${selectedCab.perKmRate.toStringAsFixed(0)})',
-              '₹${(distanceKm * selectedCab.perKmRate).toStringAsFixed(0)}'),
+              hasKmRate
+                  ? 'Distance (${distanceKm.toStringAsFixed(1)} km × ₹${selectedCab.perKmRate.toStringAsFixed(0)})'
+                  : 'Distance (${distanceKm.toStringAsFixed(1)} km)',
+              '₹${distanceFare.toStringAsFixed(0)}'),
           _buildFareRow(
-              'Time (${durationMin.toStringAsFixed(0)} min × ₹${selectedCab.perMinRate.toStringAsFixed(0)})',
-              '₹${(durationMin * selectedCab.perMinRate).toStringAsFixed(0)}'),
+              hasMinRate
+                  ? 'Time (${durationMin.toStringAsFixed(0)} min × ₹${selectedCab.perMinRate.toStringAsFixed(1)})'
+                  : 'Time (${durationMin.toStringAsFixed(0)} min)',
+              '₹${timeFare.toStringAsFixed(0)}'),
+          if (selectedCab.surgeAmount > 0)
+            _buildFareRow(
+              'Surge (${selectedCab.surgeMultiplier.toStringAsFixed(1)}x)',
+              '+₹${selectedCab.surgeAmount.toStringAsFixed(0)}',
+            ),
+          if (selectedCab.minimumFareApplied) ...[
+            const SizedBox(height: 4),
+            const Text(
+              'Minimum fare applied',
+              style: TextStyle(fontSize: 10, color: Color(0xFFE65100)),
+            ),
+          ],
           const Divider(height: 16),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,

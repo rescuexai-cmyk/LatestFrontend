@@ -172,19 +172,30 @@ class FareBreakdownWidget extends StatelessWidget {
   }
 
   Widget _buildBaseFareSection() {
+    final hasKmRate = breakdown.ratePerKm > 0;
+    final hasMinRate = breakdown.ratePerMin > 0;
     return Column(
       children: [
         _buildFareRow('Base Fare', '₹${breakdown.baseFare.toStringAsFixed(0)}'),
         _buildFareRow(
-          'Distance (${breakdown.distanceKm.toStringAsFixed(1)} km × ₹${breakdown.ratePerKm.toStringAsFixed(0)})',
+          hasKmRate
+              ? 'Distance (${breakdown.distanceKm.toStringAsFixed(1)} km × ₹${_formatRate(breakdown.ratePerKm)})'
+              : 'Distance (${breakdown.distanceKm.toStringAsFixed(1)} km)',
           '₹${breakdown.distanceFare.toStringAsFixed(0)}',
         ),
         _buildFareRow(
-          'Time (${breakdown.durationMin.toStringAsFixed(0)} min × ₹${breakdown.ratePerMin.toStringAsFixed(1)})',
+          hasMinRate
+              ? 'Time (${breakdown.durationMin.toStringAsFixed(0)} min × ₹${_formatRate(breakdown.ratePerMin)})'
+              : 'Time (${breakdown.durationMin.toStringAsFixed(0)} min)',
           '₹${breakdown.timeFare.toStringAsFixed(0)}',
         ),
       ],
     );
+  }
+
+  String _formatRate(double rate) {
+    if (rate == rate.roundToDouble()) return rate.toStringAsFixed(0);
+    return rate.toStringAsFixed(1);
   }
 
   Widget _buildDynamicPricingSection() {

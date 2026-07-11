@@ -279,49 +279,36 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
 
   FareBreakdown _buildFareBreakdownModel(Ride ride) {
     final fb = ride.fareBreakdown;
-    double dn(String key, double fallback) {
+    double dn(String key, [double fallback = 0]) {
       final v = fb?[key];
       if (v == null) return fallback;
       if (v is num) return v.toDouble();
       return double.tryParse(v.toString()) ?? fallback;
     }
 
-    final rateKm = dn('ratePerKm', dn('perKmRate', 12));
-    final rateMin = dn('ratePerMin', dn('perMinRate', 1.5));
-    final baseFare = dn('startingFee', dn('baseFare', 30));
-    final distanceFare = dn('distanceFare', ride.distance * rateKm);
-    final timeFare = dn('timeFare', ride.estimatedDuration * rateMin);
-
-    double surgeMul = dn('dynamicMultiplier', dn('surgeMultiplier', 1.0));
-    if (surgeMul <= 0) surgeMul = 1.0;
-    final surgeAmt = dn('surgeAmount', 0);
-
-    final subtotalComputed = dn('subtotal', baseFare + distanceFare + timeFare);
-    final totalFare =
-        ride.fare > 0 ? ride.fare : dn('totalFare', dn('estimatedFare', subtotalComputed));
-
+    // Display backend snapshot only — no derived rates or recomputed totals.
     return FareBreakdown(
-      baseFare: baseFare,
-      distanceKm: ride.distance,
-      durationMin: ride.estimatedDuration.toDouble(),
-      ratePerKm: rateKm,
-      ratePerMin: rateMin,
-      distanceFare: distanceFare,
-      timeFare: timeFare,
-      surgeMultiplier: surgeMul,
-      surgeAmount: surgeAmt,
-      tolls: dn('tolls', 0),
-      airportFee: dn('airportCharge', 0),
-      waitingCharge: dn('waitingCharge', 0),
-      parkingFees: dn('parkingFees', 0),
-      extraStopsCharge: dn('extraStopsCharge', 0),
-      discount: dn('discount', 0),
-      subtotal: subtotalComputed,
-      gstPercent: dn('gstPercent', 5),
-      gstAmount: dn('gstAmount', 0),
-      totalFare: totalFare,
+      baseFare: dn('startingFee', dn('baseFare')),
+      distanceKm: dn('distanceKm', ride.distance),
+      durationMin: dn('durationMin', ride.estimatedDuration.toDouble()),
+      ratePerKm: dn('ratePerKm', dn('perKmRate')),
+      ratePerMin: dn('ratePerMin', dn('perMinRate')),
+      distanceFare: dn('distanceFare'),
+      timeFare: dn('timeFare'),
+      surgeMultiplier: dn('surgeMultiplier', dn('dynamicMultiplier', 1)),
+      surgeAmount: dn('surgeAmount'),
+      tolls: dn('tolls'),
+      airportFee: dn('airportCharge', dn('airportFee')),
+      waitingCharge: dn('waitingCharge'),
+      parkingFees: dn('parkingFees'),
+      extraStopsCharge: dn('extraStopsCharge'),
+      discount: dn('discount', dn('discountAmount')),
+      subtotal: dn('subtotal'),
+      gstPercent: dn('gstPercent'),
+      gstAmount: dn('gstAmount'),
+      totalFare: ride.fare > 0 ? ride.fare : dn('totalFare'),
       promoCode: fb?['promoCode'] as String?,
-      minimumFareApplied: fb?['minimumFareApplied'] as bool? ?? false,
+      minimumFareApplied: fb?['minimumFareApplied'] == true,
     );
   }
 

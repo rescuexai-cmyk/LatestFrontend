@@ -223,51 +223,55 @@ class Ride extends Equatable {
       createdAt = DateTime.now();
     }
 
-    // Parse fare breakdown from backend
+    // Parse fare breakdown from backend only — never invent rates/fees on device.
     final Map<String, dynamic> fareBreakdown;
-    if (json['breakdown'] is Map<String, dynamic>) {
+    if (json['breakdown'] is Map) {
       fareBreakdown =
-          Map<String, dynamic>.from(json['breakdown'] as Map<String, dynamic>);
-    } else if (json['fareBreakdown'] is Map<String, dynamic>) {
-      fareBreakdown = Map<String, dynamic>.from(
-          json['fareBreakdown'] as Map<String, dynamic>);
+          Map<String, dynamic>.from(json['breakdown'] as Map);
+    } else if (json['fareBreakdown'] is Map) {
+      fareBreakdown =
+          Map<String, dynamic>.from(json['fareBreakdown'] as Map);
     } else {
-      fareBreakdown = {
-        'startingFee': _toDouble(json['baseFare'] ?? 30),
-        'ratePerKm': 12.0,
-        'ratePerMin': 1.5,
-        'distanceFare': _toDouble(json['distanceFare'] ?? 0),
-        'timeFare': _toDouble(json['timeFare'] ?? 0),
-        'dynamicMultiplier': _toDouble(json['surgeMultiplier'] ?? 1.0),
-        'tolls': _toDouble(json['tolls'] ?? 0),
-        'airportCharge': _toDouble(json['airportCharge'] ?? 0),
-        'waitingCharge': _toDouble(json['waitingCharge'] ?? 0),
-        'parkingFees': _toDouble(json['parkingFees'] ?? 0),
-        'extraStopsCharge': _toDouble(json['extraStopsCharge'] ?? 0),
-        'discount': _toDouble(json['discount'] ?? 0),
-        'gstPercent': 5.0,
-        'gstAmount': _toDouble(json['gstAmount'] ?? 0),
-        'minimumFareApplied': json['minimumFareApplied'] ?? false,
+      fareBreakdown = <String, dynamic>{
+        'startingFee': _toDouble(json['startingFee'] ?? json['baseFare']),
+        'distanceFare': _toDouble(json['distanceFare']),
+        'timeFare': _toDouble(json['timeFare']),
+        'surgeMultiplier': _toDouble(json['surgeMultiplier'] ?? 1),
+        'surgeAmount': _toDouble(json['surgeAmount'] ?? json['surgeFare']),
+        'discount': _toDouble(json['discountAmount'] ?? json['discount']),
+        'totalFare': _toDouble(json['totalFare'] ?? json['fare']),
+        'distanceKm': _toDouble(json['distance']),
+        'durationMin': _toDouble(json['duration'] ?? json['estimatedDuration']),
+        'ratePerKm': 0,
+        'ratePerMin': 0,
+        'minimumFareApplied': json['minimumFareApplied'] == true,
+        'subtotal': 0,
       };
     }
-    // Harmonize keys widgets expect (`startingFee` vs `baseFare`, etc.)
-    fareBreakdown['startingFee'] ??= fareBreakdown['baseFare'];
-    fareBreakdown['baseFare'] ??= fareBreakdown['startingFee'];
-    fareBreakdown['ratePerKm'] ??= fareBreakdown['perKmRate'];
-    fareBreakdown['ratePerMin'] ??= fareBreakdown['perMinRate'];
+
+    // Normalize aliases without computing missing money fields.
+    fareBreakdown['startingFee'] ??=
+        fareBreakdown['baseFare'] ?? json['startingFee'] ?? json['baseFare'];
+    fareBreakdown['baseFare'] = fareBreakdown['startingFee'];
+    fareBreakdown['distanceFare'] ??= json['distanceFare'];
+    fareBreakdown['timeFare'] ??= json['timeFare'];
+    fareBreakdown['totalFare'] ??=
+        json['totalFare'] ?? json['fare'] ?? json['estimatedFare'];
+    fareBreakdown['discount'] ??=
+        json['discountAmount'] ?? json['discount'] ?? 0;
+    fareBreakdown['surgeAmount'] ??= json['surgeAmount'] ?? json['surgeFare'] ?? 0;
+    fareBreakdown['surgeMultiplier'] ??= json['surgeMultiplier'] ?? 1;
+    fareBreakdown['distanceKm'] ??= json['distance'] ?? json['distanceKm'];
+    fareBreakdown['durationMin'] ??=
+        json['duration'] ?? json['estimatedDuration'] ?? json['estimatedDurationMin'];
+    fareBreakdown['ratePerKm'] ??= fareBreakdown['perKmRate'] ?? 0;
+    fareBreakdown['ratePerMin'] ??= fareBreakdown['perMinRate'] ?? 0;
+    fareBreakdown['minimumFareApplied'] ??=
+        json['minimumFareApplied'] == true;
 
     var fare = _parseTotalFare(json);
     if (fare <= 0) {
-      fare = _toDouble(
-          fareBreakdown['totalFare'] ?? fareBreakdown['subtotal']);
-    }
-    if (fare <= 0) {
-      final b = _toDouble(json['baseFare']);
-      final df = _toDouble(json['distanceFare']);
-      final tf = _toDouble(json['timeFare']);
-      if (b + df + tf > 0) {
-        fare = b + df + tf;
-      }
+      fare = _toDouble(fareBreakdown['totalFare']);
     }
 
     return Ride(
