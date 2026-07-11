@@ -1,12 +1,17 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/services/api_client.dart';
+import '../../../../core/services/push_notification_service.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../providers/driver_onboarding_provider.dart';
 import '../widgets/edit_personal_details_sheet.dart';
@@ -37,6 +42,9 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
   final ImagePicker _picker = ImagePicker();
   String? _reuploadingDocType;
   final Set<String> _pendingUploadDocTypes = <String>{};
+  final Map<String, int> _previewCacheBustMs = <String, int>{};
+  final Map<String, String> _localPreviewPaths = <String, String>{};
+  StreamSubscription<RemoteMessage>? _pushSubscription;
   static const List<Map<String, dynamic>> _allDocuments = [
     {'backendId': 'LICENSE', 'frontendId': 'driving_license', 'title': 'Driving License', 'icon': Icons.badge_outlined, 'color': Color(0xFF2196F3)},
     {'backendId': 'RC', 'frontendId': 'vehicle_rc', 'title': 'Registration Certificate (RC)', 'icon': Icons.description_outlined, 'color': Color(0xFF9C27B0)},
@@ -51,15 +59,52 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _fetchBackendStatus();
     });
+    _pushSubscription =
+        pushNotificationService.notificationStream.listen((message) {
+      final type = message.data['type'] as String?;
+      if (type == NotificationTypes.driverOnboarding) {
+        _refreshStatus();
+      }
+    });
   }
+
+  @override
+  void dispose() {
+    _pushSubscription?.cancel();
+    super.dispose();
+  }
+
   Future<void> _fetchBackendStatus() async {
     if (_hasFetchedStatus) return;
     _hasFetchedStatus = true;
     debugPrint('📋 DriverDocumentManagementScreen: Fetching backend status...');
     await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
+    if (mounted) _syncPendingUploadFlags();
   }
   Future<void> _refreshStatus() async {
     await ref.read(driverOnboardingProvider.notifier).fetchOnboardingStatus();
+    if (mounted) {
+      setState(_syncPendingUploadFlags);
+    }
+  }
+
+  void _syncPendingUploadFlags() {
+    final status = ref.read(driverOnboardingProvider).backendStatus;
+    _pendingUploadDocTypes.removeWhere((type) {
+      final latest = status.getLatestDocumentDetail(type);
+      if (latest == null) return false;
+      final upper = latest.status.toUpperCase();
+      // Keep local "pending" only while the latest upload is still in review.
+      return latest.isVerified ||
+          upper == 'VERIFIED' ||
+          latest.isFlaggedOrRejected ||
+          upper == 'REJECTED' ||
+          upper == 'FAILED' ||
+          upper == 'FLAGGED';
+    });
+    // Keep local file preview while that re-upload is still pending review.
+    _localPreviewPaths
+        .removeWhere((type, _) => !_pendingUploadDocTypes.contains(type));
   }
   void _handleBackNavigation() {
     final onboardingState = ref.read(driverOnboardingProvider);
@@ -141,9 +186,20 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
             filePath: selectedPath,
           );
       if (!mounted) return;
+      final bust = DateTime.now().millisecondsSinceEpoch;
       setState(() {
         _reuploadingDocType = null;
         _pendingUploadDocTypes.add(backendId);
+        _previewCacheBustMs[backendId] = bust;
+        final lower = selectedPath!.toLowerCase();
+        if (lower.endsWith('.jpg') ||
+            lower.endsWith('.jpeg') ||
+            lower.endsWith('.png') ||
+            lower.endsWith('.webp')) {
+          _localPreviewPaths[backendId] = selectedPath;
+        } else {
+          _localPreviewPaths.remove(backendId);
+        }
       });
       AppMessenger.showDriverErrorBanner(context, '$title re-uploaded. Status changed to Pending.');
       await _refreshStatus();
@@ -280,6 +336,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                       status: docStatus,
                       rejectionReason: rejectionReason,
                       previewUrl: _documentPreviewUrl(backendStatus, backendId),
+                      localPreviewPath: _localPreviewPaths[backendId],
                       isReuploading: isReuploading,
                       isExpiring: isExpiring,
                       onReupload: () => _reuploadDocument(backendId, title),
@@ -354,12 +411,15 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
   }
   String? _documentPreviewUrl(
       BackendOnboardingStatus status, String backendId) {
-    for (final detail in status.documentDetails) {
-      if (detail.type == backendId && detail.url != null) {
-        return _resolveDocumentUrl(detail.url);
-      }
-    }
-    return null;
+    final latest = status.getLatestDocumentDetail(backendId);
+    final resolved = _resolveDocumentUrl(latest?.url);
+    if (resolved == null) return null;
+
+    final bust = _previewCacheBustMs[backendId] ??
+        latest?.uploadedAt?.millisecondsSinceEpoch;
+    if (bust == null) return resolved;
+    final separator = resolved.contains('?') ? '&' : '?';
+    return '$resolved${separator}v=$bust';
   }
 
   /// Turn relative `/uploads/...` paths into absolute URLs the image widget can load.
@@ -382,6 +442,35 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     final lower = url.toLowerCase();
     return lower.contains('.pdf') || lower.contains('content-type=application%2Fpdf');
   }
+  Future<void> _openLocalDocumentPreview(String path) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        child: Stack(
+          children: [
+            InteractiveViewer(
+              child: Image.file(File(path), fit: BoxFit.contain),
+            ),
+            Positioned(
+              top: 8,
+              right: 8,
+              child: IconButton(
+                icon: const Icon(Icons.close),
+                color: Colors.white,
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.black54,
+                ),
+                onPressed: () => Navigator.pop(ctx),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _openDocumentPreview(String previewUrl) async {
     if (_isPdfUrl(previewUrl)) {
       final uri = Uri.tryParse(previewUrl);
@@ -398,7 +487,11 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
         child: Stack(
           children: [
             InteractiveViewer(
-              child: Image.network(previewUrl, fit: BoxFit.contain),
+              child: Image.network(
+                previewUrl,
+                key: ValueKey(previewUrl),
+                fit: BoxFit.contain,
+              ),
             ),
             Positioned(
               top: 8,
@@ -491,6 +584,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
     required Color color,
     required String title,
     required String? previewUrl,
+    String? localPreviewPath,
     required DocumentStatus status,
     required String? rejectionReason,
     required bool isReuploading,
@@ -612,10 +706,16 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                 const Icon(Icons.check_circle, color: _success, size: 24),
             ],
           ),
-          if (previewUrl != null) ...[
+          if (previewUrl != null || localPreviewPath != null) ...[
             const SizedBox(height: 12),
             GestureDetector(
-              onTap: () => _openDocumentPreview(previewUrl),
+              onTap: () {
+                if (localPreviewPath != null) {
+                  _openLocalDocumentPreview(localPreviewPath);
+                } else if (previewUrl != null) {
+                  _openDocumentPreview(previewUrl);
+                }
+              },
               child: Container(
                 width: double.infinity,
                 height: 120,
@@ -624,7 +724,7 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: _border),
                 ),
-                child: _isPdfUrl(previewUrl)
+                child: (previewUrl != null && _isPdfUrl(previewUrl) && localPreviewPath == null)
                     ? const Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -635,39 +735,53 @@ class _DriverDocumentManagementScreenState extends ConsumerState<DriverDocumentM
                       )
                     : ClipRRect(
                         borderRadius: BorderRadius.circular(10),
-                        child: Image.network(
-                          previewUrl,
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                          height: 120,
-                          loadingBuilder: (context, child, progress) {
-                            if (progress == null) return child;
-                            return const Center(
-                              child: SizedBox(
-                                width: 24,
-                                height: 24,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                            );
-                          },
-                          errorBuilder: (_, __, ___) => const Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(Icons.broken_image_outlined,
-                                    color: _textSecondary, size: 28),
-                                SizedBox(height: 6),
-                                Text(
-                                  'Preview unavailable',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: _textSecondary,
+                        child: localPreviewPath != null
+                            ? Image.file(
+                                File(localPreviewPath),
+                                key: ValueKey('local-$localPreviewPath'),
+                                fit: BoxFit.cover,
+                                width: double.infinity,
+                                height: 120,
+                                errorBuilder: (_, __, ___) =>
+                                    const Center(
+                                  child: Icon(Icons.broken_image_outlined,
+                                      color: _textSecondary, size: 28),
+                                ),
+                              )
+                            : Image.network(
+                                previewUrl!,
+                                key: ValueKey(previewUrl),
+                                fit: BoxFit.cover,
+                                width: double.infinity,
+                                height: 120,
+                                loadingBuilder: (context, child, progress) {
+                                  if (progress == null) return child;
+                                  return const Center(
+                                    child: SizedBox(
+                                      width: 24,
+                                      height: 24,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    ),
+                                  );
+                                },
+                                errorBuilder: (_, __, ___) => const Center(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.broken_image_outlined,
+                                          color: _textSecondary, size: 28),
+                                      SizedBox(height: 6),
+                                      Text(
+                                        'Preview unavailable',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: _textSecondary,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              ],
-                            ),
-                          ),
-                        ),
+                              ),
                       ),
               ),
             ),

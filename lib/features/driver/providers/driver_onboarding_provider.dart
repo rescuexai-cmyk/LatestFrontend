@@ -209,9 +209,15 @@ class BackendDocumentInfo {
     return BackendDocumentInfo(
       type: json['type'] as String? ?? json['documentType'] as String? ?? '',
       status: status,
-      url: json['url'] as String? ?? json['documentUrl'] as String?,
+      url: json['url'] as String? ??
+          json['documentUrl'] as String? ??
+          json['fileUrl'] as String? ??
+          json['file_url'] as String?,
       uploadedAt: (() {
-        final raw = json['uploaded_at'] ?? json['uploadedAt'];
+        final raw = json['uploaded_at'] ??
+            json['uploadedAt'] ??
+            json['updated_at'] ??
+            json['updatedAt'];
         if (raw is String && raw.isNotEmpty) return DateTime.tryParse(raw);
         return null;
       })(),
@@ -439,9 +445,42 @@ class BackendOnboardingStatus {
   /// Check if a document type is pending verification
   bool isDocumentPending(String backendType) => pendingDocuments.contains(backendType);
   
+  /// Latest row for a document type (re-uploads keep older rows until cleaned).
+  BackendDocumentInfo? getLatestDocumentDetail(String backendType) {
+    BackendDocumentInfo? best;
+    for (final detail in documentDetails) {
+      if (detail.type.toUpperCase() != backendType.toUpperCase()) continue;
+      if (best == null) {
+        best = detail;
+        continue;
+      }
+      final bestTs = best.uploadedAt?.millisecondsSinceEpoch ?? 0;
+      final curTs = detail.uploadedAt?.millisecondsSinceEpoch ?? 0;
+      if (curTs >= bestTs) best = detail;
+    }
+    return best;
+  }
+
   /// Get document status for a backend type
   DocumentStatus getDocumentStatus(String backendType) {
-    // Verified wins over any stale rejected/flagged classification.
+    // Prefer the latest upload row so a re-upload isn't masked by an older
+    // still-verified document of the same type.
+    final latest = getLatestDocumentDetail(backendType);
+    if (latest != null) {
+      final upper = latest.status.toUpperCase();
+      if (latest.isVerified || upper == 'VERIFIED') {
+        return DocumentStatus.verified;
+      }
+      if (latest.isFlaggedOrRejected ||
+          upper == 'REJECTED' ||
+          upper == 'FAILED' ||
+          upper == 'FLAGGED') {
+        return DocumentStatus.rejected;
+      }
+      return DocumentStatus.inReview;
+    }
+
+    // Fallback to aggregate lists when details are missing.
     if (verifiedDocuments.contains(backendType)) return DocumentStatus.verified;
     if (rejectedDocuments.contains(backendType)) return DocumentStatus.rejected;
     if (pendingDocuments.contains(backendType)) return DocumentStatus.inReview;
@@ -452,6 +491,11 @@ class BackendOnboardingStatus {
   /// Get the reason a document was flagged or rejected.
   /// Checks rejectionReason first, then aiMismatchReason from details.
   String? getRejectionReason(String backendType) {
+    final latest = getLatestDocumentDetail(backendType);
+    if (latest != null) {
+      final reason = latest.displayReason;
+      if (reason != null && reason.isNotEmpty) return reason;
+    }
     for (final detail in documentDetails) {
       if (detail.type == backendType) {
         final reason = detail.displayReason;
