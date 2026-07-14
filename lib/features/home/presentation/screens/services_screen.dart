@@ -255,10 +255,8 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     return defaultIcon;
   }
 
-  // Services that are not yet available.
-  // Personal Driver ("Hire a Driver") is now live: it's dispatched to
-  // independent drivers and surfaces via calculate-all / vehicleType
-  // "personal_driver" in the Find Trip flow.
+  // Services that are not yet available via the vehicle grid.
+  // Hire a Driver action tile uses a dedicated Coming Soon screen instead.
   static const _comingSoonServices = <String>{};
 
   void _navigateToRescueFlow() {
@@ -1070,6 +1068,12 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
                               onTap: () {
                                 if (a.serviceType == 'bike_rescue') {
                                   _navigateToRescueFlow();
+                                } else if (a.serviceType == 'personal_driver') {
+                                  context.push(
+                                    '${AppRoutes.comingSoon}'
+                                    '?title=${Uri.encodeComponent(ref.tr(a.titleKey))}'
+                                    '&subtitle=${Uri.encodeComponent('Personal drivers you can hire by the hour — launching soon in your city.')}',
+                                  );
                                 } else {
                                   _navigateToFindTrip(serviceType: a.serviceType);
                                 }

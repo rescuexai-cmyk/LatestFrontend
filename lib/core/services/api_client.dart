@@ -1605,14 +1605,33 @@ class ApiClient {
     required String description,
     String priority = 'medium',
     String? driverId,
+    String? rideId,
   }) async {
     final response = await _dio.post('/api/user/support', data: {
       'issue_type': issueType,
       'description': description,
       'priority': priority,
       if (driverId != null) 'driver_id': driverId,
+      if (rideId != null) 'ride_id': rideId,
     });
     return response.data as Map<String, dynamic>;
+  }
+
+  /// Lost & Found report for a past ride — stored as a high-priority support ticket
+  /// and (when a driver is known) pushes a notification to that driver.
+  Future<Map<String, dynamic>> submitLostItemReport({
+    required String rideId,
+    required String category,
+    required String description,
+    String? driverId,
+  }) {
+    return submitUserSupport(
+      issueType: 'Lost Item — $category',
+      description: description,
+      priority: 'high',
+      driverId: driverId,
+      rideId: rideId,
+    );
   }
 
   // ─────────────────────────────────────────────

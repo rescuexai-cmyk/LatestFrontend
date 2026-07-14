@@ -11,6 +11,7 @@ import '../../../../core/widgets/fare_breakdown_widget.dart';
 import '../widgets/lost_and_found_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import 'package:ride_hailing_flutter/core/widgets/raahi_mandala_background.dart';
 
 class RideDetailsScreen extends ConsumerStatefulWidget {
   final String rideId;
@@ -468,43 +469,99 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
   Future<void> _openSupportOptions() async {
     const supportNumber = AppConfig.supportPhone;
     const supportEmail = AppConfig.supportEmail;
+    final ride = _ride;
+    final showLostAndFound =
+        ride != null && LostAndFoundSheet.isEligible(ride);
 
     await showModalBottomSheet(
       context: context,
-      showDragHandle: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.call),
-                title: const Text('Call support'),
-                subtitle: Text(supportNumber),
-                onTap: () => _launchUri(Uri(scheme: 'tel', path: supportNumber)),
-              ),
-              ListTile(
-                leading: const Icon(Icons.email_outlined),
-                title: const Text('Email support'),
-                subtitle: Text(supportEmail),
-                onTap: () => _launchUri(Uri(
-                  scheme: 'mailto',
-                  path: supportEmail,
-                  query: 'subject=Ride support&body=Ride ID: ${_ride?.id ?? ''}',
-                )),
-              ),
-              if (_ride?.driver?.phone != null)
-                ListTile(
-                  leading: const Icon(Icons.chat_bubble_outline),
-                  title: const Text('Message driver'),
-                  subtitle: Text(_ride!.driver!.phone!),
-                  onTap: () => _launchUri(Uri(scheme: 'sms', path: _ride!.driver!.phone!)),
+      showDragHandle: false,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return RaahiMandalaStack(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              16,
+              8,
+              16,
+              16 + MediaQuery.of(sheetContext).viewPadding.bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD4C4B0),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-            ],
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(8, 4, 8, 12),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Get Help',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1A1A1A),
+                      ),
+                    ),
+                  ),
+                ),
+                if (showLostAndFound)
+                  ListTile(
+                    leading: const Icon(Icons.search, color: Color(0xFFD4956A)),
+                    title: const Text('Lost & Found'),
+                    subtitle: Text(
+                      'Report a lost item • ${LostAndFoundSheet.remainingTime(ride)}',
+                    ),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      LostAndFoundSheet.show(context, ride);
+                    },
+                  ),
+                if (showLostAndFound) const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.call),
+                  title: const Text('Call support'),
+                  subtitle: const Text(supportNumber),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _launchUri(Uri(scheme: 'tel', path: supportNumber));
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.email_outlined),
+                  title: const Text('Email support'),
+                  subtitle: const Text(supportEmail),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _launchUri(Uri(
+                      scheme: 'mailto',
+                      path: supportEmail,
+                      query:
+                          'subject=Ride support&body=Ride ID: ${ride?.id ?? ''}',
+                    ));
+                  },
+                ),
+                if (ride?.driver?.phone != null)
+                  ListTile(
+                    leading: const Icon(Icons.chat_bubble_outline),
+                    title: const Text('Message driver'),
+                    subtitle: Text(ride!.driver!.phone!),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      _launchUri(
+                          Uri(scheme: 'sms', path: ride.driver!.phone!));
+                    },
+                  ),
+              ],
+            ),
           ),
         );
       },

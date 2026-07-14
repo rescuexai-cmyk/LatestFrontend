@@ -2254,19 +2254,16 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
         if (point.longitude < minLng) minLng = point.longitude;
         if (point.longitude > maxLng) maxLng = point.longitude;
       }
-      // Add padding to bounds (more padding for better visibility)
-      final latPadding = (maxLat - minLat) * 0.15; // 15% padding
-      final lngPadding = (maxLng - minLng) * 0.15;
-      final minPadding = 0.002; // Minimum padding
+      // Tight neighborhood framing for the vehicle sheet (match product
+      // screenshot): small geo inset + light edge pad so pickup/drop sit
+      // close with ~1–2 blocks of context — not city-wide zoom-out.
+      final latSpan = (maxLat - minLat).abs();
+      final lngSpan = (maxLng - minLng).abs();
+      final latPadding = math.max(latSpan * 0.06, 0.00055);
+      final lngPadding = math.max(lngSpan * 0.06, 0.00055);
       final bounds = LatLngBounds(
-        southwest: LatLng(
-          minLat - (latPadding > minPadding ? latPadding : minPadding),
-          minLng - (lngPadding > minPadding ? lngPadding : minPadding),
-        ),
-        northeast: LatLng(
-          maxLat + (latPadding > minPadding ? latPadding : minPadding),
-          maxLng + (lngPadding > minPadding ? lngPadding : minPadding),
-        ),
+        southwest: LatLng(minLat - latPadding, minLng - lngPadding),
+        northeast: LatLng(maxLat + latPadding, maxLng + lngPadding),
       );
       debugPrint('📍 Fitting map to bounds with ${allPoints.length} points');
       debugPrint(
@@ -2274,17 +2271,16 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
       debugPrint(
           '   NE: (${bounds.northeast.latitude.toStringAsFixed(4)}, ${bounds.northeast.longitude.toStringAsFixed(4)})');
       await Future.delayed(const Duration(milliseconds: 100));
-      // Uber-style framing: generous edge padding (the GoogleMap widget's own
-      // padding already accounts for the bottom sheet and top pills, so the
-      // route lands centered in the visible window above the sheet).
+      // GoogleMap.padding already clears the bottom sheet / top chrome;
+      // keep only a modest extra inset so the route fills the map window.
       await _controller?.animateCamera(
-        CameraUpdate.newLatLngBounds(bounds, 80),
+        CameraUpdate.newLatLngBounds(bounds, 44),
       );
-      // Short trips shouldn't zoom into street level — cap like Uber does so
-      // the rider always has neighborhood context around the route.
+      // Cap street-level overshoot on very short hops; allow closer than
+      // the old 16.0 cap so short city trips match the screenshot zoom.
       final zoom = await _controller?.getZoomLevel();
-      if (zoom != null && zoom > 16.0) {
-        await _controller?.animateCamera(CameraUpdate.zoomTo(16.0));
+      if (zoom != null && zoom > 16.8) {
+        await _controller?.animateCamera(CameraUpdate.zoomTo(16.8));
       }
       debugPrint('✅ Map camera animated to show full route');
       if (mounted) await _refreshMapPillPositions();
@@ -2298,7 +2294,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
           final centerLng =
               (_pickupLocation!.longitude + _destinationLocation!.longitude) / 2;
           await _controller?.animateCamera(
-            CameraUpdate.newLatLngZoom(LatLng(centerLat, centerLng), 12),
+            CameraUpdate.newLatLngZoom(LatLng(centerLat, centerLng), 14.5),
           );
         } catch (_) {}
       }
@@ -3539,7 +3535,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
               return GoogleMap(
                 initialCameraPosition: CameraPosition(
                   target: initialTarget,
-                  zoom: 12,
+                  zoom: 14.5,
                 ),
                 markers: _markers,
                 polylines: _polylines,
@@ -3548,7 +3544,7 @@ class _FindTripScreenState extends ConsumerState<FindTripScreen> {
                   if (!_mapController.isCompleted) {
                     _mapController.complete(controller);
                   }
-                  _currentZoomLevel = 12.0;
+                  _currentZoomLevel = 14.5;
                   // Apply map style
                   if (_mapStyle != null) {
                     controller.setMapStyle(_mapStyle);

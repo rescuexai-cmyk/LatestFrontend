@@ -24,6 +24,7 @@ import '../../../../core/services/app_language_service.dart';
 import '../../../auth/providers/auth_provider.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
+import 'package:ride_hailing_flutter/core/widgets/raahi_mandala_background.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
@@ -203,8 +204,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     final user = ref.watch(currentUserProvider);
 
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: RaahiMandalaBackground.beige,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
         automaticallyImplyLeading: false,
         leadingWidth: 56,
         leading: Padding(
@@ -229,16 +234,18 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          SingleChildScrollView(
-            padding: EdgeInsets.only(
-                left: 20,
-                right: 20,
-                top: 24,
-                bottom: 100 + MediaQuery.of(context).viewPadding.bottom),
-            child: Column(
-              children: [
+      body: RaahiMandalaStack(
+        expand: true,
+        child: Stack(
+          children: [
+            SingleChildScrollView(
+              padding: EdgeInsets.only(
+                  left: 20,
+                  right: 20,
+                  top: 24,
+                  bottom: 100 + MediaQuery.of(context).viewPadding.bottom),
+              child: Column(
+                children: [
                 // Profile header (Figma-style: avatar + details + compact rating badge)
                 Material(
                   color: AppColors.inputBackground,
@@ -530,16 +537,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
           ),
         ],
       ),
+      ),
     );
   }
 
   Future<void> _openSettings(BuildContext context) async {
     await showModalBottomSheet(
       context: context,
-      showDragHandle: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
       builder: (sheetContext) => _NotificationSettingsSheet(
         currentLanguageName: _getCurrentLanguageName(),
         onLanguageTap: () {
@@ -713,11 +719,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
         initialChildSize: 0.7,
         minChildSize: 0.5,
         maxChildSize: 0.95,
-        builder: (context, scrollController) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
+        builder: (context, scrollController) => RaahiMandalaStack(
+          expand: true,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
           child: StatefulBuilder(
             builder: (context, setModalState) {
               return Column(
@@ -728,7 +732,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                     width: 40,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.grey[300],
+                      color: const Color(0xFFD4C4B0),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -765,7 +769,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                       child: Container(
                         padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFF5F5F5),
+                          color: const Color(0xFFF5F5F5).withValues(alpha: 0.92),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: const Color(0xFFE8E8E8)),
                         ),
@@ -2128,65 +2132,80 @@ class _NotificationSettingsSheetState
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-          16, 16, 16, 16 + MediaQuery.of(context).viewPadding.bottom),
-      child: _loading
-          ? const SizedBox(
-              height: 220,
-              child: Center(
-                child: CircularProgressIndicator(color: _accent),
-              ),
-            )
-          : Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SwitchListTile(
-                  title: Text(ref.tr('notifications')),
-                  subtitle: Text(ref.tr('notifications_desc')),
-                  value: _pushEnabled,
-                  activeColor: _accent,
-                  onChanged: _busy ? null : (v) => _setPushEnabled(v),
+    const sheetRadius = BorderRadius.vertical(top: Radius.circular(20));
+
+    return RaahiMandalaStack(
+      borderRadius: sheetRadius,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+            16, 8, 16, 16 + MediaQuery.of(context).viewPadding.bottom),
+        child: _loading
+            ? const SizedBox(
+                height: 220,
+                child: Center(
+                  child: CircularProgressIndicator(color: _accent),
                 ),
-                if (!_pushEnabled && _permissionPermanentlyDenied)
-                  Padding(
-                    padding:
-                        const EdgeInsets.only(left: 16, right: 16, bottom: 8),
-                    child: TextButton.icon(
-                      onPressed: () => openAppSettings(),
-                      icon:
-                          const Icon(Icons.settings, size: 18, color: _accent),
-                      label: Text(ref.tr('enable_in_settings'),
-                          style: const TextStyle(color: _accent)),
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD4C4B0),
+                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                SwitchListTile(
-                  title: Text(ref.tr('promotions')),
-                  subtitle: Text(ref.tr('promotions_desc')),
-                  value: _promoEnabled,
-                  activeColor: _accent,
-                  // Visually disabled until notifications are on.
-                  onChanged:
-                      _busy || !_pushEnabled ? null : (v) => _setPromoEnabled(v),
-                ),
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.language),
-                  title: const Text('Language'),
-                  subtitle: Text(widget.currentLanguageName),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: widget.onLanguageTap,
-                ),
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.dns_outlined),
-                  title: Text(ref.tr('server_config')),
-                  subtitle: Text(ref.tr('server_config_desc')),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: widget.onServerConfigTap,
-                ),
-              ],
-            ),
+                  SwitchListTile(
+                    title: Text(ref.tr('notifications')),
+                    subtitle: Text(ref.tr('notifications_desc')),
+                    value: _pushEnabled,
+                    activeColor: _accent,
+                    onChanged: _busy ? null : (v) => _setPushEnabled(v),
+                  ),
+                  if (!_pushEnabled && _permissionPermanentlyDenied)
+                    Padding(
+                      padding:
+                          const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+                      child: TextButton.icon(
+                        onPressed: () => openAppSettings(),
+                        icon: const Icon(Icons.settings,
+                            size: 18, color: _accent),
+                        label: Text(ref.tr('enable_in_settings'),
+                            style: const TextStyle(color: _accent)),
+                      ),
+                    ),
+                  SwitchListTile(
+                    title: Text(ref.tr('promotions')),
+                    subtitle: Text(ref.tr('promotions_desc')),
+                    value: _promoEnabled,
+                    activeColor: _accent,
+                    // Visually disabled until notifications are on.
+                    onChanged: _busy || !_pushEnabled
+                        ? null
+                        : (v) => _setPromoEnabled(v),
+                  ),
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.language),
+                    title: const Text('Language'),
+                    subtitle: Text(widget.currentLanguageName),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: widget.onLanguageTap,
+                  ),
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.dns_outlined),
+                    title: Text(ref.tr('server_config')),
+                    subtitle: Text(ref.tr('server_config_desc')),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: widget.onServerConfigTap,
+                  ),
+                ],
+              ),
+      ),
     );
   }
 }

@@ -15,6 +15,8 @@ class AppRoutes {
   static const String history = '/history';
   static const String profile = '/profile';
   static const String editProfile = '/profile/edit';
+  /// Feature placeholder (e.g. Hire a Driver) — mandala “Coming soon” screen.
+  static const String comingSoon = '/coming-soon';
 
   // Ride routes
   static const String rideDetails = '/ride/:rideId';

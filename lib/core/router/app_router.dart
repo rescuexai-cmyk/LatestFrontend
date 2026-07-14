@@ -11,6 +11,7 @@ import '../../features/auth/providers/auth_provider.dart';
 import '../../features/auth/providers/welcome_onboarding_provider.dart';
 import '../../features/home/presentation/screens/home_screen.dart';
 import '../../features/home/presentation/screens/services_screen.dart';
+import '../../features/home/presentation/screens/coming_soon_screen.dart';
 import '../../features/history/presentation/screens/history_screen.dart';
 import '../../features/profile/presentation/screens/edit_profile_screen.dart';
 import '../../features/profile/presentation/screens/profile_screen.dart';
@@ -160,7 +161,8 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return landing;
       }
 
-      // Role-based landing: rider-only users skip the dual-choice home screen.
+      // Dual-choice home is the post-auth gateway for all roles.
+      // (Rider-only used to skip straight to Services — that skipped the ask.)
       if (isAuthenticated &&
           currentLocation == AppRoutes.home &&
           shouldSkipHomeSelection(user)) {
@@ -240,6 +242,21 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: AppRoutes.services,
         name: 'services',
         builder: (context, state) => const ServicesScreen(),
+      ),
+
+      GoRoute(
+        path: AppRoutes.comingSoon,
+        name: 'comingSoon',
+        builder: (context, state) {
+          final title = state.uri.queryParameters['title'];
+          final subtitle = state.uri.queryParameters['subtitle'];
+          return ComingSoonScreen(
+            title: (title != null && title.isNotEmpty) ? title : 'Hire a Driver',
+            subtitle: (subtitle != null && subtitle.isNotEmpty)
+                ? subtitle
+                : 'Personal drivers you can hire by the hour — launching soon in your city.',
+          );
+        },
       ),
       
       // History screen

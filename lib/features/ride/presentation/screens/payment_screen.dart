@@ -17,6 +17,7 @@ import 'scheduled_ride_screen.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
 import 'package:ride_hailing_flutter/core/theme/primary_cta_styles.dart';
+import 'package:ride_hailing_flutter/core/widgets/raahi_mandala_background.dart';
 class PaymentScreen extends ConsumerStatefulWidget {
   const PaymentScreen({super.key});
   @override
@@ -503,32 +504,35 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     );
 
     return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildHeader(),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildVouchersSection(),
-                    const SizedBox(height: 24),
-                    _buildPaymentMethodsSection(),
-                    const SizedBox(height: 24),
-                    _buildVouchersAddSection(),
-                  ],
+      backgroundColor: RaahiMandalaBackground.beige,
+      body: RaahiMandalaStack(
+        expand: true,
+        child: SafeArea(
+          child: Column(
+            children: [
+              _buildHeader(),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildVouchersSection(),
+                      const SizedBox(height: 24),
+                      _buildPaymentMethodsSection(),
+                      const SizedBox(height: 24),
+                      _buildVouchersAddSection(),
+                    ],
+                  ),
                 ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-              child: _buildSelectedPayment(),
-            ),
-            _buildConfirmButton(),
-          ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: _buildSelectedPayment(),
+              ),
+              _buildConfirmButton(),
+            ],
+          ),
         ),
       ),
     );

@@ -72,6 +72,17 @@ class _DriverActiveRideScreenState
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
   bool _isLoadingRoute = true;
+  bool _isCalculatingRoute = false;
+  /// Active navigation polyline (driver → pickup before OTP, driver → drop after).
+  List<LatLng> _navRoutePoints = [];
+  DateTime? _lastRouteRecalculationAt;
+  int _routeRevision = 0;
+  static const double _deviationThresholdMeters = 50.0;
+  /// Within this distance, treat driver as on-route and trim covered polyline.
+  static const double _onRouteSnapMeters = 40.0;
+  /// Only trim when the driver has advanced at least this far past the route start.
+  static const double _minCoveredTrimMeters = 15.0;
+  static const Duration _routeRecalculationCooldown = Duration(seconds: 8);
   String _distanceText = '';
   String _durationText = '';
 
@@ -245,6 +256,7 @@ class _DriverActiveRideScreenState
         });
         _updateRealtimeEtaTexts();
         _setupMapElements();
+        _recalculateRouteIfNeeded(_driverLocation);
         _updateDriverLocationOnBackend(position.latitude, position.longitude,
             heading: position.heading);
         if (_cameraFollowEnabled) _animateCameraToDriver();
@@ -924,113 +936,134 @@ class _DriverActiveRideScreenState
 
   Future<void> _calculateRoute() async {
     if (!mounted) return;
+    if (_isCalculatingRoute) return;
+    _isCalculatingRoute = true;
+    final routeRevision = ++_routeRevision;
     setState(() => _isLoadingRoute = true);
 
     try {
-      // Calculate route from pickup to drop via intermediate stops
-      final rideRoute = await _directionsService.getRoute(
-        origin: _pickupLocation,
-        destination: _dropLocation,
-        waypoints: rideStopWaypoints(_intermediateStops),
+      // Active nav always starts from the driver's live position so re-routes
+      // follow the actual road path when the driver leaves the previous route.
+      final navDestination = _isPickedUp ? _dropLocation : _pickupLocation;
+      final navWaypoints =
+          _isPickedUp ? rideStopWaypoints(_intermediateStops) : null;
+
+      debugPrint(
+        '🗺️ [DriverRoute] Calculating '
+        'phase=${_isPickedUp ? "DROPOFF" : "PICKUP"} '
+        'from=(${_driverLocation.latitude.toStringAsFixed(5)}, ${_driverLocation.longitude.toStringAsFixed(5)}) '
+        'to=(${navDestination.latitude.toStringAsFixed(5)}, ${navDestination.longitude.toStringAsFixed(5)})',
+      );
+
+      final navRoute = await _directionsService.getRoute(
+        origin: _driverLocation,
+        destination: navDestination,
+        waypoints: navWaypoints,
         mode: TravelMode.driving,
       );
 
-      // Calculate route from driver to pickup (if not picked up yet)
-      RouteResult? driverRoute;
+      // Before pickup, also keep a static trip overview (pickup → drop).
+      RouteResult? tripOverview;
       if (!_isPickedUp) {
-        driverRoute = await _directionsService.getRoute(
-          origin: _driverLocation,
-          destination: _pickupLocation,
+        tripOverview = await _directionsService.getRoute(
+          origin: _pickupLocation,
+          destination: _dropLocation,
+          waypoints: rideStopWaypoints(_intermediateStops),
           mode: TravelMode.driving,
         );
       }
 
       if (!mounted) return;
-      final tripDistanceText = _resolveDistanceText(
-        rideRoute.distanceText,
-        _pickupLocation,
-        _dropLocation,
+      if (routeRevision != _routeRevision) return;
+
+      final navDistanceText = _resolveDistanceText(
+        navRoute.distanceText,
+        _driverLocation,
+        navDestination,
       );
-      final driverDistanceText = driverRoute != null
+      final tripDistanceText = tripOverview != null
           ? _resolveDistanceText(
-              driverRoute.distanceText,
-              _driverLocation,
+              tripOverview.distanceText,
               _pickupLocation,
+              _dropLocation,
             )
-          : tripDistanceText;
+          : navDistanceText;
+
       setState(() {
-        // Store trip distance (pickup to destination) - this is constant
+        _navRoutePoints = List<LatLng>.from(navRoute.points);
         _tripDistanceText = tripDistanceText;
-        _tripDurationText = _formatEtaMinutes((rideRoute.duration / 60).ceil());
+        _tripDurationText = _formatEtaMinutes(
+          ((tripOverview ?? navRoute).duration / 60).ceil(),
+        );
 
-        // Store driver ETA to pickup (cap at 2 hours to avoid confusing "10+ hours" display)
-        if (driverRoute != null) {
-          _driverEtaText =
-              _formatEtaMinutes((driverRoute.duration / 60).ceil());
-          _driverDistanceText = driverDistanceText;
-        }
-
-        // Show ETA based on current state
         if (_isPickedUp) {
-          // After pickup: show distance/time to destination
-          _distanceText = tripDistanceText;
-          _durationText = _formatEtaMinutes((rideRoute.duration / 60).ceil());
+          _distanceText = navDistanceText;
+          _durationText = _formatEtaMinutes((navRoute.duration / 60).ceil());
+          _currentEtaMinutes = (navRoute.duration / 60).ceil();
+          _currentDistanceMeters = navRoute.distance.toDouble();
         } else {
-          // Before pickup: show driver's ETA to pickup
-          _distanceText = driverDistanceText;
-          _durationText = driverRoute != null
-              ? _formatEtaMinutes((driverRoute.duration / 60).ceil())
-              : _formatEtaMinutes((rideRoute.duration / 60).ceil());
+          _driverEtaText = _formatEtaMinutes((navRoute.duration / 60).ceil());
+          _driverDistanceText = navDistanceText;
+          _distanceText = navDistanceText;
+          _durationText = _formatEtaMinutes((navRoute.duration / 60).ceil());
+          _currentEtaMinutes = (navRoute.duration / 60).ceil();
+          _currentDistanceMeters = navRoute.distance.toDouble();
         }
 
-        // Uber/Rapido-style: thin, clean polylines
+        final Color mainColor =
+            _isPickedUp ? const Color(0xFF4285F4) : const Color(0xFFD4956A);
+        final Color borderColor =
+            _isPickedUp ? const Color(0xFF1A1A1A) : const Color(0xFF8B5E3C);
+
         _polylines = {
-          // Main ride route border (pickup → drop)
+          // Active navigation route (driver → target) — this is what re-routes.
           Polyline(
-            polylineId: const PolylineId('ride_route_border'),
-            points: rideRoute.points,
-            color: const Color(0xFF1A1A1A),
+            polylineId: const PolylineId('nav_route_border'),
+            points: navRoute.points,
+            color: borderColor,
             width: 5,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
+            patterns: _isPickedUp
+                ? const <PatternItem>[]
+                : [PatternItem.dash(12), PatternItem.gap(8)],
           ),
-          // Main ride route fill
           Polyline(
-            polylineId: const PolylineId('ride_route'),
-            points: rideRoute.points,
-            color: const Color(0xFF4285F4),
+            polylineId: const PolylineId('nav_route'),
+            points: navRoute.points,
+            color: mainColor,
             width: 3,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
             jointType: JointType.round,
+            patterns: _isPickedUp
+                ? const <PatternItem>[]
+                : [PatternItem.dash(12), PatternItem.gap(8)],
           ),
         };
 
-        // Driver → Pickup: dashed orange (before pickup)
-        if (!_isPickedUp && driverRoute != null) {
+        if (!_isPickedUp && tripOverview != null) {
           _polylines.add(
             Polyline(
-              polylineId: const PolylineId('driver_route_border'),
-              points: driverRoute.points,
-              color: const Color(0xFF8B5E3C),
-              width: 5,
+              polylineId: const PolylineId('trip_overview_border'),
+              points: tripOverview.points,
+              color: const Color(0xFF1A1A1A),
+              width: 4,
               startCap: Cap.roundCap,
               endCap: Cap.roundCap,
               jointType: JointType.round,
-              patterns: [PatternItem.dash(12), PatternItem.gap(8)],
             ),
           );
           _polylines.add(
             Polyline(
-              polylineId: const PolylineId('driver_route'),
-              points: driverRoute.points,
-              color: const Color(0xFFD4956A),
-              width: 3,
+              polylineId: const PolylineId('trip_overview'),
+              points: tripOverview.points,
+              color: const Color(0xFF4285F4),
+              width: 2,
               startCap: Cap.roundCap,
               endCap: Cap.roundCap,
               jointType: JointType.round,
-              patterns: [PatternItem.dash(12), PatternItem.gap(8)],
             ),
           );
         }
@@ -1038,12 +1071,198 @@ class _DriverActiveRideScreenState
         _isLoadingRoute = false;
       });
 
-      // Fit bounds to show all points
+      _lastRouteRecalculationAt = DateTime.now();
       _fitAllBounds();
+      debugPrint(
+        '🗺️ [DriverRoute] OK points=${navRoute.points.length} '
+        'distance=${(navRoute.distance / 1000).toStringAsFixed(2)}km '
+        'eta=${(navRoute.duration / 60).ceil()}min',
+      );
     } catch (e) {
-      debugPrint('Route calculation error: $e');
-      setState(() => _isLoadingRoute = false);
+      debugPrint('🗺️ [DriverRoute] error: $e');
+      if (mounted) setState(() => _isLoadingRoute = false);
+    } finally {
+      _isCalculatingRoute = false;
     }
+  }
+
+  void _recalculateRouteIfNeeded(LatLng latestDriverLocation) {
+    if (_navRoutePoints.length < 2) {
+      unawaited(_calculateRoute());
+      return;
+    }
+
+    final snap = _findNearestPointOnPolyline(latestDriverLocation, _navRoutePoints);
+    final distanceFromRoute = snap.distance;
+
+    // On-route: drop the covered portion so the trail behind the cab disappears.
+    if (distanceFromRoute <= _onRouteSnapMeters) {
+      _trimCoveredNavRoute(snap);
+      return;
+    }
+
+    if (distanceFromRoute <= _deviationThresholdMeters) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final lastAt = _lastRouteRecalculationAt;
+    final cooledDown = lastAt == null ||
+        now.difference(lastAt) >= _routeRecalculationCooldown;
+    if (!cooledDown) {
+      debugPrint(
+        '⏳ [DriverRoute] skip re-route (cooldown) '
+        'offBy=${distanceFromRoute.toStringAsFixed(0)}m',
+      );
+      return;
+    }
+
+    debugPrint(
+      '🔄 [DriverRoute] re-route triggered '
+      'offBy=${distanceFromRoute.toStringAsFixed(0)}m '
+      'phase=${_isPickedUp ? "DROPOFF" : "PICKUP"}',
+    );
+    unawaited(_calculateRoute());
+  }
+
+  /// Remove polyline behind the driver (covered distance).
+  void _trimCoveredNavRoute(_NavPolylineSnap snap) {
+    if (snap.segmentIndex < 0 || _navRoutePoints.length < 2) return;
+
+    final start = _navRoutePoints.first;
+    final advancedMeters = _distanceMeters(
+      start.latitude,
+      start.longitude,
+      snap.point.latitude,
+      snap.point.longitude,
+    );
+    // Avoid flickering while still essentially at the route start.
+    if (snap.segmentIndex == 0 && advancedMeters < _minCoveredTrimMeters) {
+      return;
+    }
+
+    final trimmed = <LatLng>[snap.point];
+    if (snap.segmentIndex + 1 < _navRoutePoints.length) {
+      trimmed.addAll(_navRoutePoints.sublist(snap.segmentIndex + 1));
+    }
+    if (trimmed.length < 2) return;
+    if (trimmed.length == _navRoutePoints.length &&
+        trimmed.first.latitude == _navRoutePoints.first.latitude &&
+        trimmed.first.longitude == _navRoutePoints.first.longitude) {
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _navRoutePoints = trimmed;
+      _updateNavPolylinesOnly(trimmed);
+    });
+  }
+
+  void _updateNavPolylinesOnly(List<LatLng> points) {
+    final Color mainColor =
+        _isPickedUp ? const Color(0xFF4285F4) : const Color(0xFFD4956A);
+    final Color borderColor =
+        _isPickedUp ? const Color(0xFF1A1A1A) : const Color(0xFF8B5E3C);
+
+    // Keep trip overview (pickup→drop) if present; replace only nav layers.
+    final kept = _polylines
+        .where((p) =>
+            p.polylineId.value == 'trip_overview' ||
+            p.polylineId.value == 'trip_overview_border')
+        .toSet();
+
+    _polylines = {
+      ...kept,
+      Polyline(
+        polylineId: const PolylineId('nav_route_border'),
+        points: points,
+        color: borderColor,
+        width: 5,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+        patterns: _isPickedUp
+            ? const <PatternItem>[]
+            : [PatternItem.dash(12), PatternItem.gap(8)],
+      ),
+      Polyline(
+        polylineId: const PolylineId('nav_route'),
+        points: points,
+        color: mainColor,
+        width: 3,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+        patterns: _isPickedUp
+            ? const <PatternItem>[]
+            : [PatternItem.dash(12), PatternItem.gap(8)],
+      ),
+    };
+  }
+
+  _NavPolylineSnap _findNearestPointOnPolyline(
+      LatLng point, List<LatLng> polyline) {
+    if (polyline.isEmpty) {
+      return _NavPolylineSnap(
+          point: point, distance: double.infinity, segmentIndex: -1);
+    }
+    if (polyline.length == 1) {
+      return _NavPolylineSnap(
+        point: polyline.first,
+        distance: _distanceMeters(
+          point.latitude,
+          point.longitude,
+          polyline.first.latitude,
+          polyline.first.longitude,
+        ),
+        segmentIndex: 0,
+      );
+    }
+
+    double minDistance = double.infinity;
+    LatLng nearestPoint = polyline.first;
+    int nearestSegmentIndex = 0;
+
+    for (var i = 0; i < polyline.length - 1; i++) {
+      final projected =
+          _projectPointOntoSegment(point, polyline[i], polyline[i + 1]);
+      final d = _distanceMeters(
+        point.latitude,
+        point.longitude,
+        projected.latitude,
+        projected.longitude,
+      );
+      if (d < minDistance) {
+        minDistance = d;
+        nearestPoint = projected;
+        nearestSegmentIndex = i;
+      }
+    }
+
+    return _NavPolylineSnap(
+      point: nearestPoint,
+      distance: minDistance,
+      segmentIndex: nearestSegmentIndex,
+    );
+  }
+
+  LatLng _projectPointOntoSegment(
+      LatLng point, LatLng segmentStart, LatLng segmentEnd) {
+    final px = point.longitude;
+    final py = point.latitude;
+    final ax = segmentStart.longitude;
+    final ay = segmentStart.latitude;
+    final bx = segmentEnd.longitude;
+    final by = segmentEnd.latitude;
+
+    final dx = bx - ax;
+    final dy = by - ay;
+    if (dx == 0 && dy == 0) return segmentStart;
+
+    final t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+    final clampedT = t.clamp(0.0, 1.0);
+    return LatLng(ay + clampedT * dy, ax + clampedT * dx);
   }
 
   void _updateRealtimeEtaTexts() {
@@ -2764,6 +2983,18 @@ class _DriverActiveRideScreenState
       ],
     );
   }
+}
+
+class _NavPolylineSnap {
+  final LatLng point;
+  final double distance;
+  final int segmentIndex;
+
+  const _NavPolylineSnap({
+    required this.point,
+    required this.distance,
+    required this.segmentIndex,
+  });
 }
 
 // ─── Real-time Chat Bottom Sheet for Driver ─────────────────────

@@ -10,6 +10,7 @@ import '../../../../core/theme/app_colors.dart';
 import '../../../../core/router/app_routes.dart';
 import '../../../../core/widgets/draggable_active_ride_banner.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import 'package:ride_hailing_flutter/core/widgets/raahi_mandala_background.dart';
 import '../../../../core/widgets/uber_shimmer.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
@@ -247,8 +248,12 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
         if (!didPop) _exitHistory(context);
       },
       child: Scaffold(
-        backgroundColor: Colors.white,
+        backgroundColor: RaahiMandalaBackground.beige,
         appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          surfaceTintColor: Colors.transparent,
           leading: FigmaSquareBackButton(
             onPressed: () => _exitHistory(context),
           ),
@@ -278,19 +283,22 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen>
             ],
           ),
         ),
-        body: Stack(
-          children: [
-            TabBarView(
-              controller: _tabController,
-              children: [
-                _buildRidesTab(tr),
-                _buildRescueTab(),
-              ],
-            ),
-            const Positioned.fill(
-              child: DraggableActiveRideBanner(),
-            ),
-          ],
+        body: RaahiMandalaStack(
+          expand: true,
+          child: Stack(
+            children: [
+              TabBarView(
+                controller: _tabController,
+                children: [
+                  _buildRidesTab(tr),
+                  _buildRescueTab(),
+                ],
+              ),
+              const Positioned.fill(
+                child: DraggableActiveRideBanner(),
+              ),
+            ],
+          ),
         ),
       ),
     );
