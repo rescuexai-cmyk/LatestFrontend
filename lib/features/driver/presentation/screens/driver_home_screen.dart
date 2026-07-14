@@ -37,6 +37,7 @@ import '../../../../core/widgets/figma_square_back_button.dart';
 import '../../../../core/widgets/user_avatar.dart';
 import '../../../../core/utils/media_url.dart';
 import '../../../../core/theme/primary_cta_styles.dart';
+import '../../../../core/widgets/email_verification_sheet.dart';
 
 class DriverHomeScreen extends ConsumerStatefulWidget {
   const DriverHomeScreen({super.key});
@@ -58,6 +59,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       _acceptingRideId; // CRITICAL: Track which ride is being accepted to disable button
   bool _canStartRides = true; // Backend-driven; fetched on load
   bool _isPersonalRescueDriver = false;
+  bool _emailVerified = true; // Assume verified until status loads
+  String? _driverEmail;
+  bool _emailBannerOnly = false;
+  bool _hasDriverPass = false;
   String? _verificationBannerMsg; // Non-null when driver is not yet verified
   double _todayEarnings = 0.0;
   int _todayTrips = 0;
@@ -225,8 +230,24 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           .read(driverOnboardingProvider.notifier)
           .fetchOnboardingStatus();
       if (!mounted) return;
+
+      var emailVerified = status.emailVerified;
+      var driverEmail = status.email;
+      try {
+        final ev = await apiClient.getEmailVerificationStatus();
+        final data = (ev['data'] as Map?)?.cast<String, dynamic>() ?? {};
+        emailVerified = data['emailVerified'] == true;
+        driverEmail = (data['email'] as String?) ?? driverEmail;
+      } catch (e) {
+        debugPrint('Email verification status fetch failed: $e');
+      }
+
+      if (!mounted) return;
       setState(() {
         _canStartRides = status.canStartRides;
+        _emailVerified = emailVerified;
+        _driverEmail = driverEmail;
+        _emailBannerOnly = false;
         if (!status.canStartRides) {
           switch (status.onboardingStatus) {
             case OnboardingStatus.documentVerification:
@@ -248,6 +269,10 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
                   'Your account is not eligible to accept rides right now.';
               break;
           }
+        } else if (!emailVerified) {
+          _emailBannerOnly = true;
+          _verificationBannerMsg =
+              'Verify your email before going online. Tap to verify.';
         } else {
           _verificationBannerMsg = null;
         }
@@ -257,11 +282,46 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     }
   }
 
+  Future<bool> _ensureEmailVerifiedBeforeGoingOnline() async {
+    if (_emailVerified) return true;
+    final verified = await EmailVerificationSheet.show(
+      context,
+      initialEmail: _driverEmail,
+      allowDismiss: true,
+      title: 'Verify email to go online',
+      subtitle:
+          'Enter the code we send to your email. You can finish onboarding without this, but going online requires a verified email.',
+    );
+    if (verified == true) {
+      if (mounted) {
+        setState(() {
+          _emailVerified = true;
+          if (_emailBannerOnly) {
+            _verificationBannerMsg = null;
+            _emailBannerOnly = false;
+          }
+        });
+      }
+      return true;
+    }
+    if (mounted) {
+      AppMessenger.showDriverErrorBanner(
+        context,
+        'Verify your email before going online.',
+      );
+    }
+    return false;
+  }
+
   /// Fetch subscription status from backend on screen load.
   Future<void> _fetchSubscriptionStatus() async {
     try {
       await ref.read(driverSubscriptionProvider.notifier).checkSubscriptionStatus();
-      debugPrint('📅 Subscription status fetched');
+      final sub = ref.read(driverSubscriptionProvider).subscription;
+      if (mounted) {
+        setState(() => _hasDriverPass = sub?.hasDriverPass ?? false);
+      }
+      debugPrint('📅 Subscription status fetched (hasDriverPass=$_hasDriverPass)');
     } catch (e) {
       debugPrint('Failed to fetch subscription status: $e');
     }
@@ -1090,6 +1150,18 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
         affectsEligibility: false,
       );
     }
+    if (lower.contains('email_not_verified') ||
+        lower.contains('verify your email') ||
+        lower.contains('email_required')) {
+      return _BackendError(
+        title: 'Email Verification Required',
+        body: 'Verify your email before going online.',
+        cta: 'Verify Email',
+        allowRetry: false,
+        affectsEligibility: false,
+        isEmailVerification: true,
+      );
+    }
     if (lower.contains('not verified') ||
         lower.contains('verification') ||
         lower.contains('driver_not_verified')) {
@@ -1316,6 +1388,19 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   Future<void> _handleDriverBlockedAfterStatusUpdate(
       _BackendError classified) async {
     if (!mounted) return;
+    if (classified.isEmailVerification) {
+      final ok = await _ensureEmailVerifiedBeforeGoingOnline();
+      if (ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Email verified. Tap Go Online again.'),
+            backgroundColor: Color(0xFF2ECC71),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
     if (classified.isPenalty || classified.offerPenaltyResolution) {
       final resolved = await _tryShowPenaltyFlowForBlockedDriver();
       if (resolved) return;
@@ -1933,17 +2018,28 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
 
       case 'DRIVER_PASS_ENABLED':
       case 'DRIVER_PASS_DISABLED':
+        final enabled = event == 'DRIVER_PASS_ENABLED';
+        if (mounted) {
+          setState(() => _hasDriverPass = enabled);
+        }
+        // Refresh subscription gate + penalties so go-online unlocks immediately.
+        await ref.read(driverSubscriptionProvider.notifier).checkSubscriptionStatus();
+        if (enabled) {
+          _penaltyLikelyAfterEarlyStop = false;
+          ref.read(driverPenaltyProvider.notifier).markPenaltiesClearedLocally();
+          await ref.read(driverPenaltyProvider.notifier).checkPenaltyStatus();
+        }
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               message.isNotEmpty
                   ? message
-                  : (event == 'DRIVER_PASS_ENABLED'
-                      ? 'Driver pass activated. Go-offline penalties are waived.'
+                  : (enabled
+                      ? 'Driver pass activated. Daily fee and go-offline penalties are waived.'
                       : 'Driver pass deactivated.'),
             ),
-            backgroundColor: event == 'DRIVER_PASS_ENABLED'
+            backgroundColor: enabled
                 ? const Color(0xFF2ECC71)
                 : Colors.orange.shade800,
             behavior: SnackBarBehavior.floating,
@@ -2395,6 +2491,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
     if (!_isOnline) {
       // ---- GOING ONLINE ----
 
+      final emailOk = await _ensureEmailVerifiedBeforeGoingOnline();
+      if (!emailOk) return;
+
       if (!_isPersonalRescueDriver) {
         // 1. Check subscription status from backend
         final subscriptionAllowed = await _checkSubscriptionBeforeGoingOnline();
@@ -2542,6 +2641,13 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
       }
     } else {
       // ---- GOING OFFLINE ----
+
+      // Admin pass waives stop-riding penalty — skip the warning dialog.
+      if (_hasDriverPass) {
+        _penaltyLikelyAfterEarlyStop = false;
+        await _goOffline();
+        return;
+      }
 
       // Check if session is within 24 hours → show penalty warning
       final within24h = await _isSessionWithin24h();
@@ -2736,25 +2842,41 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   }
 
   Widget _buildVerificationBanner() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+    return Material(
       color: const Color(0xFFFFF3E0),
-      child: Row(
-        children: [
-          const Icon(Icons.hourglass_top_rounded,
-              color: Color(0xFFE65100), size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              _verificationBannerMsg!,
-              style: const TextStyle(
-                  fontSize: 13,
-                  color: Color(0xFFE65100),
-                  fontWeight: FontWeight.w500),
-            ),
+      child: InkWell(
+        onTap: _emailBannerOnly
+            ? () async {
+                await _ensureEmailVerifiedBeforeGoingOnline();
+              }
+            : null,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Icon(
+                _emailBannerOnly
+                    ? Icons.mark_email_unread_outlined
+                    : Icons.hourglass_top_rounded,
+                color: const Color(0xFFE65100),
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  _verificationBannerMsg!,
+                  style: const TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFFE65100),
+                      fontWeight: FontWeight.w500),
+                ),
+              ),
+              if (_emailBannerOnly)
+                const Icon(Icons.chevron_right, color: Color(0xFFE65100)),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -2853,6 +2975,8 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
   void _showSubscriptionInfo() {
     final subscriptionState = ref.read(driverSubscriptionProvider);
     final subscription = subscriptionState.subscription;
+    final isAdminPass =
+        _hasDriverPass || subscription?.hasDriverPass == true;
 
     showDialog(
       context: context,
@@ -2862,14 +2986,23 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen>
           children: [
             Icon(Icons.verified, color: Colors.green.shade600),
             const SizedBox(width: 8),
-            const Text('Daily Pass Active',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text(isAdminPass ? 'Driver Pass Active' : 'Daily Pass Active',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (isAdminPass)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(
+                  subscription?.message ??
+                      'Admin pass active — daily fee and go-offline penalties are waived.',
+                  style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+                ),
+              ),
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -8238,6 +8371,7 @@ class _BackendError {
   final bool isPenalty;
   /// When true, call penalty status API and show wallet/UPI flow if a penalty exists.
   final bool offerPenaltyResolution;
+  final bool isEmailVerification;
 
   const _BackendError({
     required this.title,
@@ -8247,5 +8381,6 @@ class _BackendError {
     required this.affectsEligibility,
     this.isPenalty = false,
     this.offerPenaltyResolution = false,
+    this.isEmailVerification = false,
   });
 }

@@ -645,6 +645,46 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
+  Future<void> _handleAppleLogin() async {
+    if (_isSocialLoading || _isOtpLoading || _isVerifyLoading) return;
+    setState(() => _isSocialLoading = true);
+    final result = await ref.read(authStateProvider.notifier).signInWithApple();
+    if (!mounted) return;
+    setState(() => _isSocialLoading = false);
+
+    if (!result.success) {
+      if (result.cancelled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            behavior: SnackBarBehavior.floating,
+            content: Text(
+              'Apple sign-in was cancelled. You can try again whenever you\'re ready.',
+            ),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        return;
+      }
+      AppMessenger.showErrorBanner(
+        context,
+        result.error ?? 'Apple login failed',
+      );
+      return;
+    }
+
+    if (result.requiresPhone) {
+      context.go('${AppRoutes.phoneNumber}?mode=linkPhone');
+      return;
+    }
+
+    if (result.isNewUser) {
+      final phoneValue = ref.read(currentUserProvider)?.phone ?? '';
+      context.go('${AppRoutes.nameEntry}?phone=$phoneValue');
+    } else {
+      context.go(AppRoutes.home);
+    }
+  }
+
   Future<String?> _askPhoneNumber({
     required String title,
     required String hint,
@@ -764,6 +804,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     final bottomSafe = mq.viewPadding.bottom;
     final keyboardOpen = keyboardInset > 0;
     final showApple = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final showTruecaller =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
     final blocked = _isSocialLoading || _isOtpLoading || _isVerifyLoading;
 
     final sheetTop = keyboardOpen
@@ -931,6 +973,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                               !_isOtpLoading &&
                               !_isVerifyLoading,
                         ),
+                        if (showTruecaller) ...[
+                          const SizedBox(height: 14),
+                          _buildContinueTruecaller(
+                            enabled: !_isSocialLoading &&
+                                !_isOtpLoading &&
+                                !_isVerifyLoading,
+                          ),
+                        ],
                         if (showApple) ...[
                           const SizedBox(height: 14),
                           _buildContinueApple(
@@ -1239,6 +1289,36 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     );
   }
 
+  Widget _buildContinueTruecaller({required bool enabled}) {
+    return SizedBox(
+      width: double.infinity,
+      height: 54,
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: const Color(0xFF2C2C2C),
+          backgroundColor: Colors.white,
+          side: const BorderSide(color: Color(0xFFE8E0D4)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+        onPressed: enabled ? _handleTruecallerLogin : null,
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.phone_in_talk_rounded,
+                size: 22, color: Color(0xFF0088CC)),
+            SizedBox(width: 10),
+            Text(
+              'Continue with Truecaller',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildContinueApple({required bool enabled}) {
     return SizedBox(
       width: double.infinity,
@@ -1265,14 +1345,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  void _handleAppleLogin() {
-    if (_isSocialLoading || _isOtpLoading || _isVerifyLoading) return;
-    AppMessenger.showErrorBanner(
-      context,
-      'Sign in with Apple is coming soon.',
     );
   }
 }

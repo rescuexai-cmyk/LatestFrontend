@@ -389,6 +389,36 @@ class ApiClient {
     }
   }
 
+  /// Authenticate with Apple identity token.
+  /// Backend: POST /api/auth/apple
+  Future<Map<String, dynamic>> authenticateWithApple({
+    required String identityToken,
+    String? nonce,
+    String? email,
+    String? firstName,
+    String? lastName,
+  }) async {
+    try {
+      final response = await _dio.post('/api/auth/apple', data: {
+        'identityToken': identityToken,
+        if (nonce != null && nonce.isNotEmpty) 'nonce': nonce,
+        if (email != null && email.isNotEmpty) 'email': email,
+        if (firstName != null && firstName.isNotEmpty) 'firstName': firstName,
+        if (lastName != null && lastName.isNotEmpty) 'lastName': lastName,
+      });
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      debugPrint('Apple auth error: ${e.response?.data}');
+      if (e.response?.data != null && e.response?.data is Map) {
+        return e.response!.data as Map<String, dynamic>;
+      }
+      return {
+        'success': false,
+        'message': e.response?.statusMessage ?? 'Apple authentication failed',
+      };
+    }
+  }
+
   /// Authenticate with Truecaller data.
   /// Backend: POST /api/auth/truecaller
   /// body: { phone? } or { profile?, truecallerToken?/accessToken? }
@@ -460,6 +490,34 @@ class ApiClient {
   /// Returns: { success, data: { user: { id, email, phone, firstName, lastName, ... } } }
   Future<Map<String, dynamic>> getCurrentUser() async {
     final response = await _dio.get('/api/auth/me');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Backend: GET /api/auth/smtp/status
+  Future<Map<String, dynamic>> getSmtpStatus() async {
+    final response = await _dio.get('/api/auth/smtp/status');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Backend: GET /api/auth/email-verification/status
+  Future<Map<String, dynamic>> getEmailVerificationStatus() async {
+    final response = await _dio.get('/api/auth/email-verification/status');
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Backend: POST /api/auth/email-verification/send  body: { email? }
+  Future<Map<String, dynamic>> sendEmailVerification({String? email}) async {
+    final response = await _dio.post('/api/auth/email-verification/send', data: {
+      if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+    });
+    return response.data as Map<String, dynamic>;
+  }
+
+  /// Backend: POST /api/auth/email-verification/verify  body: { otp }
+  Future<Map<String, dynamic>> verifyEmailOtp(String otp) async {
+    final response = await _dio.post('/api/auth/email-verification/verify', data: {
+      'otp': otp.trim(),
+    });
     return response.data as Map<String, dynamic>;
   }
 

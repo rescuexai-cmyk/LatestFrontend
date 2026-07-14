@@ -1,20 +1,26 @@
 import 'package:equatable/equatable.dart';
 
-enum SubscriptionStatus { active, expired, neverPurchased }
+enum SubscriptionStatus { active, expired, neverPurchased, adminPass }
 
 class DriverSubscription extends Equatable {
   final String driverId;
   final DateTime? lastPaidAt;
   final DateTime? validTill;
   final bool isActive;
+  final bool allowOnline;
+  final bool hasDriverPass;
   final SubscriptionStatus status;
+  final String? message;
 
   const DriverSubscription({
     required this.driverId,
     this.lastPaidAt,
     this.validTill,
     required this.isActive,
+    this.allowOnline = false,
+    this.hasDriverPass = false,
     required this.status,
+    this.message,
   });
 
   factory DriverSubscription.fromJson(Map<String, dynamic> json) {
@@ -34,6 +40,9 @@ class DriverSubscription extends Equatable {
       switch (value.toString().toLowerCase()) {
         case 'active':
           return SubscriptionStatus.active;
+        case 'admin_pass':
+        case 'adminpass':
+          return SubscriptionStatus.adminPass;
         case 'expired':
           return SubscriptionStatus.expired;
         default:
@@ -41,16 +50,25 @@ class DriverSubscription extends Equatable {
       }
     }
 
+    final allowOnline = data['allowOnline'] == true;
+    final hasDriverPass = data['hasDriverPass'] == true ||
+        data['has_driver_pass'] == true;
+    final isActive = allowOnline || data['isActive'] == true || hasDriverPass;
+
     return DriverSubscription(
       driverId: data['driverId']?.toString() ?? '',
       lastPaidAt: parseDateTime(data['lastPaidAt']),
       validTill: parseDateTime(data['validTill']),
-      isActive: data['allowOnline'] == true || data['isActive'] == true,
+      isActive: isActive,
+      allowOnline: allowOnline || isActive,
+      hasDriverPass: hasDriverPass,
       status: parseStatus(data['status']),
+      message: data['message']?.toString(),
     );
   }
 
-  bool get canGoOnline => isActive && status == SubscriptionStatus.active;
+  /// Trust backend allowOnline (covers paid daily pass + admin pass).
+  bool get canGoOnline => allowOnline || hasDriverPass || isActive;
 
   Duration? get remainingTime {
     if (validTill == null) return null;
@@ -81,7 +99,8 @@ class DriverSubscription extends Equatable {
   }
 
   @override
-  List<Object?> get props => [driverId, lastPaidAt, validTill, isActive, status];
+  List<Object?> get props =>
+      [driverId, lastPaidAt, validTill, isActive, allowOnline, hasDriverPass, status, message];
 }
 
 class SubscriptionActivationResponse extends Equatable {

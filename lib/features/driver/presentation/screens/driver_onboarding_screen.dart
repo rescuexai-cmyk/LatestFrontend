@@ -13,6 +13,7 @@ import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/services/app_language_service.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
 import 'package:ride_hailing_flutter/core/widgets/figma_square_back_button.dart';
+import '../../../../core/widgets/email_verification_sheet.dart';
 class DriverOnboardingScreen extends ConsumerStatefulWidget {
   final bool isUpdateMode;
   final bool returnToProfileOnBack;
@@ -304,7 +305,16 @@ class _LanguageSelectionPageState extends ConsumerState<_LanguageSelectionPage> 
         setState(() => _isSavingEmail = false);
         
         if (success) {
-          widget.onContinue();
+          // Optional verify now (option B — not required to continue onboarding).
+          await EmailVerificationSheet.show(
+            context,
+            initialEmail: email,
+            allowDismiss: true,
+            title: 'Verify your email',
+            subtitle:
+                'Optional for now — you can continue onboarding. Email must be verified before you go online.',
+          );
+          if (mounted) widget.onContinue();
         } else {
           AppMessenger.showDriverErrorBanner(context, ref.tr('email_save_failed'));
         }

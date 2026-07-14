@@ -10,6 +10,7 @@ import '../../../core/services/websocket_service.dart';
 import '../../../core/services/realtime_service.dart';
 import '../../../core/services/firebase_phone_auth_service.dart';
 import '../../../core/services/google_auth_service.dart';
+import '../../../core/services/apple_auth_service.dart';
 import '../../../core/services/push_notification_service.dart';
 import '../../driver/providers/driver_rides_provider.dart';
 
@@ -590,7 +591,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   bool _requiresPhoneLink(String? phone) {
     final value = (phone ?? '').trim();
-    return value.isEmpty || value.startsWith('google_');
+    return value.isEmpty ||
+        value.startsWith('google_') ||
+        value.startsWith('apple_');
   }
 
   Future<OTPResult> resendOTP(String phone) async {
@@ -619,6 +622,39 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
       final backendResponse =
           await apiClient.authenticateWithGoogle(googleResult.idToken!);
+      return await _handleSocialAuthResponse(backendResponse);
+    } catch (e) {
+      state = state.copyWith(isLoading: false);
+      return SocialSignInResult(
+        success: false,
+        error: e.toString(),
+      );
+    }
+  }
+
+  Future<SocialSignInResult> signInWithApple() async {
+    state = state.copyWith(isLoading: true, error: null);
+    try {
+      final appleResult = await AppleAuthService.signIn();
+      if (appleResult.cancelled) {
+        state = state.copyWith(isLoading: false);
+        return const SocialSignInResult(success: false, cancelled: true);
+      }
+      if (!appleResult.success || appleResult.identityToken == null) {
+        state = state.copyWith(isLoading: false);
+        return SocialSignInResult(
+          success: false,
+          error: appleResult.error ?? 'Apple sign-in failed',
+        );
+      }
+
+      final backendResponse = await apiClient.authenticateWithApple(
+        identityToken: appleResult.identityToken!,
+        nonce: appleResult.nonce,
+        email: appleResult.email,
+        firstName: appleResult.firstName,
+        lastName: appleResult.lastName,
+      );
       return await _handleSocialAuthResponse(backendResponse);
     } catch (e) {
       state = state.copyWith(isLoading: false);

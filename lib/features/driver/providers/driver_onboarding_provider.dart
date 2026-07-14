@@ -253,6 +253,7 @@ class BackendOnboardingStatus {
 
   // Driver personal info (pre-fetched from backend for edit flow)
   final String? email;
+  final bool emailVerified;
   final String? fullName;
   final String? aadhaarNumber;
   final String? vehicleNumber;
@@ -274,6 +275,7 @@ class BackendOnboardingStatus {
     this.rejectedDocuments = const [],
     this.documentDetails = const [],
     this.email,
+    this.emailVerified = false,
     this.fullName,
     this.aadhaarNumber,
     this.vehicleNumber,
@@ -394,6 +396,8 @@ class BackendOnboardingStatus {
     final kyc = data['kyc'] as Map<String, dynamic>? ?? {};
     final aadhaarKyc = kyc['aadhaar'] as Map<String, dynamic>? ?? {};
     final parsedEmail = data['email'] as String?;
+    final parsedEmailVerified =
+        data['email_verified'] as bool? ?? data['emailVerified'] as bool? ?? false;
     final parsedFullName = data['full_name'] as String? ?? data['fullName'] as String?;
     final parsedAadhaar = aadhaarKyc['number_full'] as String?
         ?? aadhaarKyc['numberFull'] as String?
@@ -429,6 +433,7 @@ class BackendOnboardingStatus {
       rejectedDocuments: rejectedRaw,
       documentDetails: details,
       email: parsedEmail,
+      emailVerified: parsedEmailVerified,
       fullName: parsedFullName,
       aadhaarNumber: parsedAadhaar,
       vehicleNumber: parsedVehicleNumber,
