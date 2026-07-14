@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../../core/models/ride.dart';
 import '../../../../core/services/api_client.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/utils/ride_receipt_downloader.dart';
 import '../../../../core/widgets/fare_breakdown_widget.dart';
 import '../widgets/lost_and_found_sheet.dart';
 import 'package:ride_hailing_flutter/core/widgets/app_messenger.dart';
@@ -588,53 +588,35 @@ class _RideDetailsScreenState extends ConsumerState<RideDetailsScreen> {
     if (_ride == null) return;
 
     try {
-      final receipt = await apiClient.getRideReceipt(_ride!.id);
-      final receiptText = _formatReceipt(receipt);
-      await Share.share(receiptText, subject: 'Ride receipt');
-    } catch (e) {
-      debugPrint('Error fetching receipt: $e');
-      final fallback = _formatReceipt({
-        'rideId': _ride!.id,
-        'fare': _ride!.fare,
-        'pickup': _ride!.pickupLocation.address,
-        'dropoff': _ride!.destinationLocation.address,
-        'created_at': _ride!.createdAt.toIso8601String(),
-        'status': _ride!.status.name,
-      });
-      await Share.share(fallback, subject: 'Ride receipt');
-    }
-  }
+      Map<String, dynamic>? apiReceipt;
+      try {
+        apiReceipt = await apiClient.getRideReceipt(_ride!.id);
+      } catch (e) {
+        debugPrint('Receipt API unavailable, using local ride data: $e');
+      }
 
-  String _formatReceipt(Map<String, dynamic> receipt) {
-    final buffer = StringBuffer();
-    buffer.writeln('Ride Receipt');
-    buffer.writeln('Ride ID: ${receipt['rideId'] ?? receipt['id'] ?? _ride?.id}');
-    buffer.writeln('Status: ${receipt['status'] ?? _ride?.status.name}');
-    buffer.writeln('Fare: ₹${receipt['fare'] ?? receipt['total'] ?? _ride?.fare}');
-    if (receipt['pickup'] != null) buffer.writeln('Pickup: ${receipt['pickup']}');
-    if (receipt['dropoff'] != null) buffer.writeln('Dropoff: ${receipt['dropoff']}');
-    if (receipt['created_at'] != null) {
-      final ist = _tryParseToIst(receipt['created_at']);
-      buffer.writeln('Date: ${ist != null ? DateFormat('dd MMM yyyy • hh:mm a').format(ist) : receipt['created_at']}');
+      await RideReceiptDownloader.downloadAndShare(
+        ride: _ride!,
+        apiReceipt: apiReceipt,
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Receipt ready — save or share the PDF'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Error downloading receipt: $e');
+      if (!mounted) return;
+      AppMessenger.showErrorBanner(context, 'Unable to download receipt');
     }
-    if (receipt['payment_method'] != null) buffer.writeln('Payment: ${receipt['payment_method']}');
-    if (receipt['driver'] != null) buffer.writeln('Driver: ${receipt['driver']}');
-    return buffer.toString();
   }
 
   DateTime _toIst(DateTime value) {
     final utc = value.isUtc ? value : value.toUtc();
     return utc.add(const Duration(hours: 5, minutes: 30));
-  }
-
-  DateTime? _tryParseToIst(dynamic value) {
-    if (value == null) return null;
-    try {
-      final parsed = DateTime.parse(value.toString());
-      return _toIst(parsed);
-    } catch (_) {
-      return null;
-    }
   }
 
   Color _getStatusColor(RideStatus status) {

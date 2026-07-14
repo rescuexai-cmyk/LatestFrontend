@@ -1055,6 +1055,28 @@ class ApiClient {
     throw StateError('Unexpected available-services response shape');
   }
 
+  /// Whether Raahi operates at this coordinate (active zone).
+  /// Backend: GET /api/pricing/city-availability?lat=&lng=
+  Future<({bool available, String cityCode, String cityName})>
+      getCityAvailability({
+    required double lat,
+    required double lng,
+  }) async {
+    final response = await _dio.get(
+      '/api/pricing/city-availability',
+      queryParameters: {'lat': lat, 'lng': lng},
+    );
+    final root = response.data;
+    final data = (root is Map && root['data'] is Map)
+        ? Map<String, dynamic>.from(root['data'] as Map)
+        : (root is Map ? Map<String, dynamic>.from(root) : <String, dynamic>{});
+    return (
+      available: data['available'] == true,
+      cityCode: (data['cityCode'] ?? data['city_code'] ?? '').toString(),
+      cityName: (data['cityName'] ?? data['city_name'] ?? 'your city').toString(),
+    );
+  }
+
   /// Get active promo/coupon codes available to the current user.
   /// Backend: GET /api/promo/active?vehicleType=&city=
   /// Returns a list of { code, description, type, value, maxDiscount?, minFare? }.

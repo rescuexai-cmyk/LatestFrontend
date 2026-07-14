@@ -326,6 +326,54 @@ class PushNotificationService {
     );
   }
 
+  /// Welcome a rider when they install / enter a Raahi operational city.
+  /// Returns true when a notification was actually shown.
+  Future<bool> showCityWelcomeNotification(String cityName) async {
+    final notificationsEnabled = await _areNotificationsEnabledInApp();
+    if (!notificationsEnabled) return false;
+
+    // Local plugin may not be ready yet on first cold start before initialize().
+    if (!_isInitialized) {
+      try {
+        await _initializeLocalNotifications();
+      } catch (e) {
+        debugPrint('City welcome: local notifications init failed: $e');
+        return false;
+      }
+    }
+
+    final cleanCity = cityName.trim().isEmpty ? 'your city' : cityName.trim();
+    final payload = {
+      'type': 'CITY_WELCOME',
+      'city': cleanCity,
+    };
+
+    await _localNotifications.show(
+      // Stable-ish id so rapid re-fires replace rather than stack.
+      91001,
+      'Welcome to $cleanCity',
+      'Raahi welcomes you to $cleanCity. Get rides,rescued at affordable prices!',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'raahi_system',
+          'System',
+          channelDescription: 'System notifications',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: true,
+          enableVibration: true,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: jsonEncode(payload),
+    );
+    return true;
+  }
+
   /// Initialize the push notification service
   /// Call this once at app startup after Firebase.initializeApp()
   Future<void> initialize() async {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -21,6 +23,7 @@ import '../../../../core/providers/nearby_places_provider.dart';
 import '../../../../core/providers/settings_provider.dart';
 import '../../../../core/services/app_language_service.dart';
 import '../../../../core/providers/service_catalog_provider.dart';
+import '../../../../core/services/city_welcome_service.dart';
 import '../../../auth/providers/auth_provider.dart';
 import '../../../rescue/providers/rescue_booking_provider.dart';
 import '../../../ride/providers/ride_booking_provider.dart';
@@ -186,6 +189,13 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
       ref.read(rideBookingProvider.notifier).setPickupLocation(address, latLng);
       if (!mounted) return;
       await ref.read(nearbyPlacesProvider.notifier).refresh();
+      // First install / city switch welcome when Raahi operates here.
+      unawaited(
+        CityWelcomeService.maybeNotifyForLocation(
+          lat: position.latitude,
+          lng: position.longitude,
+        ),
+      );
     } catch (_) {
       if (!mounted) return;
       await ref.read(nearbyPlacesProvider.notifier).refresh();
